@@ -1,0 +1,18 @@
+{
+  "animations": [],
+  "idle_animation": "normal",
+  "click_animation": "touch",
+  "boot_animation": "normal",
+  "return_idle_animation": "normal",
+  "drag_animation": "tuozhuai",
+  "random_animations": ["dance", "sleep"],
+  "random_min_sec": 30,
+  "random_max_sec": 120,
+  "lines": [
+    { "text": "主人，柴郡在这里哦~", "animation": null },
+    { "text": "嘿嘿，跳一个给主人看！", "animation": "dance" },
+    { "text": "唔…有点困了呢…", "animation": "sleep" },
+    { "text": "摸摸柴郡好不好？", "animation": "touch" },
+    { "text": "今天也要加油呀，主人！", "animation": null }
+  ]
+}

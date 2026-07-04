@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "小寒日报",
+  "version": "0.1.0",
+  "identifier": "com.hanagent.xiaohan-daily",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/xiaohan-daily/**"]
+      }
+    },
+    "windows": [
+      {
+        "label": "main",
+        "title": "小寒日报",
+        "width": 960,
+        "height": 640,
+        "minWidth": 720,
+        "minHeight": 480,
+        "maximized": true,
+        "visible": false,
+        "resizable": true,
+        "center": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ],
+    "copyright": "Copyright © 2026 hanagent",
+    "category": "Utility",
+    "shortDescription": "本地活动追踪与日报",
+    "longDescription": "小寒日报：后台采集前台应用使用时长，本地 SQLite 持久化，数据不出本机。"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "conf_ver": 1,
+  "type": 9,
+  "options": {
+    "tex_type": 0,
+    "edge_padding": false
+  },
+  "skeleton": "chaijun.skel",
+  "atlases": [
+    {
+      "atlas": "chaijun.atlas",
+      "tex_names": [
+        "chaijun"
+      ],
+      "textures": [
+        "chaijun.png"
+      ]
+    }
+  ]
+}
