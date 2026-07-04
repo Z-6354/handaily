@@ -1,19 +1,22 @@
 import { useCallback, useEffect, useState } from "react";
 import { PersonaAddModal } from "../components/PersonaAddModal";
+import { PersonaDeleteModal } from "../components/PersonaDeleteModal";
 import { PersonaDetailPanel } from "../components/PersonaDetailPanel";
 import { SettingsFeedbackBanner } from "../components/SettingsFeedbackBanner";
 import {
   loadingFeedback,
   parseApiError,
+  successFeedback,
   type SettingsFeedback,
 } from "../lib/apiErrorMessage";
 import { xiaohan, type PersonaDetail, type PersonaInfo } from "../lib/xiaohan";
 
 const PERSONA_ACCENT: Record<string, string> = {
-  default: "#64748b",
   cheshire: "#f59e0b",
-  phoebe: "#a78bfa",
-  sora: "#94a3b8",
+  edu: "#8b5cf6",
+  wushiling: "#06b6d4",
+  qiye: "#64748b",
+  tashigan: "#3b82f6",
 };
 
 function personaInitial(name: string) {
@@ -30,6 +33,8 @@ export function PersonaPanel() {
   const [testingPersona, setTestingPersona] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<PersonaInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadPersonas = async () => {
@@ -102,6 +107,58 @@ export function PersonaPanel() {
     }
   };
 
+  const requestDelete = (id: string) => {
+    const target = personas.find((p) => p.id === id);
+    if (target?.is_builtin) return;
+    if (target) {
+      setDeleteTarget(target);
+      return;
+    }
+    if (detail?.id === id && !detail.is_builtin) {
+      setDeleteTarget({
+        id: detail.id,
+        name: detail.name,
+        source: detail.source,
+        description: detail.description,
+        active: detail.active,
+        has_profile: true,
+        is_builtin: false,
+      });
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleteTarget.is_builtin) return;
+    const { id, name: label } = deleteTarget;
+    setDeleting(true);
+    try {
+      await xiaohan.personaDelete(id);
+      setPersonaFeedback(successFeedback(`已删除人设「${label}」`));
+      setDeleteTarget(null);
+      if (detailId === id) {
+        setDetailId(null);
+        setDetail(null);
+      }
+      await loadPersonas();
+    } catch (e) {
+      setPersonaFeedback(parseApiError(e, "删除人设"));
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const deleteModal = (
+    <PersonaDeleteModal
+      open={deleteTarget !== null}
+      target={deleteTarget}
+      deleting={deleting}
+      onClose={() => {
+        if (!deleting) setDeleteTarget(null);
+      }}
+      onConfirm={confirmDelete}
+    />
+  );
+
   if (loading) {
     return <div className="persona-page persona-page--loading">加载人设…</div>;
   }
@@ -113,15 +170,19 @@ export function PersonaPanel() {
         <PersonaDetailPanel
           detail={detail}
           loading={detailLoading}
+          deleting={deleting}
           personas={personas}
           onSelectPersona={(id) => setDetailId(id)}
           onActivate={activatePersona}
+          onDelete={requestDelete}
           onBack={() => setDetailId(null)}
           onUpdated={async () => {
             await loadPersonas();
             if (detailId) await refreshDetail(detailId);
           }}
         />
+        <SettingsFeedbackBanner feedback={personaFeedback} compact />
+        {deleteModal}
       </div>
     );
   }
@@ -189,6 +250,17 @@ export function PersonaPanel() {
                       </button>
                     </>
                   )}
+                  {!p.is_builtin && (
+                    <button
+                      type="button"
+                      className="persona-card-action persona-card-action--danger"
+                      onClick={() => requestDelete(p.id)}
+                      disabled={deleting}
+                      title={`删除 ${p.name}`}
+                    >
+                      删除
+                    </button>
+                  )}
                 </div>
               </article>
             );
@@ -212,7 +284,7 @@ export function PersonaPanel() {
               <div className="persona-card-body">
                 <h3 className="persona-card-name">新增角色</h3>
                 <span className="persona-card-chip">自定义</span>
-                <p className="persona-card-desc">粘贴 Wiki、设定等非结构化文本</p>
+                <p className="persona-card-desc">粘贴 Wiki 链接或文本，AI 自动生成人设</p>
               </div>
             </button>
             <div className="persona-card-foot">
@@ -235,6 +307,7 @@ export function PersonaPanel() {
         onClose={() => setAddOpen(false)}
         onCreated={loadPersonas}
       />
+      {deleteModal}
     </div>
   );
 }

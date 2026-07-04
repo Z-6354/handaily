@@ -5,6 +5,7 @@ import { SettingsToggle } from "../components/SettingsToggle";
 import { PetActionSettings, type PetActionLayout } from "../components/PetActionSettings";
 import { PetActionFrequency } from "../components/PetActionFrequency";
 import { PetModelImport } from "../components/PetModelImport";
+import { PetModelPicker } from "../components/PetModelPicker";
 import {
   parseApiError,
   successFeedback,
@@ -49,6 +50,7 @@ export function PetPanel() {
   const [importModelName, setImportModelName] = useState("");
   const [importStaging, setImportStaging] = useState<PetImportStagingPreview | null>(null);
   const [activeTab, setActiveTab] = useState<PetTab>("overview");
+  const [switchingModelId, setSwitchingModelId] = useState<string | null>(null);
   const scaleSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const petModelIdRef = useRef(petModelId);
   const patchActionLayoutRef = useRef<(partial: Partial<PetActionLayout>) => void>(() => {});
@@ -124,21 +126,18 @@ export function PetPanel() {
   };
 
   const switchModel = async (id: string) => {
-    const prev = petModelId;
-    setPetModelId(id);
-    setBusy(true);
-    setFeedback(null);
+    if (id === petModelId || switchingModelId) return;
+    const targetName = petModels.find((m) => m.id === id)?.name ?? id;
+    setSwitchingModelId(id);
+    setFeedback({ tone: "loading", title: "切换模型", detail: "正在加载模型资源，请稍候…" });
     try {
       await xiaohan.petSetModel(id);
       await refreshStatus();
-      if (!petEnabled) {
-        setPetEnabled(true);
-      }
+      setFeedback(successFeedback(`已切换至「${targetName}」`));
     } catch (err) {
-      setPetModelId(prev);
       setFeedback(parseApiError(err, "切换模型"));
     } finally {
-      setBusy(false);
+      setSwitchingModelId(null);
     }
   };
 
@@ -253,10 +252,13 @@ export function PetPanel() {
       const info = await xiaohan.petCommitImport(name);
       await refreshStatus();
       await xiaohan.petSetModel(info.id);
-      setPetModelId(info.id);
+      const status = await xiaohan.petGetStatus();
+      if (!status.enabled) {
+        await xiaohan.petSetEnabled(true);
+      }
+      await refreshStatus();
       setImportModelName("");
       setImportStaging(null);
-      setPetEnabled(true);
       setFeedback(successFeedback(`已导入「${info.name}」，已套用默认动作模板`));
     } catch (e) {
       setFeedback(parseApiError(e, "导入模型"));
@@ -298,25 +300,14 @@ export function PetPanel() {
   const currentModel = petModels.find((m) => m.id === petModelId);
 
   const modelPicker = (
-    <div className="pet-model-picker">
-      <label className="pet-model-picker-label" htmlFor="pet-model-select">
-        当前模型
-      </label>
-      <select
-        id="pet-model-select"
-        className="pet-model-picker-select settings-select"
-        value={petModelId}
-        disabled={busy}
-        onChange={(e) => void switchModel(e.target.value)}
-      >
-        {petModels.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.name}
-            {m.builtin ? "（内置）" : ""}
-          </option>
-        ))}
-      </select>
-    </div>
+    <PetModelPicker
+      models={petModels}
+      activeId={petModelId}
+      switchingId={switchingModelId}
+      disabled={loading || Boolean(loadError)}
+      onSelect={(id) => void switchModel(id)}
+      layout="compact"
+    />
   );
 
   const overviewBadge = petEnabled
@@ -384,6 +375,15 @@ export function PetPanel() {
           <div className="pet-tab-panels">
             {activeTab === "overview" && (
               <div className="pet-tab-panel pet-overview-body" role="tabpanel">
+                <PetModelPicker
+                  models={petModels}
+                  activeId={petModelId}
+                  switchingId={switchingModelId}
+                  disabled={Boolean(switchingModelId)}
+                  onSelect={(id) => void switchModel(id)}
+                  layout="grid"
+                />
+
                 <SettingsToggle
                   label="启用桌宠"
                   hint="关闭将销毁桌宠窗口；再次开启或重启应用可恢复"
@@ -480,7 +480,7 @@ export function PetPanel() {
                   randomMinSec={actionLayout.randomMinSec}
                   randomMaxSec={actionLayout.randomMaxSec}
                   randomAnimations={actionLayout.randomAnimations}
-                  busy={busy}
+                  busy={busy || Boolean(switchingModelId)}
                   onPatch={(patch) => patchActionLayoutRef.current(patch)}
                 />
               </div>

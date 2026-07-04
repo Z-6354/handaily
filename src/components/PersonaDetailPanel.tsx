@@ -6,18 +6,21 @@ import type { CharacterProfileData, PersonaDetail, PersonaInfo } from "../lib/xi
 type Tab = "skill" | "profile" | "json" | "import" | "edit";
 
 const PERSONA_ACCENT: Record<string, string> = {
-  default: "#64748b",
   cheshire: "#f59e0b",
-  phoebe: "#a78bfa",
-  sora: "#94a3b8",
+  edu: "#8b5cf6",
+  wushiling: "#06b6d4",
+  qiye: "#64748b",
+  tashigan: "#3b82f6",
 };
 
 type Props = {
   detail: PersonaDetail | null;
   loading: boolean;
+  deleting?: boolean;
   personas: PersonaInfo[];
   onSelectPersona: (id: string) => void;
   onActivate: (id: string) => void;
+  onDelete: (id: string) => void | Promise<void>;
   onBack: () => void;
   onUpdated: () => void | Promise<void>;
 };
@@ -89,9 +92,11 @@ function StructuredProfile({ data }: { data: CharacterProfileData }) {
 export function PersonaDetailPanel({
   detail,
   loading,
+  deleting = false,
   personas,
   onSelectPersona,
   onActivate,
+  onDelete,
   onBack,
   onUpdated,
 }: Props) {
@@ -125,14 +130,28 @@ export function PersonaDetailPanel({
             ))}
           </select>
         )}
-        {detail && !detail.active && (
-          <button
-            type="button"
-            className="btn-primary btn-sm"
-            onClick={() => onActivate(detail.id)}
-          >
-            选用此人设
-          </button>
+        {detail && (
+          <div className="persona-detail-actions">
+            {!detail.active && (
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                onClick={() => onActivate(detail.id)}
+              >
+                选用此人设
+              </button>
+            )}
+            {!detail.is_builtin && (
+              <button
+                type="button"
+                className="btn-secondary btn-sm persona-detail-delete"
+                disabled={deleting}
+                onClick={() => onDelete(detail.id)}
+              >
+                {deleting ? "删除中…" : "删除"}
+              </button>
+            )}
+          </div>
         )}
       </div>
 

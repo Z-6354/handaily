@@ -28,7 +28,7 @@ pub async fn chat_text_with_options(
         messages.push(serde_json::json!({"role": "system", "content": sys}));
     }
     messages.push(serde_json::json!({"role": "user", "content": user_prompt}));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "stream": false,
         "messages": messages,
@@ -36,6 +36,9 @@ pub async fn chat_text_with_options(
             "num_predict": options.max_tokens
         }
     });
+    if options.json_object {
+        body["format"] = serde_json::json!("json");
+    }
     let client = super::openai::http_client(options.timeout_secs)?;
     let resp = client
         .post(&url)

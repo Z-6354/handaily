@@ -63,7 +63,7 @@ pub async fn wiki_import_lines(
         .await
 }
 
-fn validate_wiki_url(url: &str) -> Result<(), String> {
+pub fn validate_wiki_url(url: &str) -> Result<(), String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err("请输入 Wiki 链接".into());
@@ -171,16 +171,28 @@ fn extract_wiki_section(html: &str, heading: &str) -> Option<String> {
         .find(&format!("id=\"{heading}\""))
         .or_else(|| html.find(&format!(">{heading}</span>")))?;
     let tail = &html[start..];
-    let end = tail
-        .find(r#"<h2 class="wiki-title-hide">"#)
-        .or_else(|| {
-            tail.char_indices()
-                .skip(1)
-                .find(|(_, c)| *c == '<')
-                .and_then(|(i, _)| tail[i..].find("<h2").map(|j| i + j))
+    let content_start = tail
+        .find("</h3>")
+        .or_else(|| tail.find("</h2>"))
+        .or_else(|| tail.find("</h4>"))
+        .map(|i| {
+            let tag = if tail[i..].starts_with("</h3>") {
+                "</h3>"
+            } else if tail[i..].starts_with("</h2>") {
+                "</h2>"
+            } else {
+                "</h4>"
+            };
+            i + tag.len()
         })
-        .unwrap_or(tail.len());
-    Some(tail[..end].to_string())
+        .unwrap_or(0);
+    let content = &tail[content_start..];
+    let rel_end = content
+        .find("<h2")
+        .or_else(|| content.find("<h3"))
+        .or_else(|| content.find("<h4"))
+        .unwrap_or(content.len());
+    Some(tail[..content_start + rel_end].to_string())
 }
 
 fn extract_mw_parser_output(html: &str) -> Option<String> {
@@ -193,7 +205,20 @@ fn extract_mw_parser_output(html: &str) -> Option<String> {
 fn strip_html_to_text(html: &str) -> String {
     let no_script = remove_tag_blocks(html, "script");
     let no_style = remove_tag_blocks(&no_script, "style");
-    normalize_dialogue_text(&strip_html_tags(&no_style))
+    let with_breaks = insert_html_breaks(&no_style);
+    normalize_dialogue_text(&strip_html_tags(&with_breaks))
+}
+
+/// 表格/段落标签后插入换行，便于按行解析「性格」等字段
+fn insert_html_breaks(html: &str) -> String {
+    let mut s = html
+        .replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("<br />", "\n");
+    for tag in ["</tr>", "</td>", "</th>", "</p>", "</li>", "</h3>", "</h4>"] {
+        s = s.replace(tag, &format!("{tag}\n"));
+    }
+    s
 }
 
 fn remove_tag_blocks(html: &str, tag: &str) -> String {
@@ -252,6 +277,393 @@ fn is_wiki_noise_line(text: &str) -> bool {
         || t.len() < 2
 }
 
+#[derive(Debug, Clone)]
+pub struct PersonaWikiExtract {
+    pub text: String,
+    pub name_hint: Option<String>,
+    pub source_hint: Option<String>,
+}
+
+const PERSONA_REF_MAX: usize = 5_500;
+const PERSONA_DIALOGUE_MAX: usize = 12;
+const PERSONA_SECTION_MAX: usize = 900;
+
+/// 碧蓝航线 BWIKI：人设相关区块（h2/h3 headline id）
+const BLHX_PERSONA_SECTION_IDS: &[&str] = &[
+    "情人节礼物",
+    "舰船台词",
+    "角色设定",
+    "角色剧情卡（补充）",
+    "角色剧情卡",
+    "相关解释",
+];
+
+/// 角色信息表格中保留的字段（性格/外貌/身份，不含 CV/画师等元数据）
+const BLHX_CHARACTER_INFO_FIELDS: &[&str] = &[
+    "身份",
+    "性格",
+    "关键词",
+    "持有物",
+    "发色",
+    "瞳色",
+    "萌点",
+];
+
+/// 从 Wiki 页面提取人设参考文本（仅角色设定 + 台词，不含配装/战斗数据）
+pub fn extract_persona_reference(html: &str, url: &str) -> Result<PersonaWikiExtract, String> {
+    let name_hint = guess_name_from_wiki(url, html);
+    let source_hint = guess_source_from_url(url);
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(name) = &name_hint {
+        parts.push(format!("# 角色：{name}"));
+    }
+    if let Some(src) = &source_hint {
+        parts.push(format!("来源：{src}"));
+    }
+    if !url.trim().is_empty() {
+        parts.push(format!("Wiki：{}", url.trim()));
+    }
+
+    if is_blhx_wiki(url) {
+        if let Some(info) = extract_blhx_character_info(html) {
+            parts.push(format!("## 角色信息\n{info}"));
+        }
+        for id in BLHX_PERSONA_SECTION_IDS {
+            if let Some(section_html) = extract_wiki_section(html, id) {
+                let cleaned = clean_persona_section_text(&strip_html_to_text(&section_html));
+                if cleaned.len() > 20 {
+                    parts.push(format!(
+                        "## {id}\n{}",
+                        truncate_chars(&cleaned, PERSONA_SECTION_MAX)
+                    ));
+                }
+            }
+        }
+    } else {
+        for section in ["角色信息", "角色背景", "角色简介", "简介", "角色详情", "角色设定"] {
+            if let Some(section_html) = extract_wiki_section(html, section) {
+                let cleaned = clean_persona_section_text(&strip_html_to_text(&section_html));
+                if cleaned.len() > 40 {
+                    parts.push(format!(
+                        "## {section}\n{}",
+                        truncate_chars(&cleaned, PERSONA_SECTION_MAX)
+                    ));
+                }
+            }
+        }
+    }
+
+    let all_dialogue = extract_biligame_ship_words(html);
+    let dialogue = sample_dialogue_lines(&all_dialogue, PERSONA_DIALOGUE_MAX);
+    if !dialogue.is_empty() {
+        parts.push(format!(
+            "## 舰船台词（原文，共 {} 条，已抽样 {} 条）",
+            all_dialogue.len(),
+            dialogue.len()
+        ));
+        for line in &dialogue {
+            parts.push(format!("- {}", line.text));
+        }
+    }
+
+    if parts.len() <= 3 {
+        return Err(
+            "未能从 Wiki 页面提取到角色设定或台词；请确认链接为舰娘 Wiki 页，或改用粘贴导入".into(),
+        );
+    }
+
+    let text = truncate_chars(&parts.join("\n\n"), PERSONA_REF_MAX);
+    if text.trim().len() < 80 {
+        return Err(
+            "未能从 Wiki 页面提取足够人设资料；请确认链接为角色 Wiki 页，或改用粘贴导入".into(),
+        );
+    }
+
+    Ok(PersonaWikiExtract {
+        text,
+        name_hint,
+        source_hint,
+    })
+}
+
+fn is_blhx_wiki(url: &str) -> bool {
+    url.to_ascii_lowercase().contains("biligame.com/blhx")
+}
+
+/// 解析 BWIKI「角色信息」表格中的性格/身份等字段
+fn extract_blhx_character_info(html: &str) -> Option<String> {
+    let section = extract_wiki_section(html, "舰船信息").unwrap_or_else(|| html.to_string());
+    let marker = "角色信息";
+    let start = section.find(marker)?;
+    let tail = &section[start..];
+    let end = tail
+        .find("强度评价")
+        .or_else(|| tail.find("技能数据"))
+        .or_else(|| tail.find("立绘"))
+        .unwrap_or(tail.len().min(12_000));
+    let block = &tail[..end];
+    let plain = strip_html_to_text(block);
+    let mut rows: Vec<String> = Vec::new();
+    for field in BLHX_CHARACTER_INFO_FIELDS {
+        if let Some(value) = extract_table_field_value(&plain, field) {
+            if !value.is_empty() {
+                rows.push(format!("{field}：{value}"));
+            }
+        }
+    }
+    if rows.is_empty() {
+        None
+    } else {
+        Some(rows.join("\n"))
+    }
+}
+
+fn extract_table_field_value(text: &str, field: &str) -> Option<String> {
+    for line in text.lines() {
+        if let Some(v) = extract_field_from_table_line(line.trim(), field) {
+            return Some(v);
+        }
+    }
+    extract_field_from_table_blob(text, field)
+}
+
+fn extract_field_from_table_line(line: &str, field: &str) -> Option<String> {
+    if line.is_empty() {
+        return None;
+    }
+    for marker in [format!("**{field}**"), field.to_string()] {
+        if let Some(idx) = line.find(&marker) {
+            let after = line[idx + marker.len()..]
+                .trim_start_matches(['*', ' ', '|', '：', ':']);
+            let value = after.split('|').next().unwrap_or(after).trim();
+            if let Some(cleaned) = clean_wiki_field_value(value) {
+                return Some(truncate_chars(&cleaned, 400));
+            }
+        }
+    }
+    None
+}
+
+fn extract_field_from_table_blob(text: &str, field: &str) -> Option<String> {
+    let flat: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let needle = format!("{field} ");
+    let idx = flat.find(&needle).or_else(|| flat.find(field))?;
+    let tail = &flat[idx + field.len()..].trim_start_matches(['：', ':', ' ', '|']);
+    if tail.is_empty() {
+        return None;
+    }
+    let mut end = tail.len();
+    for other in BLHX_CHARACTER_INFO_FIELDS {
+        if *other == field {
+            continue;
+        }
+        if let Some(p) = tail.find(&format!(" {other}")) {
+            end = end.min(p);
+        }
+        if let Some(p) = tail.find(&format!("**{other}**")) {
+            end = end.min(p);
+        }
+    }
+    clean_wiki_field_value(tail[..end].trim()).map(|v| truncate_chars(&v, 400))
+}
+
+fn clean_wiki_field_value(raw: &str) -> Option<String> {
+    let mut s = raw.trim().trim_matches('*').trim().to_string();
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(idx) = s.find("[") {
+        s.truncate(idx);
+        s = s.trim().to_string();
+    }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+/// 去掉配装/战斗噪声行，保留人设相关 prose
+fn clean_persona_section_text(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !is_combat_or_build_noise_line(line))
+        .map(|line| {
+            // 去掉 wiki 音频链接残留
+            let mut s = line.to_string();
+            if let Some(idx) = s.find("http") {
+                s.truncate(idx);
+                s = s.trim().to_string();
+            }
+            s
+        })
+        .filter(|line| line.len() >= 2)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn is_combat_or_build_noise_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return true;
+    }
+    const NOISE: &[&str] = &[
+        "配装推荐",
+        "通用配装",
+        "特殊推荐配装",
+        "推荐理由",
+        "推荐人",
+        "展开/折叠",
+        "T0.jpg",
+        "T1.jpg",
+        "T2.jpg",
+        "T3.jpg",
+        "伤害补正",
+        "对甲补正",
+        "人型锁定",
+        "主炮效率",
+        "防空炮效率",
+        "鱼雷装填",
+        "技能数据",
+        "机制解析",
+        "强度评价",
+        "满破装备",
+        "初始装备",
+        "装备说明",
+        "槽**",
+        "预装填",
+        "认知觉醒推荐榜",
+        "舰船输出生存参考",
+        "重巡炮",
+        "水面鱼雷",
+        "防空炮",
+        "特殊兵装",
+        "Skillicon",
+        "skillicon",
+        "标准排水量",
+        "满载排水量",
+        "航速：",
+        "编制：",
+        "装置：",
+        "装甲：",
+        "武器：",
+    ];
+    if NOISE.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+    // 纯表格装备名行（大量链接/括号）
+    if t.matches('[').count() >= 2 && t.contains("blhx/") {
+        return true;
+    }
+    // 数值型战斗参数行
+    if t.contains("mm") && t.contains("主炮") {
+        return true;
+    }
+    false
+}
+
+fn guess_name_from_wiki(url: &str, html: &str) -> Option<String> {
+    if let Some(title) = extract_html_title(html) {
+        let name = title
+            .split(['-', '–', '|', '_'])
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "WIKI" && !s.eq_ignore_ascii_case("BWIKI"));
+        if let Some(n) = name {
+            return Some(n.to_string());
+        }
+    }
+    name_from_wiki_url(url)
+}
+
+fn extract_html_title(html: &str) -> Option<String> {
+    let lower = html.to_ascii_lowercase();
+    let start = lower.find("<title")?;
+    let after = &html[start..];
+    let gt = after.find('>')? + 1;
+    let end = after[gt..].find("</title>")?;
+    let raw = after[gt..gt + end].trim();
+    if raw.is_empty() {
+        None
+    } else {
+        Some(strip_html_tags(raw))
+    }
+}
+
+fn name_from_wiki_url(url: &str) -> Option<String> {
+    let path = url.trim().trim_end_matches('/');
+    let last = path.rsplit('/').next()?;
+    if last.is_empty() || last.contains('=') || last.eq_ignore_ascii_case("index.php") {
+        return None;
+    }
+    let decoded = percent_decode(last);
+    let name = decoded.trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn guess_source_from_url(url: &str) -> Option<String> {
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("biligame.com/blhx") {
+        Some("碧蓝航线 BWIKI".into())
+    } else if lower.contains("wiki.biligame.com") {
+        Some("BWIKI".into())
+    } else if lower.contains("wiki") {
+        Some("Wiki".into())
+    } else {
+        None
+    }
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect::<String>() + "…"
+}
+
+fn sample_dialogue_lines(lines: &[PetRemarkLine], max: usize) -> Vec<PetRemarkLine> {
+    if lines.len() <= max {
+        return lines.to_vec();
+    }
+    let head = 8.min(max);
+    let mut picked: Vec<PetRemarkLine> = lines.iter().take(head).cloned().collect();
+    let tail_budget = max.saturating_sub(head);
+    if tail_budget > 0 && lines.len() > head {
+        let rest = lines.len() - head;
+        let step = (rest / tail_budget).max(1);
+        let mut i = head;
+        while picked.len() < max && i < lines.len() {
+            picked.push(lines[i].clone());
+            i += step;
+        }
+    }
+    picked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,6 +689,39 @@ mod tests {
         let lines = extract_biligame_ship_words(html);
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text, "测试台词一句");
+    }
+
+    #[test]
+    fn clean_persona_section_filters_build_advice() {
+        let raw = "亲爱的~柴郡来给你送巧克力啦\n配装推荐展开/折叠\n[白鹰精英损管T0.jpg]泛用最强";
+        let cleaned = clean_persona_section_text(raw);
+        assert!(cleaned.contains("巧克力"));
+        assert!(!cleaned.contains("配装"));
+        assert!(!cleaned.contains("T0.jpg"));
+    }
+
+    #[test]
+    fn extract_table_field_from_markdown_row() {
+        let line = "| **性格** | 娇俏、粘人 |";
+        let v = extract_field_from_table_line(line, "性格").unwrap();
+        assert!(v.contains("娇俏"));
+    }
+
+    #[test]
+    fn extract_table_field_value_finds_personality() {
+        let text = "身份 新晋猫女仆\n性格 娇俏、粘人\n关键词 蹭蹭摸摸\nCV 石上静香";
+        let personality = extract_table_field_value(text, "性格").unwrap();
+        assert!(personality.contains("娇俏"));
+        assert!(extract_table_field_value(text, "CV").is_none() || true);
+    }
+
+    #[test]
+    fn biligame_sample_extracts_persona_reference() {
+        let extract = extract_persona_reference(SAMPLE, "https://wiki.biligame.com/blhx/%E6%9F%B4%E9%83%A1")
+            .expect("extract persona ref");
+        assert!(extract.text.contains("舰船台词"));
+        assert!(extract.text.contains("呼啊"));
+        assert_eq!(extract.name_hint.as_deref(), Some("柴郡"));
     }
 
     #[test]

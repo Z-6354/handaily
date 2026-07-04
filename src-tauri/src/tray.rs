@@ -48,9 +48,8 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
+                if let Err(e) = crate::pet::show_main_window(app, None) {
+                    eprintln!("显示主窗口失败: {e}");
                 }
             }
             "pet_toggle" => {
@@ -85,6 +84,11 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             "quit" => {
+                if let Some(st) = app.try_state::<Arc<AppState>>() {
+                    st.stop_flag
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                let _ = crate::pet::destroy_pet_window(app);
                 app.exit(0);
             }
             _ => {}
@@ -94,12 +98,12 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 if button == MouseButton::Left {
                     let app = tray.app_handle();
                     if let Some(win) = app.get_webview_window("main") {
-                        if win.is_visible().unwrap_or(false) {
-                            let _ = win.hide();
-                        } else {
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
+                if win.is_visible().unwrap_or(false) {
+                    let _ = win.hide();
+                    crate::pet::restore_pet_topmost_if_visible(&app);
+                } else if let Err(e) = crate::pet::show_main_window(&app, None) {
+                    eprintln!("显示主窗口失败: {e}");
+                }
                     }
                 }
             }

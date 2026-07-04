@@ -13,7 +13,7 @@ export function PersonaAddModal({ open, onClose, onCreated }: Props) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-dialog persona-add-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3 className="modal-title">导入角色文本</h3>
+          <h3 className="modal-title">从 Wiki 或文本导入角色</h3>
           <button type="button" className="modal-close" onClick={onClose} aria-label="关闭">
             ×
           </button>

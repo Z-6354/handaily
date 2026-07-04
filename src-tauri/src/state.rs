@@ -99,9 +99,10 @@ impl AppState {
     /// 初始化：打开 DB、跑 migrate、重建今日聚合缓存、读 settings
     pub fn new(app: &AppHandle) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let db_path = resolve_db_path(app)?;
+        let data_dir = db_path.parent().map(|p| p.to_path_buf());
         let db = crate::db::open_and_migrate(&db_path)?;
 
-        if let Some(data_dir) = db_path.parent() {
+        if let Some(ref data_dir) = data_dir {
             let _ = crate::prompts::seed_user_prompts(data_dir);
             let _ = crate::ai::seed_user_vendors(data_dir);
             let _ = crate::persona::seed_user_personas(data_dir);
@@ -118,6 +119,10 @@ impl AppState {
             crate::db::sessions::recover_orphan_sessions(&db)?;
             crate::db::usage::recover_orphan_sessions(&db)?;
             let _ = crate::db::usage::open_app_session(&db);
+            let _ = crate::pet::models::migrate_legacy_builtin_models(&db);
+            if let Some(ref data_dir) = data_dir {
+                let _ = crate::persona::migrate_legacy_personas(data_dir, &db);
+            }
         }
 
         // 重建今日聚合缓存

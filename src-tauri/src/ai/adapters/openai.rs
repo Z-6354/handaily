@@ -94,11 +94,14 @@ pub async fn chat_text_with_options(
         messages.push(serde_json::json!({"role": "system", "content": sys}));
     }
     messages.push(serde_json::json!({"role": "user", "content": user_prompt}));
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
         "max_tokens": options.max_tokens,
         "messages": messages
     });
+    if options.json_object {
+        body["response_format"] = serde_json::json!({"type": "json_object"});
+    }
     post_chat(&url, api_key, &body, options).await
 }
 

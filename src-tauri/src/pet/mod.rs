@@ -250,6 +250,32 @@ pub fn pet_visible(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// 显示主窗口；桌宠 `always_on_top` 会挡住主窗口，需先让桌宠降层。
+pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), String> {
+    let win = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口不存在".to_string())?;
+    if let Some(pet) = app.get_webview_window(PET_LABEL) {
+        let _ = pet.set_always_on_top(false);
+    }
+    let _ = win.unminimize();
+    win.show().map_err(|e| e.to_string())?;
+    win.set_focus().map_err(|e| e.to_string())?;
+    if let Some(page) = page.filter(|p| !p.is_empty()) {
+        let _ = app.emit_to("main", "main-navigate", page.to_string());
+    }
+    Ok(())
+}
+
+/// 主窗口失焦/隐藏后恢复桌宠置顶（若仍可见）。
+pub fn restore_pet_topmost_if_visible(app: &AppHandle) {
+    if let Some(pet) = app.get_webview_window(PET_LABEL) {
+        if pet.is_visible().unwrap_or(false) {
+            let _ = pet.set_always_on_top(true);
+        }
+    }
+}
+
 pub fn status(app: &AppHandle, st: &AppState) -> Result<PetStatusPayload, String> {
     let db = crate::db::lock_conn(&st.db)?;
     let model_id = models::active_model_id(&db);
@@ -554,7 +580,7 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
 fn schedule_pet_reload_after_show(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(120)).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
         if app
             .get_webview_window(PET_LABEL)
             .and_then(|w| w.is_visible().ok())
@@ -639,7 +665,7 @@ pub fn preview_animation(
     Ok(())
 }
 
-/// 切换模型时重建桌宠 WebView，与「关闭桌宠再启用」同路径，避免同 canvas reload 碎块。
+/// 切换模型时重建桌宠 WebView，与「关闭桌宠再启用」同路径，避免同 canvas 热重载碎块。
 fn restart_pet_window(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     let had_window = app.get_webview_window(PET_LABEL).is_some();
     let was_visible = pet_visible(app);
@@ -656,9 +682,21 @@ fn restart_pet_window(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String>
 
 pub fn set_active_model(app: &AppHandle, st: Arc<AppState>, model_id: &str) -> Result<(), String> {
     let data_dir = st.data_dir();
-    models::resolve_assets(data_dir, model_id)?;
+    let assets = models::resolve_assets(data_dir, model_id)?;
+    // 切换前批量读入 OS 页缓存，缩短重建 WebView 后的资源加载
+    if assets.use_file_src {
+        let mut files = vec![
+            assets.skel_file.clone(),
+            assets.atlas_file.clone(),
+            assets.png_file.clone(),
+        ];
+        if let Some(ref cfg) = assets.config_file {
+            files.push(cfg.clone());
+        }
+        let _ = models::read_model_asset_bundle(data_dir, model_id, &files);
+    }
     let db = crate::db::lock_conn(&st.db)?;
-    models::set_active_model_id(&db, model_id)?;
+    models::set_active_model_id(&db, &assets.model_id)?;
     let enabled = is_enabled(&db);
     drop(db);
     if enabled {

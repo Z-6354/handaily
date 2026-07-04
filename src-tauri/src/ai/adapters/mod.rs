@@ -13,6 +13,8 @@ pub struct ChatOptions {
     pub max_tokens: u32,
     /// 整次请求超时（含等待模型生成），秒
     pub timeout_secs: u64,
+    /// 要求模型只输出 JSON 对象（OpenAI `response_format` / Ollama `format: json`）
+    pub json_object: bool,
 }
 
 impl Default for ChatOptions {
@@ -20,6 +22,7 @@ impl Default for ChatOptions {
         Self {
             max_tokens: 1024,
             timeout_secs: 120,
+            json_object: false,
         }
     }
 }
@@ -29,11 +32,12 @@ impl ChatOptions {
         Self::skill_generate()
     }
 
-    /// 参考文本 → 结构化 JSON（输出可能较长）
+    /// 参考文本 → 结构化 JSON
     pub fn preprocess() -> Self {
         Self {
-            max_tokens: 16_384,
+            max_tokens: 4096,
             timeout_secs: 300,
+            json_object: true,
         }
     }
 
@@ -42,6 +46,7 @@ impl ChatOptions {
         Self {
             max_tokens: 8192,
             timeout_secs: 300,
+            json_object: false,
         }
     }
 

@@ -3,14 +3,15 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crate::state::AppState;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, ToUnicode};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-    HC_ACTION, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
+    CallNextHookEx, DispatchMessageW, PeekMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
+    HC_ACTION, KBDLLHOOKSTRUCT, MSG, PM_REMOVE, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_MBUTTONDOWN, WM_QUIT, WM_RBUTTONDOWN, WM_SYSKEYDOWN,
 };
 
 const MAX_TEXT_BUF: usize = 4096;
@@ -102,11 +103,14 @@ pub fn spawn_input_monitor(state: Arc<AppState>) -> JoinHandle<()> {
 
             let mut msg = MSG::default();
             while !state.stop_flag.load(Ordering::Relaxed) {
-                let ret = GetMessageW(&mut msg, None, 0, 0);
-                if ret.0 == 0 || ret.0 == -1 {
-                    break;
+                if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    if msg.message == WM_QUIT {
+                        break;
+                    }
+                    let _ = DispatchMessageW(&msg);
+                } else {
+                    thread::sleep(Duration::from_millis(50));
                 }
-                let _ = DispatchMessageW(&msg);
             }
 
             let _ = UnhookWindowsHookEx(mouse_hook);

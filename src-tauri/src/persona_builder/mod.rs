@@ -120,14 +120,23 @@ pub fn build_preprocess_prompt(data_dir: &Path, row: &CharacterProfileRow) -> Re
 }
 
 const MAX_REFERENCE_CHARS: usize = 24_000;
+const MAX_REFERENCE_CHARS_COMPACT: usize = 8_000;
+const MAX_REFERENCE_CHARS_MINIMAL: usize = 4_000;
 
-fn clamp_reference_text(raw_text: &str) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreprocessMode {
+    Standard,
+    Compact,
+    Minimal,
+}
+
+fn clamp_reference_text_to(raw_text: &str, max_chars: usize) -> String {
     let t = raw_text.trim();
-    if t.chars().count() <= MAX_REFERENCE_CHARS {
+    if t.chars().count() <= max_chars {
         return t.to_string();
     }
-    let truncated: String = t.chars().take(MAX_REFERENCE_CHARS).collect();
-    format!("{truncated}\n\n[参考文本过长，已截断至前 {MAX_REFERENCE_CHARS} 字]")
+    let truncated: String = t.chars().take(max_chars).collect();
+    format!("{truncated}\n\n[参考文本过长，已截断至前 {max_chars} 字]")
 }
 
 pub fn build_preprocess_prompt_from_text(
@@ -136,18 +145,324 @@ pub fn build_preprocess_prompt_from_text(
     source: &str,
     raw_text: &str,
 ) -> Result<String, String> {
+    build_preprocess_prompt_from_text_mode(
+        data_dir,
+        name,
+        source,
+        raw_text,
+        PreprocessMode::Standard,
+    )
+}
+
+pub fn build_preprocess_prompt_from_text_mode(
+    data_dir: &Path,
+    name: &str,
+    source: &str,
+    raw_text: &str,
+    mode: PreprocessMode,
+) -> Result<String, String> {
+    build_preprocess_prompt_limited(data_dir, name, source, raw_text, mode, None)
+}
+
+pub fn build_preprocess_prompt_limited(
+    data_dir: &Path,
+    name: &str,
+    source: &str,
+    raw_text: &str,
+    mode: PreprocessMode,
+    max_chars: Option<usize>,
+) -> Result<String, String> {
     if raw_text.trim().is_empty() {
         return Err("参考文本不能为空".into());
     }
+    let (template, default_max) = match mode {
+        PreprocessMode::Standard => ("persona-preprocess", MAX_REFERENCE_CHARS),
+        PreprocessMode::Compact => ("persona-preprocess-compact", MAX_REFERENCE_CHARS_COMPACT),
+        PreprocessMode::Minimal => ("persona-preprocess-minimal", MAX_REFERENCE_CHARS_MINIMAL),
+    };
+    let limit = max_chars.unwrap_or(default_max);
     Ok(prompts::render(
         data_dir,
-        "persona-preprocess",
+        template,
         &[
             ("name", name),
             ("source", source),
-            ("raw_text", &clamp_reference_text(raw_text)),
+            ("raw_text", &clamp_reference_text_to(raw_text, limit)),
         ],
     ))
+}
+
+/// Wiki 等人设导入前的预处理档位：(模式, 参考文本上限)
+pub fn preprocess_attempt_tiers(from_wiki: bool, text_len: usize) -> Vec<(PreprocessMode, usize)> {
+    if from_wiki {
+        return vec![
+            (PreprocessMode::Minimal, MAX_REFERENCE_CHARS_MINIMAL),
+            (PreprocessMode::Minimal, 1_500),
+            (PreprocessMode::Compact, 2_500),
+        ];
+    }
+    if text_len > MAX_REFERENCE_CHARS_COMPACT {
+        vec![
+            (PreprocessMode::Standard, MAX_REFERENCE_CHARS),
+            (PreprocessMode::Compact, MAX_REFERENCE_CHARS_COMPACT),
+            (PreprocessMode::Minimal, MAX_REFERENCE_CHARS_MINIMAL),
+        ]
+    } else if text_len > 4_000 {
+        vec![
+            (PreprocessMode::Standard, MAX_REFERENCE_CHARS),
+            (PreprocessMode::Minimal, MAX_REFERENCE_CHARS_MINIMAL),
+        ]
+    } else {
+        vec![
+            (PreprocessMode::Standard, MAX_REFERENCE_CHARS),
+            (PreprocessMode::Compact, MAX_REFERENCE_CHARS_COMPACT),
+        ]
+    }
+}
+
+/// 从 Wiki 清洗后的参考文本本地解析结构化资料，避免思考模型 JSON 被截断
+pub fn try_profile_from_wiki_reference(
+    text: &str,
+    name_fallback: &str,
+    source_fallback: &str,
+) -> Option<CharacterProfileData> {
+    let sections = split_wiki_reference_sections(text);
+    let name = sections
+        .title_name
+        .clone()
+        .or_else(|| parse_field_line(text, "角色"))
+        .unwrap_or_else(|| name_fallback.trim().to_string());
+    if name.is_empty() {
+        return None;
+    }
+
+    let source = sections
+        .source
+        .clone()
+        .unwrap_or_else(|| source_fallback.trim().to_string());
+
+    let info = sections.section_text("角色信息").unwrap_or_default();
+    let mut personality = parse_info_list_field(&info, "性格");
+    if personality.is_empty() {
+        personality = parse_info_list_field(&info, "关键词");
+    }
+
+    let mut introduction_parts: Vec<String> = Vec::new();
+    if let Some(setting) = sections
+        .section_text("角色设定")
+        .map(|s| clean_setting_prose(&s))
+        .filter(|s| !s.is_empty())
+    {
+        introduction_parts.push(setting);
+    } else if let Some(id) = parse_info_scalar_field(&info, "身份") {
+        introduction_parts.push(id);
+    }
+
+    let mut extra = std::collections::HashMap::new();
+    for key in ["关键词", "发色", "瞳色", "萌点", "持有物", "身份"] {
+        if let Some(v) = parse_info_scalar_field(&info, key) {
+            extra.insert(key.to_string(), truncate_chars(&v, 80));
+        }
+    }
+
+    let sample_lines: Vec<String> = sections
+        .dialogue_lines
+        .iter()
+        .take(8)
+        .map(|s| truncate_chars(s, 120))
+        .collect();
+
+    let speech_style = build_speech_style(&info, &personality, &sample_lines);
+
+    let introduction = truncate_chars(&introduction_parts.join("\n\n"), 600);
+
+    if personality.is_empty() && sample_lines.len() < 2 && introduction.chars().count() < 30 {
+        return None;
+    }
+
+    Some(CharacterProfileData {
+        name,
+        source,
+        introduction,
+        personality,
+        speech_style,
+        sample_lines,
+        relationships: String::new(),
+        taboos: Vec::new(),
+        extra,
+    })
+}
+
+struct WikiReferenceSections {
+    title_name: Option<String>,
+    source: Option<String>,
+    sections: std::collections::HashMap<String, String>,
+    dialogue_lines: Vec<String>,
+}
+
+impl WikiReferenceSections {
+    fn section_text(&self, key: &str) -> Option<String> {
+        self.sections.get(key).cloned()
+    }
+}
+
+fn split_wiki_reference_sections(text: &str) -> WikiReferenceSections {
+    let mut title_name = None;
+    let mut source = None;
+    let mut sections: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut dialogue_lines: Vec<String> = Vec::new();
+    let mut current: Option<String> = None;
+    let mut buf = String::new();
+
+    let flush = |key: &mut Option<String>, buffer: &mut String, map: &mut std::collections::HashMap<String, String>| {
+        if let Some(k) = key.take() {
+            let body = buffer.trim().to_string();
+            if !body.is_empty() {
+                map.insert(k, body);
+            }
+        }
+        buffer.clear();
+    };
+
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("# 角色：") || t.starts_with("# 角色:") {
+            title_name = Some(t.trim_start_matches("# 角色：").trim_start_matches("# 角色:").trim().to_string());
+            continue;
+        }
+        if t.starts_with("来源：") || t.starts_with("来源:") {
+            source = Some(t.trim_start_matches("来源：").trim_start_matches("来源:").trim().to_string());
+            continue;
+        }
+        if t.starts_with("Wiki：") || t.starts_with("Wiki:") {
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("## ") {
+            flush(&mut current, &mut buf, &mut sections);
+            let heading = rest
+                .split('（')
+                .next()
+                .unwrap_or(rest)
+                .trim()
+                .to_string();
+            current = Some(heading);
+            continue;
+        }
+        if current.as_deref().is_some_and(|k| k.starts_with("舰船台词")) {
+            if let Some(line) = t.strip_prefix("- ").map(str::trim).filter(|s| !s.is_empty()) {
+                dialogue_lines.push(line.to_string());
+            }
+            continue;
+        }
+        if current.is_some() {
+            if !t.is_empty() {
+                if !buf.is_empty() {
+                    buf.push('\n');
+                }
+                buf.push_str(t);
+            }
+        }
+    }
+    flush(&mut current, &mut buf, &mut sections);
+
+    WikiReferenceSections {
+        title_name,
+        source,
+        sections,
+        dialogue_lines,
+    }
+}
+
+fn parse_field_line(text: &str, field: &str) -> Option<String> {
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with(field) {
+            let rest = t.trim_start_matches(field).trim_start_matches(['：', ':', ' ']);
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_info_scalar_field(info: &str, field: &str) -> Option<String> {
+    for line in info.lines() {
+        let t = line.trim();
+        if t.starts_with(field) {
+            let rest = t.trim_start_matches(field).trim_start_matches(['：', ':', ' ']);
+            if !rest.is_empty() && rest != field {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_info_list_field(info: &str, field: &str) -> Vec<String> {
+    let Some(raw) = parse_info_scalar_field(info, field) else {
+        return Vec::new();
+    };
+    raw.split(['、', '，', ',', ';', '；'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| truncate_chars(s, 40))
+        .take(8)
+        .collect()
+}
+
+fn clean_setting_prose(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter(|line| !line.contains(".gif"))
+        .filter(|line| !line.starts_with("翻译："))
+        .filter(|line| !line.starts_with("Azurlane"))
+        .filter(|line| !line.starts_with("|"))
+        .filter(|line| line.chars().count() >= 4)
+        .take(6)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn build_speech_style(info: &str, personality: &[String], sample_lines: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(kw) = parse_info_scalar_field(info, "关键词") {
+        parts.push(format!("口癖/关键词：{}", truncate_chars(&kw, 80)));
+    }
+    for p in personality {
+        let lower = p.to_lowercase();
+        if lower.contains("口癖") || lower.contains("称呼") || lower.contains("说话") {
+            parts.push(p.clone());
+        }
+    }
+    if sample_lines.iter().any(|l| l.contains('~') || l.contains('～')) {
+        parts.push("语气活泼，常用波浪号".into());
+    }
+    if sample_lines
+        .iter()
+        .any(|l| l.contains("亲爱的") || l.contains("旦那") || l.contains("指挥官"))
+    {
+        parts.push("亲昵称呼指挥官".into());
+    }
+    if parts.is_empty() && !personality.is_empty() {
+        parts.push(truncate_chars(&personality.join("、"), 80));
+    }
+    truncate_chars(&parts.join("；"), 200)
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!("{}…", s.chars().take(max).collect::<String>())
+}
+
+pub fn is_truncated_profile_error(err: &str) -> bool {
+    err.contains("不完整")
+        || err.contains("EOF")
+        || err.contains("无法解析 AI 返回的 JSON")
+        || err.contains("JSON 字段不符合")
 }
 
 pub fn build_merge_prompt_from_profile(
@@ -456,7 +771,8 @@ fn is_truncated_json_error(err: &str) -> bool {
 
 fn truncated_json_err(detail: &str) -> String {
     format!(
-        "AI 返回的 JSON 不完整（可能被截断）: {detail}。请缩短参考文本、减少 sample_lines，或更换输出上限更高的模型。"
+        "AI 返回的 JSON 不完整（可能被截断）: {detail}。\
+         已自动尝试压缩重试；若仍失败，请更换输出上限更高的思考模型，或等待供应商配额重置后再试。"
     )
 }
 
@@ -526,16 +842,7 @@ fn trim_trailing_json_noise(s: &mut String) {
 }
 
 fn extract_json_str(s: &str) -> String {
-    let t = strip_md_fence(s);
-    if t.starts_with('{') {
-        return t;
-    }
-    if let Some(start) = t.find('{') {
-        if let Some(end) = t.rfind('}') {
-            return t[start..=end].to_string();
-        }
-    }
-    t
+    crate::ai::json_util::extract_json_object(s)
 }
 
 pub fn strip_md_fence(s: &str) -> String {
@@ -554,6 +861,45 @@ pub fn strip_md_fence(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preprocess_wiki_uses_minimal_tiers() {
+        let tiers = preprocess_attempt_tiers(true, 20_000);
+        assert!(tiers.len() >= 2);
+        assert_eq!(tiers[0].0, PreprocessMode::Minimal);
+    }
+
+    #[test]
+    fn wiki_reference_local_profile() {
+        let text = r#"# 角色：柴郡
+来源：碧蓝航线 BWIKI
+
+## 角色信息
+身份：新晋猫女仆
+性格：娇俏、粘人、爱撒娇
+关键词：蹭蹭、摸摸、旦那樣
+
+## 角色设定
+不知为何穿着女仆装的皇家重巡洋舰。
+明明没有下命令也会有时自顾自地打扫起值班室。
+
+## 舰船台词（原文，共 50 条，已抽样 3 条）
+- 呼啊-感觉像是睡了很久醒过来一样呢~
+- 亲~爱~的~！嘿，我抱！
+"#;
+        let profile = try_profile_from_wiki_reference(text, "柴郡", "碧蓝航线").unwrap();
+        assert_eq!(profile.name, "柴郡");
+        assert!(profile.personality.iter().any(|p| p.contains("娇俏")));
+        assert!(profile.introduction.contains("女仆装"));
+        assert!(profile.speech_style.contains("关键词") || profile.speech_style.contains("亲昵"));
+        assert_eq!(profile.sample_lines.len(), 2);
+    }
+
+    #[test]
+    fn preprocess_wiki_uses_compact_tiers() {
+        let tiers = preprocess_attempt_tiers(true, 20_000);
+        assert!(tiers.iter().any(|(m, _)| *m == PreprocessMode::Compact));
+    }
 
     #[test]
     fn parse_json_with_preamble() {

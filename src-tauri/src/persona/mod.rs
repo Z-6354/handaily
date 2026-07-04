@@ -11,18 +11,35 @@ use crate::db::character_profiles::CharacterProfileData;
 const EMBEDDED_MANIFEST: &str = include_str!("../../../personas/manifest.json");
 
 const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
-    ("default", include_str!("../../../personas/default.md")),
     ("cheshire", include_str!("../../../personas/cheshire.md")),
-    ("phoebe", include_str!("../../../personas/phoebe.md")),
-    ("sora", include_str!("../../../personas/sora.md")),
+    ("edu", include_str!("../../../personas/edu.md")),
+    ("wushiling", include_str!("../../../personas/wushiling.md")),
+    ("qiye", include_str!("../../../personas/qiye.md")),
+    ("tashigan", include_str!("../../../personas/tashigan.md")),
 ];
 
 const EMBEDDED_PROFILES: &[(&str, &str)] = &[
-    ("default", include_str!("../../../personas/default.json")),
     ("cheshire", include_str!("../../../personas/cheshire.json")),
-    ("phoebe", include_str!("../../../personas/phoebe.json")),
-    ("sora", include_str!("../../../personas/sora.json")),
+    ("edu", include_str!("../../../personas/edu.json")),
+    ("wushiling", include_str!("../../../personas/wushiling.json")),
+    ("qiye", include_str!("../../../personas/qiye.json")),
+    ("tashigan", include_str!("../../../personas/tashigan.json")),
 ];
+
+/// 旧版 Wiki 导入哈希 ID → 内置 slug（含人设 p 前缀与桌宠 m 前缀）
+const LEGACY_BUILTIN_PERSONA_IDS: &[(&str, &str)] = &[
+    ("p951a05aa", "edu"),
+    ("m951a05aa", "edu"),
+    ("pe2795090", "wushiling"),
+    ("ma19bdb1b", "wushiling"),
+    ("pc5623cfa", "qiye"),
+    ("mc5623cfa", "qiye"),
+    ("pea9d211a", "tashigan"),
+    ("mea9d211a", "tashigan"),
+];
+
+/// 已移除的内置人设（启动迁移时从 manifest 清理）
+const REMOVED_BUILTIN_PERSONAS: &[&str] = &["default", "phoebe", "sora"];
 
 const ACTIVE_PERSONA_KEY: &str = "active_persona_id";
 
@@ -51,6 +68,7 @@ pub struct PersonaInfo {
     pub description: String,
     pub active: bool,
     pub has_profile: bool,
+    pub is_builtin: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +142,96 @@ pub fn seed_user_personas(data_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 将内置人设 Skill / JSON 同步到用户目录（slug 文件为唯一来源）
+fn sync_embedded_builtin_files(data_dir: &Path) -> std::io::Result<()> {
+    let dir = personas_dir(data_dir);
+    fs::create_dir_all(&dir)?;
+    for (id, content) in EMBEDDED_PERSONAS {
+        fs::write(dir.join(format!("{id}.md")), content)?;
+    }
+    for (id, content) in EMBEDDED_PROFILES {
+        fs::write(dir.join(format!("{id}.json")), content)?;
+    }
+    Ok(())
+}
+
+fn remove_legacy_persona_files(data_dir: &Path) {
+    let dir = personas_dir(data_dir);
+    for (legacy, _) in LEGACY_BUILTIN_PERSONA_IDS {
+        for ext in ["md", "json"] {
+            let path = dir.join(format!("{legacy}.{ext}"));
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// 启动迁移：补齐内置五人设、清理已删预设、修正 legacy ID
+pub fn migrate_legacy_personas(data_dir: &Path, db: &rusqlite::Connection) -> Result<(), String> {
+    let embedded: PersonaManifest =
+        serde_json::from_str(EMBEDDED_MANIFEST).expect("embedded personas/manifest.json");
+    let mut manifest = load_manifest(data_dir);
+    let mut changed = false;
+
+    let before = manifest.personas.len();
+    manifest
+        .personas
+        .retain(|p| !REMOVED_BUILTIN_PERSONAS.contains(&p.id.as_str()));
+    if manifest.personas.len() != before {
+        changed = true;
+    }
+
+    for bp in &embedded.personas {
+        if !manifest.personas.iter().any(|p| p.id == bp.id) {
+            manifest.personas.push(bp.clone());
+            changed = true;
+        }
+    }
+
+    for (legacy, slug) in LEGACY_BUILTIN_PERSONA_IDS {
+        if let Some(pos) = manifest.personas.iter().position(|p| p.id == *legacy) {
+            if manifest.personas.iter().any(|p| p.id == *slug) {
+                manifest.personas.remove(pos);
+            } else {
+                manifest.personas[pos].id = (*slug).to_string();
+            }
+            changed = true;
+        }
+    }
+
+    if !manifest.personas.iter().any(|p| p.id == manifest.default_id) {
+        manifest.default_id = embedded.default_id.clone();
+        changed = true;
+    }
+
+    if changed {
+        let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+        fs::write(manifest_path(data_dir), json).map_err(|e| e.to_string())?;
+    }
+
+    let active = active_persona_id(db, &manifest);
+    let resolved_active = LEGACY_BUILTIN_PERSONA_IDS
+        .iter()
+        .find(|(legacy, _)| *legacy == active.as_str())
+        .map(|(_, slug)| *slug)
+        .unwrap_or(active.as_str());
+    if resolved_active != active
+        || REMOVED_BUILTIN_PERSONAS.contains(&active.as_str())
+        || !manifest.personas.iter().any(|p| p.id == active)
+    {
+        let fallback = if manifest.personas.iter().any(|p| p.id == manifest.default_id) {
+            manifest.default_id.as_str()
+        } else {
+            "cheshire"
+        };
+        set_active_persona_id(db, &manifest, fallback)?;
+    }
+
+    sync_embedded_builtin_files(data_dir).map_err(|e| e.to_string())?;
+    remove_legacy_persona_files(data_dir);
+
+    Ok(())
+}
+
 pub fn load_manifest(data_dir: &Path) -> PersonaManifest {
     let path = manifest_path(data_dir);
     if let Ok(raw) = fs::read_to_string(&path) {
@@ -132,6 +240,10 @@ pub fn load_manifest(data_dir: &Path) -> PersonaManifest {
         }
     }
     serde_json::from_str(EMBEDDED_MANIFEST).expect("embedded personas/manifest.json")
+}
+
+pub fn is_builtin_persona(id: &str) -> bool {
+    EMBEDDED_PERSONAS.iter().any(|(pid, _)| *pid == id)
 }
 
 pub fn list_personas(data_dir: &Path, db: &rusqlite::Connection) -> Vec<PersonaInfo> {
@@ -147,6 +259,7 @@ pub fn list_personas(data_dir: &Path, db: &rusqlite::Connection) -> Vec<PersonaI
             description: p.description.clone(),
             active: p.id == active,
             has_profile: load_persona_profile(data_dir, &p.id).is_some(),
+            is_builtin: is_builtin_persona(&p.id),
         })
         .collect()
 }
@@ -172,16 +285,25 @@ pub fn get_persona_detail(
         }
     }
 
-    let is_builtin = EMBEDDED_PERSONAS.iter().any(|(pid, _)| *pid == id);
+    let is_builtin = is_builtin_persona(id);
 
-    let profile_json = if let Some(ref row) = char_row {
-        if !row.profile_json.name.is_empty() || !row.profile_json.introduction.is_empty() {
-            row.profile_json.clone()
-        } else {
-            load_persona_profile(data_dir, id).unwrap_or_else(|| profile_from_meta(meta))
+    let file_profile = load_persona_profile(data_dir, id);
+    let profile_json = match (file_profile, char_row.as_ref()) {
+        (Some(file), Some(row))
+            if profile_has_rich_content(&file) || !profile_has_rich_content(&row.profile_json) =>
+        {
+            file
         }
-    } else {
-        load_persona_profile(data_dir, id).unwrap_or_else(|| profile_from_meta(meta))
+        (Some(file), None) => file,
+        (None, Some(row)) if profile_has_rich_content(&row.profile_json) => {
+            row.profile_json.clone()
+        }
+        (None, Some(row))
+            if !row.profile_json.name.is_empty() || !row.profile_json.introduction.is_empty() =>
+        {
+            row.profile_json.clone()
+        }
+        _ => profile_from_meta(meta),
     };
 
     Ok(PersonaDetail {
@@ -203,6 +325,16 @@ fn profile_from_meta(meta: &PersonaMeta) -> CharacterProfileData {
         introduction: meta.description.clone(),
         ..Default::default()
     }
+}
+
+fn profile_has_rich_content(p: &CharacterProfileData) -> bool {
+    !p.introduction.trim().is_empty()
+        || !p.personality.is_empty()
+        || !p.speech_style.trim().is_empty()
+        || !p.sample_lines.is_empty()
+        || !p.relationships.trim().is_empty()
+        || !p.taboos.is_empty()
+        || !p.extra.is_empty()
 }
 
 pub fn active_persona_id(db: &rusqlite::Connection, manifest: &PersonaManifest) -> String {
@@ -265,6 +397,46 @@ pub fn update_persona(
     upsert_manifest_entry(data_dir, &meta)
 }
 
+/// 删除用户自定义人设（内置柴郡等不可删）
+pub fn delete_persona(
+    data_dir: &Path,
+    db: &rusqlite::Connection,
+    id: &str,
+) -> Result<(), String> {
+    if is_builtin_persona(id) {
+        return Err("内置人设不可删除".into());
+    }
+
+    let mut manifest = load_manifest(data_dir);
+    if !manifest.personas.iter().any(|p| p.id == id) {
+        return Err(format!("未知人设: {id}"));
+    }
+    if manifest.personas.len() <= 1 {
+        return Err("至少需要保留一个人设".into());
+    }
+
+    let was_active = active_persona_id(db, &manifest) == id;
+    manifest.personas.retain(|p| p.id != id);
+
+    let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    fs::write(manifest_path(data_dir), json).map_err(|e| e.to_string())?;
+
+    let dir = personas_dir(data_dir);
+    let _ = fs::remove_file(dir.join(format!("{id}.md")));
+    let _ = fs::remove_file(dir.join(format!("{id}.json")));
+
+    if was_active {
+        let fallback = if manifest.personas.iter().any(|p| p.id == manifest.default_id) {
+            manifest.default_id.clone()
+        } else {
+            manifest.personas[0].id.clone()
+        };
+        set_active_persona_id(db, &manifest, &fallback)?;
+    }
+
+    Ok(())
+}
+
 /// 加载当前人设全文，作为 system prompt
 pub fn system_prompt(data_dir: &Path, db: &rusqlite::Connection) -> String {
     let manifest = load_manifest(data_dir);
@@ -309,7 +481,11 @@ pub fn save_persona_profile(data_dir: &Path, id: &str, profile: &CharacterProfil
 }
 
 fn slugify_id(raw: &str) -> Result<String, String> {
-    let id: String = raw
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("无效人设 ID".into());
+    }
+    let mut id: String = trimmed
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() {
@@ -323,11 +499,44 @@ fn slugify_id(raw: &str) -> Result<String, String> {
             }
         })
         .collect();
-    let id = id.trim_matches('-').trim_matches('_').to_string();
-    if id.is_empty() || id.len() > 64 {
+    id = id.trim_matches('-').trim_matches('_').to_string();
+    if id.is_empty() {
+        id = fallback_persona_id(trimmed);
+    } else if id.len() > 64 {
+        id = id.chars().take(64).collect();
+    }
+    if id.is_empty() {
         return Err(format!("无效人设 ID: {raw}"));
     }
     Ok(id)
+}
+
+fn fallback_persona_id(raw: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+    format!("p{:08x}", hasher.finish() as u32)
+}
+
+/// 根据显示名生成唯一人设 ID（Wiki 导入等场景）
+pub fn suggest_persona_id(data_dir: &Path, name: &str) -> Result<String, String> {
+    let base = slugify_id(name)?;
+    let manifest = load_manifest(data_dir);
+    if !manifest.personas.iter().any(|p| p.id == base) {
+        return Ok(base);
+    }
+    let mut n = 2;
+    loop {
+        let candidate = format!("{base}-{n}");
+        if !manifest.personas.iter().any(|p| p.id == candidate) {
+            return Ok(candidate);
+        }
+        n += 1;
+        if n > 99 {
+            return Err(format!("无法为人设「{name}」生成唯一 ID"));
+        }
+    }
 }
 
 fn id_from_filename(filename: &str) -> Result<String, String> {
@@ -450,7 +659,18 @@ mod tests {
     #[test]
     fn manifest_parses() {
         let m: PersonaManifest = serde_json::from_str(EMBEDDED_MANIFEST).unwrap();
+        assert_eq!(m.personas.len(), 5);
         assert!(m.personas.iter().any(|p| p.id == "cheshire"));
+        assert!(m.personas.iter().any(|p| p.id == "edu"));
+    }
+
+    #[test]
+    fn all_builtin_personas_embedded() {
+        assert_eq!(EMBEDDED_PERSONAS.len(), 5);
+        assert_eq!(EMBEDDED_PROFILES.len(), 5);
+        for id in ["cheshire", "edu", "wushiling", "qiye", "tashigan"] {
+            assert!(is_builtin_persona(id));
+        }
     }
 
     #[test]
@@ -459,8 +679,8 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
         seed_user_personas(&base).unwrap();
         assert!(manifest_path(&base).exists());
-        let body = load_persona_body(&base, "phoebe").unwrap();
-        assert!(body.contains("菲比"));
+        let body = load_persona_body(&base, "cheshire").unwrap();
+        assert!(body.contains("柴郡"));
         let _ = fs::remove_dir_all(&base);
     }
 

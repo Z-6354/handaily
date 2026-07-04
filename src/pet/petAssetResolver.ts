@@ -7,11 +7,49 @@ export interface PetAssetResolver {
   dispose: () => void;
 }
 
+const GLOBAL_BLOB_CACHE = new Map<string, string>();
+
+function cacheKey(modelId: string, filename: string) {
+  return `${modelId}:${filename}`;
+}
+
 function mimeForFilename(filename: string): string {
   if (filename.endsWith(".png")) return "image/png";
   if (filename.endsWith(".json")) return "application/json";
   if (filename.endsWith(".atlas")) return "text/plain";
   return "application/octet-stream";
+}
+
+function blobUrlFromBase64(modelId: string, filename: string, b64: string): string {
+  const key = cacheKey(modelId, filename);
+  const hit = GLOBAL_BLOB_CACHE.get(key);
+  if (hit) return hit;
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: mimeForFilename(filename) }));
+  GLOBAL_BLOB_CACHE.set(key, url);
+  return url;
+}
+
+/** 批量预读模型资源（单次 IPC），切换模型前调用可显著缩短等待。 */
+export async function preloadModelAssets(
+  modelId: string,
+  filenames: string[],
+  useFileSrc: boolean,
+): Promise<void> {
+  if (!useFileSrc) return;
+  const missing = filenames.filter((f) => f && !GLOBAL_BLOB_CACHE.has(cacheKey(modelId, f)));
+  if (missing.length === 0) return;
+  try {
+    const bundle = await invoke<{ files: Record<string, string> }>("pet_read_model_bundle", {
+      modelId,
+      filenames: missing,
+    });
+    for (const [name, b64] of Object.entries(bundle.files ?? {})) {
+      blobUrlFromBase64(modelId, name, b64);
+    }
+  } catch (e) {
+    console.warn("预加载模型资源失败，将按需读取", e);
+  }
 }
 
 export function createPetAssetResolver(cfg: {
@@ -28,27 +66,24 @@ export function createPetAssetResolver(cfg: {
     };
   }
 
-  const blobUrls: string[] = [];
-  const cache = new Map<string, string>();
+  const localUrls: string[] = [];
 
   return {
     urlFor: async (filename) => {
-      const hit = cache.get(filename);
-      if (hit) return hit;
+      const key = cacheKey(cfg.model_id, filename);
+      const cached = GLOBAL_BLOB_CACHE.get(key);
+      if (cached) return cached;
+
       const b64 = await invoke<string>("pet_read_model_asset", {
         modelId: cfg.model_id,
         filename,
       });
-      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes], { type: mimeForFilename(filename) }));
-      blobUrls.push(url);
-      cache.set(filename, url);
+      const url = blobUrlFromBase64(cfg.model_id, filename, b64);
+      localUrls.push(url);
       return url;
     },
     dispose: () => {
-      for (const url of blobUrls) URL.revokeObjectURL(url);
-      blobUrls.length = 0;
-      cache.clear();
+      localUrls.length = 0;
     },
   };
 }

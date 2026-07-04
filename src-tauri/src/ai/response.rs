@@ -2,13 +2,39 @@
 
 use serde_json::Value;
 
-/// 从 OpenAI 兼容 `choices[0].message` 提取文本
+/// 从 OpenAI 兼容 `choices[0].message` 提取文本（JSON 任务优先取含 `{` 的字段）
 pub fn extract_openai_message(message: &Value) -> Option<String> {
-    message
-        .get("content")
-        .and_then(extract_content_value)
-        .or_else(|| message.get("reasoning_content").and_then(extract_string))
-        .or_else(|| message.get("reasoning").and_then(extract_string))
+    let content = message.get("content").and_then(extract_content_value);
+    let reasoning = message
+        .get("reasoning_content")
+        .and_then(extract_string)
+        .or_else(|| message.get("reasoning").and_then(extract_string));
+
+    match (content.as_ref(), reasoning.as_ref()) {
+        (Some(c), Some(r)) => Some(pick_jsonish_text(c, r)),
+        (Some(c), None) => non_empty(c),
+        (None, Some(r)) => non_empty(r),
+        (None, None) => None,
+    }
+}
+
+fn pick_jsonish_text(primary: &str, secondary: &str) -> String {
+    let p = primary.trim();
+    let s = secondary.trim();
+    if p.contains('{') && !s.contains('{') {
+        return p.to_string();
+    }
+    if s.contains('{') && !p.contains('{') {
+        return s.to_string();
+    }
+    if p.contains('{') && s.contains('{') {
+        return if p.len() >= s.len() { p.to_string() } else { s.to_string() };
+    }
+    if !p.is_empty() {
+        p.to_string()
+    } else {
+        s.to_string()
+    }
 }
 
 /// 从 Ollama `message` 对象提取文本

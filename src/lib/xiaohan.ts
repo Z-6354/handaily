@@ -333,6 +333,7 @@ export interface PersonaInfo {
   description: string;
   active: boolean;
   has_profile: boolean;
+  is_builtin: boolean;
 }
 
 export interface PersonaDetail {
@@ -444,8 +445,21 @@ export const xiaohan = {
       name: args.name ?? null,
       text: args.text,
     }),
+  personaImportWiki: (args: {
+    url: string;
+    personaId?: string | null;
+    id?: string | null;
+    name?: string | null;
+  }) =>
+    invoke<PersonaImportResult>("persona_import_wiki", {
+      url: args.url,
+      personaId: args.personaId ?? null,
+      id: args.id ?? null,
+      name: args.name ?? null,
+    }),
   personaUpdate: (personaId: string, input: PersonaUpdateInput) =>
     invoke<void>("persona_update", { personaId, input }),
+  personaDelete: (personaId: string) => invoke<void>("persona_delete", { personaId }),
   aiTestPersona: () => invoke<PersonaTestResult>("ai_test_persona"),
   getStatus: () => invoke<StatusPayload>("tracking_get_status"),
   setEnabled: (enabled: boolean) => invoke<void>("tracking_set_enabled", { enabled }),

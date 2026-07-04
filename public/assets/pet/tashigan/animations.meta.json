@@ -1,0 +1,304 @@
+{
+  "animations": [
+    "attack",
+    "attack_left",
+    "dance",
+    "dead",
+    "motou",
+    "move",
+    "move_left",
+    "normal",
+    "sit",
+    "skill",
+    "sleep",
+    "stand",
+    "stand2",
+    "touch",
+    "tuozhuai",
+    "tuozhuai2",
+    "victory",
+    "walk",
+    "wash",
+    "yun"
+  ],
+  "idle_animation": "normal",
+  "click_animation": "touch",
+  "boot_animation": "normal",
+  "return_idle_animation": "normal",
+  "drag_animation": "tuozhuai",
+  "random_animations": [
+    "dance",
+    "sleep"
+  ],
+  "random_min_sec": 30,
+  "random_max_sec": 120,
+  "lines": [
+    {
+      "text": "主人，我在这里哦~",
+      "animation": null
+    },
+    {
+      "text": "嘿嘿，跳一个给主人看！",
+      "animation": "dance"
+    },
+    {
+      "text": "唔…有点困了呢…",
+      "animation": "sleep"
+    },
+    {
+      "text": "摸摸我好不好？",
+      "animation": "touch"
+    },
+    {
+      "text": "今天也要加油呀，主人！",
+      "animation": null
+    },
+    {
+      "text": "塔什干是北方联合的驱逐领舰，同型舰有3…没什么…因为出生在撒丁帝国，加上这样的设计，所以也被叫做“天蓝色的巡洋舰”。明明是驱逐…算了，塔什干也不讨厌这个名字就是了。塔什干会像塞瓦斯托波尔那时一样努力战斗的，同志酱就敬请期待吧",
+      "animation": null
+    },
+    {
+      "text": "我是塔什干，大家都叫塔什干“天蓝色的巡洋舰”。同志酱也是慕名而追寻塔什干的人吗…这样？真是个没办法的人呢",
+      "animation": null
+    },
+    {
+      "text": "看着塔什干就这么开心?……这样？随你高兴吧",
+      "animation": null
+    },
+    {
+      "text": "同志酱是来参观塔什干练习的吗？这样。于是你到底看不看？",
+      "animation": null
+    },
+    {
+      "text": "塔什干是撒丁建造的，撒丁的料理的倒是挺熟悉的。不过嘛，合不合北方联合的口味就不管了",
+      "animation": null
+    },
+    {
+      "text": "为什么港区会这么热啊… 同志酱，快给塔什干开空调啦",
+      "animation": null
+    },
+    {
+      "text": "真奇怪，明明塔什干对大家也没有多亲切友好，为什么大家反而更喜欢塔什干了…喂，同志酱，这是为什么？",
+      "animation": null
+    },
+    {
+      "text": "嗯？有事情要交给塔什干吗？…这样。我给你干掉就好吧",
+      "animation": null
+    },
+    {
+      "text": "……嗯？你在干什么？要玩塔什干衣服上的球球吗？",
+      "animation": null
+    },
+    {
+      "text": "任务？有什么好玩的东西吗？",
+      "animation": null
+    },
+    {
+      "text": "任务奖励？让塔什干看看。…这样。于是呢？没有什么好吃的吗？",
+      "animation": null
+    },
+    {
+      "text": "有你的邮件，塔什干只是顺便帮你拿的，不用感谢塔什干也没关系",
+      "animation": null
+    },
+    {
+      "text": "欢迎回来……茶？只有伏特加你要吗？",
+      "animation": null
+    },
+    {
+      "text": "不要靠近塔什干，你这个讨厌鬼！",
+      "animation": null
+    },
+    {
+      "text": "同志酱找塔什干有事吗？塔什干这边忙着呢，要是没什么事的话…这样？于是你其实来找塔什干玩的？唔，正好事情告一段落了，要玩的话陪你就好……",
+      "animation": null
+    },
+    {
+      "text": "凭着“天蓝色的巡洋舰”这样的称号就擅自认为塔什干是可爱听话的好孩子，和塔什干接触以后又擅自失望…困扰的可是塔什干，你不觉得吗，同志酱？",
+      "animation": null
+    },
+    {
+      "text": "塔什干只是普通的驱逐舰。并不想得到特殊对待，只要像现在这样就好。同志酱也是这样…嗯，这样就好",
+      "animation": null
+    },
+    {
+      "text": "虽然还没有完全认识港区的所有舰船，不过塔什干很喜欢这里。大家在认识了真正的塔什干以后都还愿意和塔什干交朋友，…对同志酱当然也…很喜欢！",
+      "animation": null
+    },
+    {
+      "text": "什么啊，重要的事就是指这个吗？这样，没问题哦，我收下了……咦？塔什干没有说过吗，塔什干喜欢指挥官。所以和指挥官定下誓约不是很正常的事情吗？",
+      "animation": null
+    },
+    {
+      "text": "虽然比不上被授予亲卫荣誉时的喜悦，但我会开心收下的。",
+      "animation": null
+    },
+    {
+      "text": "喂，你是不是忘了委托？真是笨呢，还是塔什干记性好",
+      "animation": null
+    },
+    {
+      "text": "让塔什干去战斗吗？这样。塔什干会去做的",
+      "animation": null
+    },
+    {
+      "text": "看塔什干把你们揍扁！Ура！",
+      "animation": null
+    },
+    {
+      "text": "Ура！尝到塔什干的厉害了吧！",
+      "animation": null
+    },
+    {
+      "text": "你这…!塔什干还能再战斗！",
+      "animation": null
+    },
+    {
+      "text": "见识一下塔什干的实力吧！",
+      "animation": null
+    },
+    {
+      "text": "塔什干才不认输！",
+      "animation": null
+    },
+    {
+      "text": "（金刚）不像你那样，塔什干可没有能一起享受撒丁料理的小伙伴",
+      "animation": null
+    },
+    {
+      "text": "（恶毒，凯旋）塔什干认真起来是绝对不会输的！",
+      "animation": null
+    },
+    {
+      "text": "……哈啊，没想到会被这些小家伙反将一军…同志酱，塔什干非得参加这种演习不可吗？",
+      "animation": null
+    },
+    {
+      "text": "同志酱以为只有这点程度就能关住塔什干？……这样？太天真了~呼呼",
+      "animation": null
+    },
+    {
+      "text": "同志酱，塔什干得保持这个状态到什么时候？…这样…欸？要一直这样！？",
+      "animation": null
+    },
+    {
+      "text": "果然那个巧克力…有古怪…塔什干竟然落到这地步…呜…头还是晕晕的…",
+      "animation": null
+    },
+    {
+      "text": "塔什干经常和扎拉她们聊天哦。也是她们说这样的打扮更加充满魅惑…你觉得怎么样？同志酱❤",
+      "animation": null
+    },
+    {
+      "text": "塔什干又不像阿芙乐尔，塔什干其实完全不能喝的…啊，说的可不是伏特加哦！",
+      "animation": null
+    },
+    {
+      "text": "反了啦反了！应该是塔什干摸你才对啦，同志酱！",
+      "animation": null
+    },
+    {
+      "text": "回来啦。今天大家要一起开party哦。…才没骗你！塔什干准备招待北方联合的各位一起来！",
+      "animation": null
+    },
+    {
+      "text": "委托奖励太重了搬不动？这样。真是丢人啊。看塔什干的…哼！好了，放在这里就行了吧？",
+      "animation": null
+    },
+    {
+      "text": "哼哼，塔什干打得很漂亮吧！",
+      "animation": null
+    },
+    {
+      "text": "呣…是谁打扰了塔什干的休息？…是同志酱？这样…那塔什干晚点再休息好了，有什么事？",
+      "animation": null
+    },
+    {
+      "text": "虽然有点困了，不过既然同志酱想和塔什干一起玩，那稍微陪你一下也不是不行。",
+      "animation": null
+    },
+    {
+      "text": "这么穿很“危险”？塔什干不是什么危险人物…还是说，危险的是同志酱？",
+      "animation": null
+    },
+    {
+      "text": "同志酱也喜欢布偶吗？…这样，那，这个小熊给你。",
+      "animation": null
+    },
+    {
+      "text": "为什么那么多小伙伴想拉塔什干去外面玩？今天塔什干只想在房间里多休息会…",
+      "animation": null
+    },
+    {
+      "text": "同志酱，要在沙发上睡会吗？塔什干的毛毯可以借你披。",
+      "animation": null
+    },
+    {
+      "text": "扣子没扣好？…这样，同志酱要帮帮塔什干吗？",
+      "animation": null
+    },
+    {
+      "text": "衣服越理越乱了…",
+      "animation": null
+    },
+    {
+      "text": "扎拉她们带了一些撒丁的点心给塔什干，同志酱要一起吃吗？",
+      "animation": null
+    },
+    {
+      "text": "……呼，终于来了啊，同志酱。塔什干已经等你很久了。刚刚塔什干还不够尽兴……休息一会儿后……就再来一场吧？",
+      "animation": null
+    },
+    {
+      "text": "欢迎…同志酱，来，先坐在我身边吧……同志酱对今天的塔什干的感想…是什么呢？",
+      "animation": null
+    },
+    {
+      "text": "同志酱，到底是怎么样看待这样的塔什干的呢？……塔什干，很好奇……嗯。",
+      "animation": null
+    },
+    {
+      "text": "同志酱…都目不转睛了…果然是很喜欢现在的塔什干吧……？觉得塔什干变得很大胆？唔，也许塔什干可以再大胆一些……",
+      "animation": null
+    },
+    {
+      "text": "塔什干，感觉脸好热…同志酱，离得太、太近了……不、果然还是近一点好……",
+      "animation": null
+    },
+    {
+      "text": "同志酱，想试试膝枕么？再加采耳的服务怎么样？塔什干，有向她们学习过怎么做……还有，同志酱不可以拒绝哦……！",
+      "animation": null
+    },
+    {
+      "text": "嗯？同志酱想躺在塔什干的身边么？",
+      "animation": null
+    },
+    {
+      "text": "这果然是同志酱的爱好……",
+      "animation": null
+    },
+    {
+      "text": "同志酱…就算你也和塔什干一样已经晕晕的了……也得做任务呢。",
+      "animation": null
+    },
+    {
+      "text": "任务奖励送来了……姆…原来没有能让塔什干清醒的东西啊…",
+      "animation": null
+    },
+    {
+      "text": "辛苦了，同志酱……嗯，给你一个安心的拥抱……",
+      "animation": null
+    },
+    {
+      "text": "嗯…同志酱，接下来，我们要去哪里继续……？继续什么？当然是只有塔什干和同志酱的二人世界…塔什干喜欢同志酱，所以…想和同志酱二人世界也是天经地义的事吧？",
+      "animation": null
+    },
+    {
+      "text": "果然，这个风格不适合塔什干……",
+      "animation": null
+    }
+  ],
+  "power_mode": null,
+  "scale": null,
+  "remark_interval_sec": null
+}

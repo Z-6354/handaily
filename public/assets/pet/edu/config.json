@@ -1,0 +1,20 @@
+{
+  "atlases": [
+    {
+      "atlas": "edu_3.atlas",
+      "tex_names": [
+        "edu_3"
+      ],
+      "textures": [
+        "edu_3.png"
+      ]
+    }
+  ],
+  "conf_ver": 1,
+  "options": {
+    "edge_padding": false,
+    "tex_type": 0
+  },
+  "skeleton": "edu_3.skel",
+  "type": 9
+}

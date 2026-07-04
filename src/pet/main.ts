@@ -9,7 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import "./pet.css";
 
 import { SpinePet, type PetAssetConfig, type PowerMode } from "./spinePet";
-import { createPetAssetResolver, type PetAssetResolver } from "./petAssetResolver";
+import { createPetAssetResolver, preloadModelAssets, type PetAssetResolver } from "./petAssetResolver";
 
 interface PetRemarkLine {
   text: string;
@@ -238,6 +238,16 @@ menu.innerHTML = `
       </span>
       <span class="pet-menu-text">隐藏桌宠</span>
     </button>
+    <button type="button" class="pet-menu-item pet-menu-item--danger" data-action="quit">
+      <span class="pet-menu-icon" aria-hidden="true">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+          <polyline points="16 17 21 12 16 7" />
+          <line x1="21" y1="12" x2="9" y2="12" />
+        </svg>
+      </span>
+      <span class="pet-menu-text">退出</span>
+    </button>
   </div>
 `;
 
@@ -331,6 +341,12 @@ function isInsideEditArea(target: EventTarget | null): boolean {
 }
 
 
+
+function modelAssetFilenames(cfg: PetConfigPayload): string[] {
+  const files = [cfg.skel_file, cfg.atlas_file, cfg.png_file];
+  if (cfg.config_file) files.push(cfg.config_file);
+  return files.filter(Boolean);
+}
 
 function assetConfigFromPayload(cfg: PetConfigPayload): PetAssetConfig {
   const base = cfg.asset_base.endsWith("/") ? cfg.asset_base : `${cfg.asset_base}/`;
@@ -867,6 +883,7 @@ function applyStageOffset(x: number, y: number) {
 async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
 
   const mode = (cfg.power_mode as PowerMode) || "balanced";
+  const skipBoot = opts?.skipBoot ?? false;
 
   stageScale = cfg.scale || 0.8;
 
@@ -876,15 +893,19 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
 
   clampStageOffset();
 
+  await preloadModelAssets(cfg.model_id, modelAssetFilenames(cfg), cfg.use_file_src);
+
   petAssetResolver?.dispose();
   petAssetResolver = createPetAssetResolver(cfg);
   const assets = assetConfigFromPayload(cfg);
   lastFallbackSrc = await petAssetResolver.urlFor(cfg.png_file);
   fallback.src = lastFallbackSrc;
 
-
-
-  await applyWindowSize(cfg.window_width || 240, cfg.window_height || 320);
+  const nextW = cfg.window_width || 240;
+  const nextH = cfg.window_height || 320;
+  if (nextW !== canvasDisplayW || nextH !== canvasDisplayH) {
+    await applyWindowSize(nextW, nextH);
+  }
 
   canvasWrap.style.visibility = "hidden";
   pet?.dispose();
@@ -934,7 +955,7 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
     pet = new SpinePet(canvas, assets, {
       powerMode: mode,
       resolveAssetUrl: petAssetResolver.urlFor,
-      skipBootAnimation: opts?.skipBoot ?? false,
+      skipBootAnimation: skipBoot,
       ...animOptions,
       onTap: (animation) => {
         if (!animation) return;
@@ -1599,7 +1620,7 @@ stage.addEventListener("dblclick", async (e) => {
 
   endWindowDrag();
 
-  await invoke("pet_open_main");
+  await invoke("pet_open_main", { page: null });
 
 });
 
@@ -1677,6 +1698,10 @@ document.addEventListener("click", (e) => {
 
 
 
+void getCurrentWindow().listen("tauri://focus", () => {
+  void getCurrentWindow().setAlwaysOnTop(true);
+});
+
 void getCurrentWindow().listen("tauri://blur", () => {
 
   if (Date.now() < editBoundsSuppressUntil) {
@@ -1725,6 +1750,10 @@ menu.addEventListener("mouseleave", () => {
 
 
 
+menu.addEventListener("mousedown", (e) => {
+  e.stopPropagation();
+});
+
 menu.addEventListener("click", async (e) => {
 
   e.stopPropagation();
@@ -1753,14 +1782,17 @@ menu.addEventListener("click", async (e) => {
 
   toggleMenu(false);
 
-  if (action === "main") {
-
-    await invoke("pet_open_main");
-
-  } else if (action === "hide") {
-
-    await invoke("pet_hide", { destroy: false });
-
+  try {
+    if (action === "main") {
+      await invoke("pet_open_main", { page: null });
+    } else if (action === "hide") {
+      await invoke("pet_hide", { destroy: false });
+    } else if (action === "quit") {
+      await invoke("app_exit");
+    }
+  } catch (err) {
+    console.error("桌宠菜单操作失败", err);
+    showPetLoadError(err);
   }
 
 });

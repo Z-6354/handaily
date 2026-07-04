@@ -3,6 +3,7 @@ identifier = "allow-app-commands"
 description = "小寒日报主应用 invoke 命令"
 commands.allow = [
   "app_ping",
+  "app_exit",
   "app_get_data_path",
   "app_get_prompts_path",
   "app_get_vendors_config_path",
@@ -42,7 +43,9 @@ commands.allow = [
   "persona_get_detail",
   "persona_import",
   "persona_import_text",
+  "persona_import_wiki",
   "persona_update",
+  "persona_delete",
   "character_list",
   "character_get",
   "character_create",
@@ -86,6 +89,7 @@ commands.allow = [
   "pet_clear_import_staging",
   "pet_commit_import",
   "pet_read_model_asset",
+  "pet_read_model_bundle",
   "pet_delete_model",
   "pet_sync_animations",
   "pet_set_idle_animation",

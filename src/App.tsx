@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   xiaohan,
   type OverviewPayload,
@@ -87,6 +88,8 @@ const MORE_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
   { id: "help", label: "帮助", icon: <IconHelp /> },
 ];
 
+const PAGE_IDS = new Set<string>(Object.keys(PAGE_META));
+
 export default function App() {
   const [page, setPage] = useState<Page>("today");
   const [overview, setOverview] = useState<OverviewPayload | null>(null);
@@ -127,6 +130,19 @@ export default function App() {
     refresh();
     const id = setInterval(refresh, 5000);
     return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<string>("main-navigate", (ev) => {
+      const id = ev.payload?.trim();
+      if (id && PAGE_IDS.has(id)) setPage(id as Page);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
   const meta = PAGE_META[page];

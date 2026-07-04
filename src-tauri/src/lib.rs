@@ -40,7 +40,24 @@ pub mod vault;
 pub mod work_type;
 
 use std::sync::Arc;
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent};
+
+/// 主窗口首次显示前在隐藏状态下铺满工作区，避免先露出 960×640 再播放最大化动画。
+fn prepare_main_window_for_first_show(win: &WebviewWindow) {
+    if let Ok(Some(monitor)) = win.current_monitor() {
+        let area = monitor.work_area();
+        let _ = win.set_position(Position::Physical(PhysicalPosition::new(
+            area.position.x,
+            area.position.y,
+        )));
+        let _ = win.set_size(Size::Physical(PhysicalSize::new(
+            area.size.width,
+            area.size.height,
+        )));
+    } else {
+        let _ = win.maximize();
+    }
+}
 
 /// 应用启动入口：构建窗口、托盘、注册状态与 command、启动后台采样线程、处理退出 flush。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -78,9 +95,9 @@ pub fn run() {
             // 5. 时间线 AI：后台自动补全今日未缓存简介（不依赖打开时间线页）
             crate::timeline::scheduler::spawn(app.handle().clone(), app_state.clone());
 
-            // 5. 启动默认最大化；开发模式自动显示主窗口（release 仍默认隐藏到托盘）
+            // 5. 启动默认最大化；开发模式在隐藏状态下先铺好工作区再显示，避免小窗闪一下再放大
             if let Some(win) = app.get_webview_window("main") {
-                let _ = win.maximize();
+                prepare_main_window_for_first_show(&win);
                 #[cfg(debug_assertions)]
                 {
                     let _ = win.show();
@@ -95,6 +112,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::commands::app_ping,
+            ipc::commands::app_exit,
             ipc::commands::app_get_data_path,
             ipc::commands::app_get_prompts_path,
             ipc::commands::app_get_vendors_config_path,
@@ -133,7 +151,9 @@ pub fn run() {
             ipc::commands::persona_get_detail,
             ipc::commands::persona_import,
             ipc::commands::persona_import_text,
+            ipc::commands::persona_import_wiki,
             ipc::commands::persona_update,
+            ipc::commands::persona_delete,
             ipc::commands::app_get_personas_path,
             ipc::commands::ai_test_persona,
             ipc::commands::character_list,
@@ -181,6 +201,7 @@ pub fn run() {
             ipc::commands::pet_clear_import_staging,
             ipc::commands::pet_commit_import,
             ipc::commands::pet_read_model_asset,
+            ipc::commands::pet_read_model_bundle,
             ipc::commands::pet_delete_model,
             ipc::commands::pet_sync_animations,
             ipc::commands::pet_set_idle_animation,
@@ -199,10 +220,17 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
-            // 关闭=最小化到托盘：阻止销毁，改为隐藏
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            match event {
+                // 关闭=最小化到托盘：阻止销毁，改为隐藏
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    crate::pet::restore_pet_topmost_if_visible(window.app_handle());
+                }
+                WindowEvent::Focused(false) => {
+                    crate::pet::restore_pet_topmost_if_visible(window.app_handle());
+                }
+                _ => {}
             }
         })
         .build(tauri::generate_context!())

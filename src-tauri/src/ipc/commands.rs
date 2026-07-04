@@ -1,5 +1,6 @@
 //! `#[tauri::command]` 处理器
 
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Local;
@@ -696,6 +697,8 @@ pub async fn persona_import(
             None,
             None,
             &text,
+            PersonaImportProgress::text(),
+            false,
         )
         .await?;
         imported_ids.push(id);
@@ -732,6 +735,69 @@ pub async fn persona_import_text(
         name.as_deref(),
         None,
         &text,
+        PersonaImportProgress::text(),
+        false,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn persona_import_wiki(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    url: String,
+    persona_id: Option<String>,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<crate::persona::PersonaImportResult, String> {
+    crate::pet::wiki_scrape::validate_wiki_url(&url)?;
+
+    emit_persona_import_progress(
+        &app,
+        "fetch",
+        "正在爬取 Wiki 页面…",
+        1,
+        PERSONA_WIKI_IMPORT_STEP_TOTAL,
+    );
+    let html = crate::pet::wiki_scrape::fetch_wiki_page(&url).await?;
+
+    emit_persona_import_progress(
+        &app,
+        "parse",
+        "正在清洗并整理 Wiki 资料…",
+        2,
+        PERSONA_WIKI_IMPORT_STEP_TOTAL,
+    );
+    let extract = crate::pet::wiki_scrape::extract_persona_reference(&html, &url)?;
+
+    let data_dir = st.data_dir();
+    let resolved_name = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .or(extract.name_hint.as_deref());
+    let resolved_source = extract.source_hint.as_deref();
+
+    let new_id_owned = if persona_id.is_some() {
+        None
+    } else if id.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()) {
+        id.as_deref().map(str::trim).map(str::to_string)
+    } else if let Some(n) = resolved_name {
+        Some(crate::persona::suggest_persona_id(data_dir, n)?)
+    } else {
+        return Err("无法从 Wiki 识别角色名，请填写显示名称或人设 ID".into());
+    };
+
+    persona_process_reference(
+        &app,
+        &st,
+        persona_id.as_deref(),
+        new_id_owned.as_deref(),
+        resolved_name,
+        resolved_source,
+        &extract.text,
+        PersonaImportProgress::wiki_pipeline(),
+        true,
     )
     .await
 }
@@ -740,12 +806,39 @@ const PERSONA_THINKING_MODEL_ERR: &str =
     "请先在设置中配置思考模型（用于解析参考文本并生成 Skill）";
 
 const PERSONA_IMPORT_STEP_TOTAL: u32 = 3;
+const PERSONA_WIKI_IMPORT_STEP_TOTAL: u32 = 4;
+
+struct PersonaImportProgress {
+    offset: u32,
+    total: u32,
+}
+
+impl PersonaImportProgress {
+    fn text() -> Self {
+        Self {
+            offset: 0,
+            total: PERSONA_IMPORT_STEP_TOTAL,
+        }
+    }
+
+    fn wiki_pipeline() -> Self {
+        Self {
+            offset: 2,
+            total: PERSONA_WIKI_IMPORT_STEP_TOTAL,
+        }
+    }
+
+    fn step(&self, n: u32) -> u32 {
+        self.offset + n
+    }
+}
 
 fn emit_persona_import_progress(
     app: &tauri::AppHandle,
     step: &str,
     message: &str,
     step_index: u32,
+    step_total: u32,
 ) {
     let _ = app.emit(
         "persona-import-progress",
@@ -753,7 +846,7 @@ fn emit_persona_import_progress(
             step: step.to_string(),
             message: message.to_string(),
             step_index,
-            step_total: PERSONA_IMPORT_STEP_TOTAL,
+            step_total,
         },
     );
 }
@@ -786,44 +879,83 @@ async fn run_thinking_prompt(
 async fn preprocess_reference_text(
     app: &tauri::AppHandle,
     st: &State<'_, Arc<AppState>>,
-    preprocess_prompt: String,
+    data_dir: &Path,
+    name: &str,
+    source: &str,
+    text: &str,
+    from_wiki: bool,
+    progress: &PersonaImportProgress,
 ) -> Result<crate::db::character_profiles::CharacterProfileData, String> {
-    emit_persona_import_progress(
-        app,
-        "preprocess",
-        "正在解析参考文本为结构化资料…",
-        1,
-    );
-
-    let raw_profile = run_thinking_prompt(
-        st,
-        preprocess_prompt.clone(),
-        crate::ai::adapters::ChatOptions::preprocess(),
-    )
-    .await?;
-
-    match crate::persona_builder::parse_profile_json(&raw_profile) {
-        Ok(profile) => Ok(profile),
-        Err(first_err) if first_err.contains("不完整") || first_err.contains("EOF") => {
+    if from_wiki {
+        if let Some(profile) =
+            crate::persona_builder::try_profile_from_wiki_reference(text, name, source)
+        {
             emit_persona_import_progress(
                 app,
                 "preprocess",
-                "JSON 不完整，正在压缩重试…",
-                1,
+                "已本地解析 Wiki 资料，跳过 JSON 预处理…",
+                progress.step(1),
+                progress.total,
             );
-            let retry_prompt = format!(
-                "{preprocess_prompt}\n\n【重要】上次输出 JSON 被截断。请压缩：introduction≤300字、personality≤8条、sample_lines≤5条、extra≤3项，务必输出完整闭合的 JSON。"
-            );
-            let raw_retry = run_thinking_prompt(
-                st,
-                retry_prompt,
-                crate::ai::adapters::ChatOptions::preprocess(),
-            )
-            .await?;
-            crate::persona_builder::parse_profile_json_with_repair(&raw_retry, true)
+            return Ok(profile);
         }
-        Err(e) => Err(e),
     }
+
+    let tiers = crate::persona_builder::preprocess_attempt_tiers(from_wiki, text.chars().count());
+    let mut last_err = String::new();
+
+    for (attempt, (mode, max_chars)) in tiers.iter().enumerate() {
+        emit_persona_import_progress(
+            app,
+            "preprocess",
+            &if attempt == 0 {
+                if from_wiki {
+                    "正在解析 Wiki 资料为结构化 JSON…".to_string()
+                } else {
+                    "正在解析参考文本为结构化资料…".to_string()
+                }
+            } else {
+                format!(
+                    "JSON 不完整，正在压缩重试（{}/{}）…",
+                    attempt + 1,
+                    tiers.len()
+                )
+            },
+            progress.step(1),
+            progress.total,
+        );
+
+        let preprocess_prompt = crate::persona_builder::build_preprocess_prompt_limited(
+            data_dir,
+            name,
+            source,
+            text,
+            *mode,
+            Some(*max_chars),
+        )?;
+
+        let raw_profile = run_thinking_prompt(
+            st,
+            preprocess_prompt,
+            crate::ai::adapters::ChatOptions::preprocess(),
+        )
+        .await?;
+
+        let is_last = attempt + 1 == tiers.len();
+        match crate::persona_builder::parse_profile_json_with_repair(&raw_profile, is_last) {
+            Ok(profile) => return Ok(profile),
+            Err(e) if !is_last && crate::persona_builder::is_truncated_profile_error(&e) => {
+                last_err = e;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(if last_err.is_empty() {
+        "AI 未能生成完整 JSON，请更换思考模型或缩短参考文本".into()
+    } else {
+        last_err
+    })
 }
 
 async fn persona_process_reference(
@@ -834,6 +966,8 @@ async fn persona_process_reference(
     name: Option<&str>,
     source: Option<&str>,
     text: &str,
+    progress: PersonaImportProgress,
+    from_wiki: bool,
 ) -> Result<crate::persona::PersonaImportResult, String> {
     let text = text.trim();
     if text.is_empty() {
@@ -856,42 +990,71 @@ async fn persona_process_reference(
         .unwrap_or(&args.id);
     let display_source = args.source_hint.as_deref().unwrap_or("");
 
-    let preprocess_prompt = if args.is_update {
+    let profile = if args.is_update {
         if let Some(existing) = crate::persona::load_persona_profile(data_dir, &args.id) {
             if crate::persona_builder::profile_has_content(&existing) {
-                crate::persona_builder::build_merge_prompt_from_profile(data_dir, &existing, text)?
+                let merge_prompt =
+                    crate::persona_builder::build_merge_prompt_from_profile(data_dir, &existing, text)?;
+                emit_persona_import_progress(
+                    app,
+                    "preprocess",
+                    "正在合并现有资料与新参考文本…",
+                    progress.step(1),
+                    progress.total,
+                );
+                let raw = run_thinking_prompt(
+                    st,
+                    merge_prompt,
+                    crate::ai::adapters::ChatOptions::preprocess(),
+                )
+                .await?;
+                crate::persona_builder::parse_profile_json_with_repair(&raw, true)?
             } else {
-                crate::persona_builder::build_preprocess_prompt_from_text(
+                preprocess_reference_text(
+                    app,
+                    st,
                     data_dir,
                     display_name,
                     display_source,
                     text,
-                )?
+                    from_wiki,
+                    &progress,
+                )
+                .await?
             }
         } else {
-            crate::persona_builder::build_preprocess_prompt_from_text(
+            preprocess_reference_text(
+                app,
+                st,
                 data_dir,
                 display_name,
                 display_source,
                 text,
-            )?
+                from_wiki,
+                &progress,
+            )
+            .await?
         }
     } else {
-        crate::persona_builder::build_preprocess_prompt_from_text(
+        preprocess_reference_text(
+            app,
+            st,
             data_dir,
             display_name,
             display_source,
             text,
-        )?
+            from_wiki,
+            &progress,
+        )
+        .await?
     };
-
-    let profile = preprocess_reference_text(app, st, preprocess_prompt).await?;
 
     emit_persona_import_progress(
         app,
         "skill",
         "正在生成 Skill 文档…",
-        2,
+        progress.step(2),
+        progress.total,
     );
 
     let skill_prompt =
@@ -904,7 +1067,13 @@ async fn persona_process_reference(
     .await?;
     let skill_md = crate::persona_builder::strip_md_fence(&raw_skill);
 
-    emit_persona_import_progress(app, "save", "正在写入人设文件…", 3);
+    emit_persona_import_progress(
+        app,
+        "save",
+        "正在写入人设文件…",
+        progress.step(3),
+        progress.total,
+    );
 
     let meta = crate::persona_builder::save_processed_persona(
         data_dir,
@@ -932,6 +1101,15 @@ pub async fn persona_update(
     input: crate::persona::PersonaUpdateInput,
 ) -> Result<(), String> {
     crate::persona::update_persona(st.data_dir(), &persona_id, &input)
+}
+
+#[tauri::command]
+pub async fn persona_delete(
+    st: State<'_, Arc<AppState>>,
+    persona_id: String,
+) -> Result<(), String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    crate::persona::delete_persona(st.data_dir(), &db, &persona_id)
 }
 
 #[derive(Serialize)]
@@ -1386,12 +1564,19 @@ pub fn pet_get_screen_bounds() -> crate::pet::PetScreenBounds {
 }
 
 #[tauri::command]
-pub async fn pet_open_main(app: tauri::AppHandle) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("main") {
-        win.show().map_err(|e| e.to_string())?;
-        win.set_focus().map_err(|e| e.to_string())?;
-    }
-    Ok(())
+pub fn app_exit(app: tauri::AppHandle, st: State<'_, Arc<AppState>>) {
+    st.stop_flag
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = crate::pet::destroy_pet_window(&app);
+    app.exit(0);
+}
+
+#[tauri::command]
+pub async fn pet_open_main(
+    app: tauri::AppHandle,
+    page: Option<String>,
+) -> Result<(), String> {
+    crate::pet::show_main_window(&app, page.as_deref())
 }
 
 #[tauri::command]
@@ -1517,29 +1702,16 @@ pub async fn pet_read_model_asset(
     model_id: String,
     filename: String,
 ) -> Result<String, String> {
-    let assets = crate::pet::models::resolve_assets(st.data_dir(), &model_id)?;
-    if !assets.use_file_src {
-        return Err("内置模型请使用静态资源路径".into());
-    }
-    let name = filename.trim();
-    if name.is_empty()
-        || name.contains("..")
-        || name.contains('/')
-        || name.contains('\\')
-    {
-        return Err("非法文件名".into());
-    }
-    let path = crate::pet::models::models_dir(st.data_dir())
-        .join(&model_id)
-        .join(name);
-    if !path.is_file() {
-        return Err(format!("文件不存在: {name}"));
-    }
-    let data = std::fs::read(&path).map_err(|e| e.to_string())?;
-    Ok(base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        data,
-    ))
+    crate::pet::models::read_model_asset_b64(st.data_dir(), &model_id, &filename)
+}
+
+#[tauri::command]
+pub async fn pet_read_model_bundle(
+    st: State<'_, Arc<AppState>>,
+    model_id: String,
+    filenames: Vec<String>,
+) -> Result<crate::pet::models::PetModelAssetBundle, String> {
+    crate::pet::models::read_model_asset_bundle(st.data_dir(), &model_id, &filenames)
 }
 
 #[tauri::command]

@@ -8,6 +8,89 @@ use serde::{Deserialize, Serialize};
 
 pub const BUILTIN_CHAIJUN: &str = "chaijun";
 
+struct BuiltinModelDef {
+    id: &'static str,
+    name: &'static str,
+    skel: &'static str,
+    atlas: &'static str,
+    png: &'static str,
+    meta_json: &'static str,
+}
+
+const BUILTIN_MODELS: &[BuiltinModelDef] = &[
+    BuiltinModelDef {
+        id: "chaijun",
+        name: "柴郡",
+        skel: "chaijun.skel",
+        atlas: "chaijun.atlas",
+        png: "chaijun.png",
+        meta_json: include_str!("../../../public/assets/pet/chaijun/animations.meta.json"),
+    },
+    BuiltinModelDef {
+        id: "edu",
+        name: "恶毒",
+        skel: "edu_3.skel",
+        atlas: "edu_3.atlas",
+        png: "edu_3.png",
+        meta_json: include_str!("../../../public/assets/pet/edu/animations.meta.json"),
+    },
+    BuiltinModelDef {
+        id: "wushiling",
+        name: "五十铃",
+        skel: "wushiling.skel",
+        atlas: "wushiling.atlas",
+        png: "wushiling.png",
+        meta_json: include_str!("../../../public/assets/pet/wushiling/animations.meta.json"),
+    },
+    BuiltinModelDef {
+        id: "qiye",
+        name: "企业",
+        skel: "qiye.skel",
+        atlas: "qiye.atlas",
+        png: "qiye.png",
+        meta_json: include_str!("../../../public/assets/pet/qiye/animations.meta.json"),
+    },
+    BuiltinModelDef {
+        id: "tashigan",
+        name: "塔什干",
+        skel: "tashigan.skel",
+        atlas: "tashigan.atlas",
+        png: "tashigan.png",
+        meta_json: include_str!("../../../public/assets/pet/tashigan/animations.meta.json"),
+    },
+];
+
+/// 旧版 Wiki 导入哈希 ID → 内置 slug
+const LEGACY_BUILTIN_IDS: &[(&str, &str)] = &[
+    ("m951a05aa", "edu"),
+    ("ma19bdb1b", "wushiling"),
+    ("mc5623cfa", "qiye"),
+    ("mea9d211a", "tashigan"),
+];
+
+fn find_builtin(id: &str) -> Option<&'static BuiltinModelDef> {
+    BUILTIN_MODELS.iter().find(|m| m.id == id)
+}
+
+fn is_builtin_id(id: &str) -> bool {
+    find_builtin(id).is_some()
+}
+
+fn legacy_builtin_slug(id: &str) -> Option<&'static str> {
+    LEGACY_BUILTIN_IDS
+        .iter()
+        .find(|(legacy, _)| *legacy == id)
+        .map(|(_, slug)| *slug)
+}
+
+fn resolve_builtin_id(id: &str) -> &str {
+    legacy_builtin_slug(id).unwrap_or(id)
+}
+
+fn is_legacy_or_builtin_id(id: &str) -> bool {
+    is_builtin_id(id) || legacy_builtin_slug(id).is_some()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PetModelInfo {
     pub id: String,
@@ -261,14 +344,68 @@ pub fn commit_staged_import(data_dir: &Path, name: &str) -> Result<PetModelInfo,
     })
 }
 
+fn validate_model_filename(filename: &str) -> Result<&str, String> {
+    let name = filename.trim();
+    if name.is_empty() || name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err("非法文件名".into());
+    }
+    Ok(name)
+}
+
+/// 读取用户模型资源文件（base64），供桌宠前端加载。
+pub fn read_model_asset_b64(data_dir: &Path, model_id: &str, filename: &str) -> Result<String, String> {
+    let name = validate_model_filename(filename)?;
+    let assets = resolve_assets(data_dir, model_id)?;
+    if !assets.use_file_src {
+        return Err("内置模型请使用静态资源路径".into());
+    }
+    let path = models_dir(data_dir).join(model_id).join(name);
+    if !path.is_file() {
+        return Err(format!("文件不存在: {name}"));
+    }
+    let data = fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(data))
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PetModelAssetBundle {
+    pub files: std::collections::HashMap<String, String>,
+}
+
+/// 一次读取多个模型文件，减少 IPC 往返。
+pub fn read_model_asset_bundle(
+    data_dir: &Path,
+    model_id: &str,
+    filenames: &[String],
+) -> Result<PetModelAssetBundle, String> {
+    let assets = resolve_assets(data_dir, model_id)?;
+    if !assets.use_file_src {
+        return Err("内置模型请使用静态资源路径".into());
+    }
+    let dir = models_dir(data_dir).join(model_id);
+    let mut files = std::collections::HashMap::new();
+    for filename in filenames {
+        let name = validate_model_filename(filename)?;
+        let path = dir.join(name);
+        if !path.is_file() {
+            return Err(format!("文件不存在: {name}"));
+        }
+        let data = fs::read(&path).map_err(|e| e.to_string())?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(data);
+        files.insert(name.to_string(), b64);
+    }
+    Ok(PetModelAssetBundle { files })
+}
+
 pub fn models_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("pet-models")
 }
 
 pub fn active_model_id(db: &rusqlite::Connection) -> String {
-    crate::db::get_setting(db, "pet_model_id")
+    let id = crate::db::get_setting(db, "pet_model_id")
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| BUILTIN_CHAIJUN.to_string())
+        .unwrap_or_else(|| BUILTIN_CHAIJUN.to_string());
+    resolve_builtin_id(&id).to_string()
 }
 
 pub fn set_active_model_id(db: &rusqlite::Connection, id: &str) -> Result<(), String> {
@@ -276,11 +413,14 @@ pub fn set_active_model_id(db: &rusqlite::Connection, id: &str) -> Result<(), St
 }
 
 pub fn list_models(data_dir: &Path) -> Result<Vec<PetModelInfo>, String> {
-    let mut out = vec![PetModelInfo {
-        id: BUILTIN_CHAIJUN.into(),
-        name: "柴郡（内置）".into(),
-        builtin: true,
-    }];
+    let mut out: Vec<PetModelInfo> = BUILTIN_MODELS
+        .iter()
+        .map(|m| PetModelInfo {
+            id: m.id.into(),
+            name: m.name.into(),
+            builtin: true,
+        })
+        .collect();
 
     let dir = models_dir(data_dir);
     if dir.is_dir() {
@@ -292,7 +432,7 @@ pub fn list_models(data_dir: &Path) -> Result<Vec<PetModelInfo>, String> {
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let id = entry.file_name().to_string_lossy().to_string();
-            if id == BUILTIN_CHAIJUN {
+            if is_legacy_or_builtin_id(&id) {
                 continue;
             }
             if resolve_user_dir(&entry.path()).is_ok() {
@@ -309,15 +449,16 @@ pub fn list_models(data_dir: &Path) -> Result<Vec<PetModelInfo>, String> {
 }
 
 pub fn resolve_assets(data_dir: &Path, model_id: &str) -> Result<PetModelAssets, String> {
-    if model_id == BUILTIN_CHAIJUN {
+    let resolved = resolve_builtin_id(model_id);
+    if let Some(m) = find_builtin(resolved) {
         return Ok(PetModelAssets {
-            model_id: BUILTIN_CHAIJUN.into(),
-            model_name: "柴郡（内置）".into(),
-            asset_base: format!("/assets/pet/{BUILTIN_CHAIJUN}/"),
+            model_id: m.id.into(),
+            model_name: m.name.into(),
+            asset_base: format!("/assets/pet/{}/", m.id),
             config_file: Some("config.json".into()),
-            skel_file: "chaijun.skel".into(),
-            atlas_file: "chaijun.atlas".into(),
-            png_file: "chaijun.png".into(),
+            skel_file: m.skel.into(),
+            atlas_file: m.atlas.into(),
+            png_file: m.png.into(),
             use_file_src: false,
         });
     }
@@ -558,10 +699,29 @@ fn meta_db_key(model_id: &str) -> String {
     format!("pet_anim_meta_{model_id}")
 }
 
-const ANIM_META_FILENAME: &str = "animations.meta.json";
+/// 启动时将旧版导入哈希 ID 迁移为内置 slug（pet_model_id 与台词/动作 meta）
+pub fn migrate_legacy_builtin_models(db: &rusqlite::Connection) -> Result<(), String> {
+    if let Some(active) = crate::db::get_setting(db, "pet_model_id") {
+        if let Some(slug) = legacy_builtin_slug(&active) {
+            set_active_model_id(db, slug)?;
+        }
+    }
+    for (legacy, slug) in LEGACY_BUILTIN_IDS {
+        let legacy_key = meta_db_key(legacy);
+        if let Some(raw) = crate::db::get_setting(db, &legacy_key) {
+            if !raw.trim().is_empty() {
+                let new_key = meta_db_key(slug);
+                if crate::db::get_setting(db, &new_key).is_none() {
+                    crate::db::set_setting(db, &new_key, &raw).map_err(|e| e.to_string())?;
+                }
+                crate::db::set_setting(db, &legacy_key, "").map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    Ok(())
+}
 
-const BUILTIN_CHAIJUN_META: &str =
-    include_str!("../../../public/assets/pet/chaijun/animations.meta.json");
+const ANIM_META_FILENAME: &str = "animations.meta.json";
 
 /// 导入新模型时使用的默认动作/台词模板（与 config/pet-action-template.json 同步）
 const IMPORT_ACTION_TEMPLATE: &str = include_str!("../../../config/pet-action-template.json");
@@ -718,7 +878,7 @@ pub fn apply_import_action_template(
     db: &rusqlite::Connection,
     model_id: &str,
 ) -> Result<(), String> {
-    if model_id == BUILTIN_CHAIJUN {
+    if is_builtin_id(resolve_builtin_id(model_id)) {
         return Ok(());
     }
     let mut meta = read_import_action_template();
@@ -731,10 +891,9 @@ fn meta_persist_dir(data_dir: &Path, model_id: &str) -> PathBuf {
 }
 
 fn read_bundled_animation_meta(model_id: &str) -> Option<PetAnimationMeta> {
-    if model_id != BUILTIN_CHAIJUN {
-        return None;
-    }
-    serde_json::from_str(BUILTIN_CHAIJUN_META).ok()
+    let resolved = resolve_builtin_id(model_id);
+    let m = find_builtin(resolved)?;
+    serde_json::from_str(m.meta_json).ok()
 }
 
 fn merge_meta_defaults(meta: &mut PetAnimationMeta, defaults: &PetAnimationMeta) {
@@ -971,7 +1130,7 @@ pub fn read_animation_meta(
             }
         }
     }
-    if model_id != BUILTIN_CHAIJUN {
+    if !is_builtin_id(resolve_builtin_id(model_id)) {
         let dir = models_dir(data_dir).join(model_id);
         if dir.is_dir() {
             if let Some(mut meta) = read_animation_meta_file(&dir) {
@@ -999,7 +1158,7 @@ pub fn save_animation_meta(
     let persist_dir = meta_persist_dir(data_dir, model_id);
     fs::create_dir_all(&persist_dir).map_err(|e| e.to_string())?;
     fs::write(persist_dir.join(ANIM_META_FILENAME), &json).map_err(|e| e.to_string())?;
-    if model_id != BUILTIN_CHAIJUN {
+    if !is_builtin_id(resolve_builtin_id(model_id)) {
         let dir = models_dir(data_dir).join(model_id);
         if dir.is_dir() {
             write_animation_meta_file(&dir, meta)?;
@@ -1052,7 +1211,7 @@ pub fn sync_animations(
         }
         if let Some(defaults) = read_bundled_animation_meta(&payload.model_id) {
             merge_meta_defaults(&mut meta, &defaults);
-        } else if payload.model_id != BUILTIN_CHAIJUN {
+        } else if !is_builtin_id(resolve_builtin_id(&payload.model_id)) {
             apply_template_to_meta(&mut meta, &read_import_action_template());
         }
     }
@@ -1598,7 +1757,7 @@ pub fn delete_model(
     db: &rusqlite::Connection,
     model_id: &str,
 ) -> Result<(), String> {
-    if model_id == BUILTIN_CHAIJUN {
+    if is_builtin_id(resolve_builtin_id(model_id)) {
         return Err("内置模型不能删除".into());
     }
     let dir = models_dir(data_dir).join(model_id);

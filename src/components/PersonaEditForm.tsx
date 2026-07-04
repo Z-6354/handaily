@@ -20,14 +20,38 @@ const EMPTY_PROFILE: CharacterProfileData = {
   extra: {},
 };
 
+function profileFromForm(
+  base: CharacterProfileData,
+  introduction: string,
+  speechStyle: string,
+  personalityText: string,
+): CharacterProfileData {
+  const personality = personalityText
+    .split(/\n|,|，|、/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return {
+    ...base,
+    introduction: introduction.trim(),
+    speech_style: speechStyle.trim(),
+    personality,
+  };
+}
+
 export function PersonaEditForm({ detail, onSaved }: Props) {
   const [name, setName] = useState(detail.name);
   const [source, setSource] = useState(detail.source);
   const [description, setDescription] = useState(detail.description);
   const [skillMd, setSkillMd] = useState(detail.skill_md);
+  const [introduction, setIntroduction] = useState(detail.profile_json.introduction ?? "");
+  const [speechStyle, setSpeechStyle] = useState(detail.profile_json.speech_style ?? "");
+  const [personalityText, setPersonalityText] = useState(
+    (detail.profile_json.personality ?? []).join("\n"),
+  );
   const [profileJson, setProfileJson] = useState(
     () => JSON.stringify(detail.profile_json, null, 2),
   );
+  const [showRawJson, setShowRawJson] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<SettingsFeedback | null>(null);
 
@@ -36,6 +60,9 @@ export function PersonaEditForm({ detail, onSaved }: Props) {
     setSource(detail.source);
     setDescription(detail.description);
     setSkillMd(detail.skill_md);
+    setIntroduction(detail.profile_json.introduction ?? "");
+    setSpeechStyle(detail.profile_json.speech_style ?? "");
+    setPersonalityText((detail.profile_json.personality ?? []).join("\n"));
     setProfileJson(JSON.stringify(detail.profile_json, null, 2));
     setFeedback(null);
   }, [detail.id, detail.name, detail.source, detail.description, detail.skill_md, detail.profile_json]);
@@ -45,10 +72,22 @@ export function PersonaEditForm({ detail, onSaved }: Props) {
     setFeedback(null);
     try {
       let profile: CharacterProfileData;
-      try {
-        profile = JSON.parse(profileJson) as CharacterProfileData;
-      } catch {
-        throw new Error("结构化资料 JSON 格式不正确");
+      if (showRawJson) {
+        try {
+          profile = JSON.parse(profileJson) as CharacterProfileData;
+        } catch {
+          throw new Error("结构化资料 JSON 格式不正确");
+        }
+      } else {
+        let base: CharacterProfileData;
+        try {
+          base = JSON.parse(profileJson) as CharacterProfileData;
+        } catch {
+          base = { ...EMPTY_PROFILE, ...detail.profile_json, name: detail.profile_json.name || name };
+        }
+        profile = profileFromForm(base, introduction, speechStyle, personalityText);
+        profile.name = profile.name || name.trim();
+        profile.source = profile.source || source.trim();
       }
       await xiaohan.personaUpdate(detail.id, {
         name: name.trim(),
@@ -64,6 +103,18 @@ export function PersonaEditForm({ detail, onSaved }: Props) {
     } finally {
       setSaving(false);
     }
+  };
+
+  const reset = () => {
+    setName(detail.name);
+    setSource(detail.source);
+    setDescription(detail.description);
+    setSkillMd(detail.skill_md);
+    setIntroduction(detail.profile_json.introduction ?? "");
+    setSpeechStyle(detail.profile_json.speech_style ?? "");
+    setPersonalityText((detail.profile_json.personality ?? []).join("\n"));
+    setProfileJson(JSON.stringify(detail.profile_json ?? EMPTY_PROFILE, null, 2));
+    setFeedback(null);
   };
 
   return (
@@ -101,6 +152,51 @@ export function PersonaEditForm({ detail, onSaved }: Props) {
       </div>
 
       <div className="persona-edit-section">
+        <div className="persona-edit-section-title">结构化资料</div>
+        <div className="persona-edit-fields">
+          <label className="persona-edit-label persona-edit-label--full">
+            介绍
+            <textarea
+              className="persona-edit-textarea"
+              rows={4}
+              value={introduction}
+              onChange={(e) => setIntroduction(e.target.value)}
+              placeholder="角色背景与设定摘要"
+              disabled={showRawJson}
+            />
+          </label>
+          <label className="persona-edit-label persona-edit-label--full">
+            说话风格
+            <input
+              className="persona-edit-input"
+              value={speechStyle}
+              onChange={(e) => setSpeechStyle(e.target.value)}
+              placeholder="语气、口癖、称呼习惯"
+              disabled={showRawJson}
+            />
+          </label>
+          <label className="persona-edit-label persona-edit-label--full">
+            性格
+            <textarea
+              className="persona-edit-textarea"
+              rows={3}
+              value={personalityText}
+              onChange={(e) => setPersonalityText(e.target.value)}
+              placeholder="每行一条，或用逗号分隔"
+              disabled={showRawJson}
+            />
+          </label>
+        </div>
+        <button
+          type="button"
+          className="btn-link btn-sm persona-edit-json-toggle"
+          onClick={() => setShowRawJson((v) => !v)}
+        >
+          {showRawJson ? "收起 JSON 编辑" : "展开 JSON 高级编辑"}
+        </button>
+      </div>
+
+      <div className="persona-edit-section">
         <div className="persona-edit-section-title">Skill 文档</div>
         <textarea
           className="persona-edit-textarea"
@@ -111,34 +207,24 @@ export function PersonaEditForm({ detail, onSaved }: Props) {
         />
       </div>
 
-      <div className="persona-edit-section">
-        <div className="persona-edit-section-title">结构化资料（JSON）</div>
-        <textarea
-          className="persona-edit-textarea persona-edit-textarea--mono"
-          rows={12}
-          value={profileJson}
-          onChange={(e) => setProfileJson(e.target.value)}
-          spellCheck={false}
-        />
-      </div>
+      {showRawJson && (
+        <div className="persona-edit-section">
+          <div className="persona-edit-section-title">结构化资料（JSON）</div>
+          <textarea
+            className="persona-edit-textarea persona-edit-textarea--mono"
+            rows={12}
+            value={profileJson}
+            onChange={(e) => setProfileJson(e.target.value)}
+            spellCheck={false}
+          />
+        </div>
+      )}
 
       <div className="persona-edit-actions">
         <button type="button" className="btn-primary btn-sm" disabled={saving} onClick={save}>
           {saving ? "保存中…" : "保存修改"}
         </button>
-        <button
-          type="button"
-          className="btn-secondary btn-sm"
-          disabled={saving}
-          onClick={() => {
-            setName(detail.name);
-            setSource(detail.source);
-            setDescription(detail.description);
-            setSkillMd(detail.skill_md);
-            setProfileJson(JSON.stringify(detail.profile_json ?? EMPTY_PROFILE, null, 2));
-            setFeedback(null);
-          }}
-        >
+        <button type="button" className="btn-secondary btn-sm" disabled={saving} onClick={reset}>
           还原
         </button>
       </div>

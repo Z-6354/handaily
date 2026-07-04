@@ -508,7 +508,13 @@ export function SettingsPanel({ onTrackingChange }: Props) {
                       <button className="btn-secondary btn-sm" onClick={() => importModels("text")}>
                         导入模型
                       </button>
-                      <button className="btn-secondary btn-sm" onClick={() => setCustomModal("text")}>
+                      <button
+                        className="btn-secondary btn-sm model-pick-add-btn"
+                        onClick={() => {
+                          setImportFeedback((prev) => ({ ...prev, text: undefined }));
+                          setCustomModal("text");
+                        }}
+                      >
                         手动添加
                       </button>
                     </div>
@@ -558,8 +564,11 @@ export function SettingsPanel({ onTrackingChange }: Props) {
                         导入模型
                       </button>
                       <button
-                        className="btn-secondary btn-sm"
-                        onClick={() => setCustomModal("vision")}
+                        className="btn-secondary btn-sm model-pick-add-btn"
+                        onClick={() => {
+                          setImportFeedback((prev) => ({ ...prev, vision: undefined }));
+                          setCustomModal("vision");
+                        }}
                       >
                         手动添加
                       </button>
@@ -613,8 +622,11 @@ export function SettingsPanel({ onTrackingChange }: Props) {
                         导入模型
                       </button>
                       <button
-                        className="btn-secondary btn-sm"
-                        onClick={() => setCustomModal("thinking")}
+                        className="btn-secondary btn-sm model-pick-add-btn"
+                        onClick={() => {
+                          setImportFeedback((prev) => ({ ...prev, thinking: undefined }));
+                          setCustomModal("thinking");
+                        }}
                       >
                         手动添加
                       </button>
@@ -824,11 +836,36 @@ export function SettingsPanel({ onTrackingChange }: Props) {
 
       <AiModelModal
         open={customModal !== null}
+        kind={customModal}
+        vendorId={
+          customModal === "text"
+            ? aiConfig.text_vendor_id
+            : customModal === "vision"
+              ? aiConfig.vision_vendor_id
+              : aiConfig.thinking_vendor_id || aiConfig.text_vendor_id
+        }
+        vendorName={
+          aiConfig.vendors.find(
+            (v) =>
+              v.id ===
+              (customModal === "text"
+                ? aiConfig.text_vendor_id
+                : customModal === "vision"
+                  ? aiConfig.vision_vendor_id
+                  : aiConfig.thinking_vendor_id || aiConfig.text_vendor_id),
+          )?.name ?? "当前供应商"
+        }
+        existingCustom={aiConfig.custom_models}
+        feedback={customModal ? importFeedback[customModal] ?? null : null}
         onClose={() => setCustomModal(null)}
         onSubmit={async (id, name) => {
           if (!customModal) return;
           try {
             await addCustomModel(customModal, id, name);
+            setImportFeedback((prev) => ({
+              ...prev,
+              [customModal]: successFeedback(`已添加模型「${name || id}」`),
+            }));
           } catch (e) {
             setImportFeedback((prev) => ({
               ...prev,

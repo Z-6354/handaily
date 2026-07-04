@@ -38,6 +38,14 @@ const DEFAULTS: &[(&str, &str)] = &[
         include_str!("../../../prompts/persona-preprocess.md"),
     ),
     (
+        "persona-preprocess-compact",
+        include_str!("../../../prompts/persona-preprocess-compact.md"),
+    ),
+    (
+        "persona-preprocess-minimal",
+        include_str!("../../../prompts/persona-preprocess-minimal.md"),
+    ),
+    (
         "persona-skill-generate",
         include_str!("../../../prompts/persona-skill-generate.md"),
     ),

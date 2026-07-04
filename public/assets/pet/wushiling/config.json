@@ -1,0 +1,20 @@
+{
+  "atlases": [
+    {
+      "atlas": "wushiling.atlas",
+      "tex_names": [
+        "wushiling"
+      ],
+      "textures": [
+        "wushiling.png"
+      ]
+    }
+  ],
+  "conf_ver": 1,
+  "options": {
+    "edge_padding": false,
+    "tex_type": 0
+  },
+  "skeleton": "wushiling.skel",
+  "type": 9
+}

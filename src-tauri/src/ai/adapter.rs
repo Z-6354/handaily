@@ -260,12 +260,16 @@ impl PreparedThinkingChat {
         self,
         options: adapters::ChatOptions,
     ) -> Result<String, String> {
-        const SYSTEM: &str = "你是小寒日报的角色资料整理助手。严格按用户要求输出格式，不要闲聊。";
+        let system = if options.json_object {
+            "你是 JSON 结构化助手。只输出一个合法 JSON 对象，不要 markdown 代码块、不要解释文字、不要输出思考过程。若需取舍，优先保证 JSON 完整闭合。"
+        } else {
+            "你是小寒日报的角色资料整理助手。严格按用户要求输出格式，不要闲聊。"
+        };
         adapters::chat_text_with_options(
             &self.vendor_def,
             &self.api_key,
             &self.model,
-            Some(SYSTEM),
+            Some(system),
             &self.user_prompt,
             options,
         )
