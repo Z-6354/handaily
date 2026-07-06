@@ -13,6 +13,8 @@ commands.allow = [
   "tracking_set_enabled",
   "settings_get",
   "settings_save",
+  "autostart_get_status",
+  "autostart_set_enabled",
   "stats_today_overview",
   "stats_app_breakdown",
   "stats_hourly_activity",
@@ -103,5 +105,9 @@ commands.allow = [
   "pet_save_window_size",
   "pet_save_layout",
   "pet_log",
+  "pet_mark_spine_ready",
+  "pet_clear_spine_ready",
+  "pet_get_bubble_enabled",
+  "pet_set_bubble_enabled",
   "system_get_performance",
 ]

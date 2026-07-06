@@ -107,6 +107,7 @@ export interface PetStatus {
   power_mode: string;
   scale: number;
   remark_interval_sec: number;
+  bubble_enabled: boolean;
   model_id: string;
   model_name: string;
   animations: string[];

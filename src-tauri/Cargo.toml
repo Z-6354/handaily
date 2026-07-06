@@ -26,7 +26,9 @@ sha2 = "0.10"
 rand = "0.8"
 windows = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
     "Win32_System_Threading",
     "Win32_System_SystemInformation",
     "Win32_Foundation",
@@ -35,10 +37,10 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_Storage_FileSystem",
     "Win32_System_ProcessStatus",
-    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Media_Audio",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com",
+    "Win32_System_Registry",
 ] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -54,6 +56,15 @@ incremental = true
 lto = "thin"
 opt-level = 2
 strip = true
+
+# 日常导出 exe / NSIS：关闭 LTO、提高 codegen-units，链接明显更快（体积略增）
+[profile.release-fast]
+inherits = "release"
+lto = false
+codegen-units = 256
+opt-level = 2
+strip = true
+incremental = true
 
 [profile.release-small]
 inherits = "release"

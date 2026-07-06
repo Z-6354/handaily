@@ -13,12 +13,6 @@ import {
 } from "../lib/apiErrorMessage";
 import { xiaohan, type PetImportStagingPreview, type PetModelInfo } from "../lib/xiaohan";
 
-const POWER_MODE_LABEL: Record<string, string> = {
-  minimal: "极简",
-  balanced: "平衡",
-  full: "完整",
-};
-
 type PetTab = "overview" | "actions" | "lines" | "lines-import" | "import";
 
 const ACTION_TABS = new Set<PetTab>(["actions", "lines", "lines-import"]);
@@ -30,7 +24,6 @@ export function PetPanel() {
   const [busy, setBusy] = useState(false);
 
   const [petEnabled, setPetEnabled] = useState(true);
-  const [petPowerMode, setPetPowerMode] = useState<"minimal" | "balanced" | "full">("balanced");
   const [petScale, setPetScale] = useState(0.8);
   const [petRemarkInterval, setPetRemarkInterval] = useState(300);
   const [petModels, setPetModels] = useState<PetModelInfo[]>([]);
@@ -68,11 +61,6 @@ export function PetPanel() {
   const refreshStatus = useCallback(async () => {
     const status = await xiaohan.petGetStatus();
     setPetEnabled(status.enabled);
-    setPetPowerMode(
-      status.power_mode === "minimal" || status.power_mode === "full"
-        ? status.power_mode
-        : "balanced",
-    );
     setPetScale(status.scale);
     setPetRemarkInterval(status.remark_interval_sec);
     setPetModelId(status.model_id);
@@ -110,7 +98,6 @@ export function PetPanel() {
   }, [refreshStatus]);
 
   const saveModelSettings = async (settings: {
-    powerMode?: string;
     scale?: number;
     remarkIntervalSec?: number;
   }): Promise<boolean> => {
@@ -310,9 +297,7 @@ export function PetPanel() {
     />
   );
 
-  const overviewBadge = petEnabled
-    ? `${POWER_MODE_LABEL[petPowerMode] ?? "平衡"} · ${Math.round(petScale * 100)}%`
-    : "已关闭";
+  const overviewBadge = petEnabled ? `${Math.round(petScale * 100)}%` : "已关闭";
 
   const petTabs: { id: PetTab; label: string; badge?: string }[] = [
     { id: "overview", label: "概览", badge: overviewBadge },
@@ -400,28 +385,6 @@ export function PetPanel() {
                     }
                   }}
                 />
-
-                <div className="settings-field">
-                  <div className="settings-field-body">
-                    <div className="settings-field-label">省电模式</div>
-                    <div className="settings-field-hint">极简模式使用静态图，最省资源</div>
-                  </div>
-                  <select
-                    className="settings-select"
-                    value={petPowerMode}
-                    onChange={async (e) => {
-                      const mode = e.target.value as "minimal" | "balanced" | "full";
-                      const prev = petPowerMode;
-                      setPetPowerMode(mode);
-                      const ok = await saveModelSettings({ powerMode: mode });
-                      if (!ok) setPetPowerMode(prev);
-                    }}
-                  >
-                    <option value="minimal">极简（静态图）</option>
-                    <option value="balanced">平衡（推荐）</option>
-                    <option value="full">完整动画</option>
-                  </select>
-                </div>
 
                 <div className="settings-field">
                   <div className="settings-field-body">

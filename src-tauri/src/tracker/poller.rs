@@ -18,12 +18,15 @@ use crate::tracker::Snapshot;
 
 /// 采样间隔（秒）
 const POLL_INTERVAL_SECS: u64 = 2;
-/// checkpoint 间隔（秒）——每 60s flush open segment 一次
+/// 采集暂停时的采样间隔（秒）——降低空转唤醒
+const POLL_IDLE_SECS: u64 = 5;
+/// 定期 flush 间隔（秒）——仅 flush pending + WAL，不拆分 open segment
 const CHECKPOINT_SECS: u64 = 60;
 
 /// 启动后台采样线程，返回 JoinHandle 供退出时 join
 pub fn spawn_poller(state: Arc<AppState>) -> JoinHandle<()> {
     thread::spawn(move || {
+        crate::tracker::dampen_thread_priority();
         let mut tick = 0u64;
         loop {
             // 检查停机
@@ -31,28 +34,30 @@ pub fn spawn_poller(state: Arc<AppState>) -> JoinHandle<()> {
                 break;
             }
 
-            let threshold = read_idle_threshold(&state);
-
-            // 检查采集开关
-            if state
+            if !state
                 .tracking_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                let idle = idle::is_idle(threshold);
-                if let Some(mut snap) = win32::get_foreground_snapshot() {
-                    snap.is_idle = idle;
-                    process_snapshot(&state, &snap);
-                } else if idle {
-                    // 无前台窗口且用户空闲：记 idle 段，不产生 unknown
-                    process_snapshot(&state, &idle_placeholder_snapshot());
-                }
-                // 无前台且非空闲（如本应用在前台）：跳过本 tick，延续上一段
+                thread::sleep(Duration::from_secs(POLL_IDLE_SECS));
+                continue;
             }
 
-            // 每 60s checkpoint：flush open segment 到 DB，保证崩溃窗口 ≤60s
+            let threshold = read_idle_threshold(&state);
+
+            let idle = idle::is_idle(threshold);
+            if let Some(mut snap) = win32::get_foreground_snapshot() {
+                snap.is_idle = idle;
+                process_snapshot(&state, &snap);
+            } else if idle {
+                // 无前台窗口且用户空闲：记 idle 段，不产生 unknown
+                process_snapshot(&state, &idle_placeholder_snapshot());
+            }
+            // 无前台且非空闲（如本应用在前台）：跳过本 tick，延续上一段
+
+            // 每 60s：flush pending 短片段 + WAL（open segment 保持内存连续，切换/退出时再落盘）
             tick += POLL_INTERVAL_SECS;
             if tick >= CHECKPOINT_SECS {
-                flush_input_metrics(&state);
+                writer::flush_input_metrics(&state);
                 writer::checkpoint(&state);
                 tick = 0;
             }
@@ -187,23 +192,9 @@ fn rollover_if_new_day(state: &AppState) {
     }
 }
 
-/// 将键鼠/文件增量写入 daily_metrics
-fn flush_input_metrics(state: &AppState) {
-    let (mouse, keys, text, created, modified) = state.input_stats.take_flush_delta();
-    if let Ok(db) = state.lock_db() {
-        let _ = crate::db::metrics::upsert_delta(&db, mouse, keys, &text, created, modified);
-    }
-}
-
 /// 读 idle 阈值设置
 fn read_idle_threshold(state: &AppState) -> u64 {
-    if let Ok(db) = state.lock_db() {
-        crate::db::get_setting(&db, "idle_threshold_secs")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(idle::DEFAULT_IDLE_THRESHOLD_SECS)
-    } else {
-        idle::DEFAULT_IDLE_THRESHOLD_SECS
-    }
+    state.idle_threshold_secs()
 }
 
 #[cfg(test)]

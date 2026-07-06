@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Manager,
+    Emitter, Manager,
 };
 
 use crate::state::AppState;
@@ -100,6 +100,7 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(win) = app.get_webview_window("main") {
                 if win.is_visible().unwrap_or(false) {
                     let _ = win.hide();
+                    let _ = win.emit("main-window-visible", false);
                     crate::pet::restore_pet_topmost_if_visible(&app);
                 } else if let Err(e) = crate::pet::show_main_window(&app, None) {
                     eprintln!("显示主窗口失败: {e}");

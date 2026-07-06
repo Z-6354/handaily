@@ -18,6 +18,7 @@ import {
   type VaultEntry,
   type WorkTypeConfig,
 } from "../lib/xiaohan";
+import { isAutostartSupportedClient, isTauriRuntime } from "../lib/platform";
 
 interface Props {
   onTrackingChange?: (enabled: boolean) => void;
@@ -38,7 +39,7 @@ export function SettingsPanel({ onTrackingChange }: Props) {
   const [idleThreshold, setIdleThreshold] = useState(90);
   const [tracking, setTracking] = useState(true);
   const [autostart, setAutostart] = useState(false);
-  const [autostartSupported, setAutostartSupported] = useState(true);
+  const [autostartSupported, setAutostartSupported] = useState(isAutostartSupportedClient);
   const [dataPath, setDataPath] = useState("");
   const [promptsPath, setPromptsPath] = useState("");
   const [vendorsPath, setVendorsPath] = useState("");
@@ -94,10 +95,12 @@ export function SettingsPanel({ onTrackingChange }: Props) {
         try {
           const autostartStatus = await xiaohan.autostartGetStatus();
           setAutostart(autostartStatus.enabled);
-          setAutostartSupported(autostartStatus.supported);
+          setAutostartSupported(
+            autostartStatus.supported || isAutostartSupportedClient(),
+          );
         } catch {
           setAutostart(false);
-          setAutostartSupported(false);
+          setAutostartSupported(isAutostartSupportedClient());
         }
         setDataPath(await xiaohan.getDataPath());
         try {
@@ -371,14 +374,16 @@ export function SettingsPanel({ onTrackingChange }: Props) {
           <div className="panel settings-card">
             <SettingsSection
               title="启动"
-              description="控制应用是否随 Windows 登录自动运行"
+              description="登录 Windows 时是否在后台静默启动"
             >
               <SettingsToggle
-                label="开机自启动"
+                label="登录时自动启动"
                 hint={
-                  autostartSupported
-                    ? "开启后登录 Windows 时自动启动小寒日报（托盘常驻）"
-                    : "当前系统暂不支持开机自启动"
+                  !isTauriRuntime()
+                    ? "请在桌面客户端中配置登录自启动"
+                    : autostartSupported
+                      ? "开启后随系统登录在后台启动，托盘常驻、不弹出主窗口；桌宠若已启用会一并显示"
+                      : "当前系统暂不支持开机自启动"
                 }
                 checked={autostart}
                 disabled={!autostartSupported}
@@ -388,6 +393,9 @@ export function SettingsPanel({ onTrackingChange }: Props) {
                   setSaveError(null);
                   try {
                     await xiaohan.autostartSetEnabled(next);
+                    setSaveError(
+                      successFeedback(next ? "已开启登录自动启动" : "已关闭登录自动启动"),
+                    );
                   } catch (e) {
                     setAutostart(prev);
                     setSaveError(parseApiError(e, "开机自启动"));

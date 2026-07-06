@@ -14,6 +14,7 @@ use crate::state::AppState;
 
 const LONG_SESSION_MS: u64 = 15 * 60 * 1000; // 15 分钟
 const TICK_SECS: u64 = 30;
+const TICK_IDLE_SECS: u64 = 120;
 
 #[derive(Debug, Clone)]
 pub struct PeriodJob {
@@ -48,13 +49,21 @@ impl PeriodScheduler {
         let ticker = thread::Builder::new()
             .name("period-scheduler".into())
             .spawn(move || {
+                crate::tracker::dampen_thread_priority();
                 loop {
                     let Some(st) = ticker_state.upgrade() else { break };
                     if st.stop_flag.load(Ordering::Relaxed) {
                         break;
                     }
-                    check_triggers(&worker_tx, &sd, &lh, started);
-                    thread::sleep(Duration::from_secs(TICK_SECS));
+                    let tracking = st.tracking_enabled.load(Ordering::Relaxed);
+                    if tracking {
+                        check_triggers(&st, &worker_tx, &sd, &lh, started);
+                    }
+                    thread::sleep(Duration::from_secs(if tracking {
+                        TICK_SECS
+                    } else {
+                        TICK_IDLE_SECS
+                    }));
                 }
             })
             .expect("period scheduler");
@@ -97,11 +106,15 @@ impl PeriodScheduler {
 }
 
 fn check_triggers(
+    state: &AppState,
     tx: &SyncSender<PeriodJob>,
     startup_done: &AtomicBool,
     last_hour: &Mutex<Option<(String, u32)>>,
     started: Instant,
 ) {
+    if !state.tracking_enabled.load(Ordering::Relaxed) {
+        return;
+    }
     let now = Local::now();
 
     // 启动后 5 分钟
@@ -152,6 +165,7 @@ fn check_triggers(
 }
 
 fn worker_loop(state: Weak<AppState>, rx: Receiver<PeriodJob>) {
+    crate::tracker::dampen_thread_priority();
     loop {
         let Some(st) = state.upgrade() else { break };
         if st.stop_flag.load(Ordering::Relaxed) {
@@ -159,6 +173,9 @@ fn worker_loop(state: Weak<AppState>, rx: Receiver<PeriodJob>) {
         }
         match rx.recv_timeout(Duration::from_secs(1)) {
             Ok(job) => {
+                if !st.tracking_enabled.load(Ordering::Relaxed) {
+                    continue;
+                }
                 let _ = run_period_job(&st, &job);
             }
             Err(RecvTimeoutError::Timeout) => {}

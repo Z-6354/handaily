@@ -87,7 +87,7 @@ fn take_closing_open(state: &AppState, now_iso: &str) -> Option<Segment> {
     })
 }
 
-/// 60s checkpoint：把 pending 和 open 都 flush 到 DB（open flush 后重新开启）
+/// 定期 flush：仅落盘 pending 短片段 + WAL passive checkpoint（不拆分 open segment）
 pub fn checkpoint(state: &AppState) {
     let mut pending_guard = state.pending_segment.lock().unwrap();
     if let Some(pend) = pending_guard.take() {
@@ -95,25 +95,46 @@ pub fn checkpoint(state: &AppState) {
     }
     drop(pending_guard);
 
-    // open segment 也 flush（用当前时间算 duration），然后内存里重新开启一个同配置的段
-    let mut open_guard = state.open_segment.lock().unwrap();
-    if let Some(mut seg) = open_guard.take() {
-        let now = chrono::Local::now().to_rfc3339();
-        seg.ended_at = Some(now.clone());
-        seg.duration_ms = duration_ms(&seg.started_at, &seg.ended_at);
-        flush_segment(state, &seg);
-        // 重新开启一个续接段
-        let mut cont = seg.clone();
-        cont.started_at = now;
-        cont.ended_at = None;
-        cont.duration_ms = 0;
-        *open_guard = Some(cont);
+    if let Ok(db) = state.lock_db() {
+        let _ = db.execute_batch("PRAGMA wal_checkpoint(PASSIVE);");
     }
 }
 
-/// 退出 flush：把 pending + open 落盘 + WAL checkpoint
+/// 退出前把 pending + open 落盘（计算 duration 并走 flush_segment）
+pub fn flush_all_segments(state: &AppState) {
+    checkpoint(state);
+
+    let mut open_guard = state.open_segment.lock().unwrap();
+    if let Some(mut seg) = open_guard.take() {
+        let now = chrono::Local::now().to_rfc3339();
+        if seg.ended_at.is_none() {
+            seg.ended_at = Some(now);
+        }
+        seg.duration_ms = duration_ms(&seg.started_at, &seg.ended_at);
+        drop(open_guard);
+        flush_segment(state, &seg);
+    }
+}
+
+/// 退出 flush：segments 落盘 + WAL checkpoint
 pub fn flush_on_exit(state: &Arc<AppState>) {
-    state.flush_on_exit();
+    flush_all_segments(state);
+    state.finalize_shutdown();
+}
+
+/// 键鼠/文件增量写入 daily_metrics
+pub fn flush_input_metrics(state: &AppState) {
+    let (mouse, keys, text, created, modified) = state.input_stats.take_flush_delta();
+    if let Ok(db) = state.lock_db() {
+        let _ = crate::db::metrics::upsert_delta(&db, mouse, keys, &text, created, modified);
+    }
+}
+
+/// 暂停采集：闭合进行中的 foreground 段并落盘，避免恢复后把暂停时长算进 segment
+pub fn pause_tracking(state: &AppState) {
+    flush_all_segments(state);
+    *state.last_snapshot.lock().unwrap() = None;
+    flush_input_metrics(state);
 }
 
 /// 增量更新聚合缓存
@@ -147,7 +168,12 @@ fn flush_segment(state: &AppState, seg: &Segment) {
         return;
     }
     apply_to_aggregator(state, seg);
-    state.analysis.enqueue_segment(seg.clone());
+    if state
+        .tracking_enabled
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        state.analysis.enqueue_segment(seg.clone());
+    }
 }
 
 /// 从 started_at 和 ended_at 计算 duration_ms

@@ -26,7 +26,7 @@ use crate::tracker::writer;
 use crate::tracker::{Segment, IDLE_AGG_KEY};
 
 const POLL_SECS: u64 = 2;
-const CHECKPOINT_SECS: u64 = 60;
+const POLL_IDLE_SECS: u64 = 5;
 const MIN_PEAK: f32 = 0.004;
 const MIN_AUDIO_FLUSH_MS: u64 = 30_000;
 
@@ -49,28 +49,35 @@ struct LiveAudioSession {
 
 pub fn spawn_audio_monitor(state: Arc<AppState>) -> JoinHandle<()> {
     thread::spawn(move || {
+        crate::tracker::dampen_thread_priority();
         if !init_com() {
             eprintln!("xiaohan-daily: audio monitor COM init failed");
             return;
         }
         let mut open: HashMap<SessionKey, Segment> = HashMap::new();
-        let mut tick = 0u64;
+        let mut tracking = state
+            .tracking_enabled
+            .load(Ordering::Relaxed);
         loop {
             if state.stop_flag.load(Ordering::Relaxed) {
                 break;
             }
-            if state.tracking_enabled.load(Ordering::Relaxed) {
-                let fg_pid = current_foreground_pid();
+            let enabled = state.tracking_enabled.load(Ordering::Relaxed);
+            if tracking && !enabled {
+                flush_all_audio(&state, &mut open);
+            }
+            tracking = enabled;
+            if enabled {
+                let fg_pid = current_foreground_pid(&state);
                 if let Ok(sessions) = poll_active_sessions() {
                     process_tick(&state, &mut open, fg_pid, &sessions);
                 }
             }
-            tick += POLL_SECS;
-            if tick >= CHECKPOINT_SECS {
-                checkpoint_audio(&state, &mut open);
-                tick = 0;
-            }
-            thread::sleep(Duration::from_secs(POLL_SECS));
+            thread::sleep(Duration::from_secs(if enabled {
+                POLL_SECS
+            } else {
+                POLL_IDLE_SECS
+            }));
         }
         flush_all_audio(&state, &mut open);
     })
@@ -80,7 +87,14 @@ fn init_com() -> bool {
     unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() }
 }
 
-fn current_foreground_pid() -> Option<u32> {
+fn current_foreground_pid(state: &AppState) -> Option<u32> {
+    if let Ok(fg) = state.foreground.lock() {
+        if let Some(ref p) = *fg {
+            if p.pid != 0 {
+                return Some(p.pid);
+            }
+        }
+    }
     crate::tracker::win32::get_foreground_snapshot().map(|s| s.pid)
 }
 
@@ -131,24 +145,6 @@ fn process_tick(
             seg.duration_ms = writer::duration_ms(&seg.started_at, &seg.ended_at);
             maybe_flush_audio(state, &seg);
         }
-    }
-}
-
-fn checkpoint_audio(state: &AppState, open: &mut HashMap<SessionKey, Segment>) {
-    let now = Local::now().to_rfc3339();
-    let keys: Vec<SessionKey> = open.keys().cloned().collect();
-    for key in keys {
-        let Some(mut seg) = open.remove(&key) else {
-            continue;
-        };
-        seg.ended_at = Some(now.clone());
-        seg.duration_ms = writer::duration_ms(&seg.started_at, &seg.ended_at);
-        maybe_flush_audio(state, &seg);
-        let mut cont = seg;
-        cont.started_at = now.clone();
-        cont.ended_at = None;
-        cont.duration_ms = 0;
-        open.insert(key, cont);
     }
 }
 

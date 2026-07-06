@@ -27,10 +27,22 @@ export default defineConfig(async () => ({
     target: "es2021",
     outDir: "dist",
     emptyOutDir: true,
+    reportCompressedSize: false,
+    minify: "esbuild",
     rollupOptions: {
       input: {
         main: resolve(__dirname, "index.html"),
         pet: resolve(__dirname, "pet.html"),
+      },
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/react-dom") || id.includes("node_modules/react/")) {
+            return "vendor-react";
+          }
+          if (id.includes("node_modules/@tauri-apps/")) {
+            return "vendor-tauri";
+          }
+        },
       },
     },
   },

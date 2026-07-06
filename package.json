@@ -5,16 +5,19 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "build:fe": "vite build",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev --config src-tauri/tauri.preview.conf.json",
-    "tauri:build": "tauri build",
+    "tauri:build": "tauri build -- --profile release-fast",
+    "tauri:build:full": "tauri build",
+    "tauri:build:exe": "tauri build --no-bundle -- --profile release-fast",
     "tauri:pack": "tauri build --debug",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "tauri:build:debug": "tauri build --debug --no-bundle",
-    "tauri:build:fast": "tauri build --no-bundle",
+    "tauri:build:fast": "tauri build --no-bundle -- --profile release-fast",
     "tauri:build:small": "tauri build --no-bundle -- --profile release-small"
   },
   "dependencies": {

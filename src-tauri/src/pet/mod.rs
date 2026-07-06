@@ -5,7 +5,7 @@ pub mod models;
 pub mod wiki_scrape;
 
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,6 +38,12 @@ pub struct PetRuntimeState {
     pub window_create_lock: Mutex<()>,
     pub position_guard_attached: AtomicBool,
     pub position_clamp_suppress: AtomicBool,
+    /// pet.html 是否已完成至少一次 Finished 加载
+    pub page_load_finished: AtomicBool,
+    /// 页面加载完成次数（>1 且窗口可见时才在 on_page_load 补发 reload，避免首启双 reload）
+    pub page_load_count: AtomicU32,
+    /// 前端 Spine 已成功初始化；隐藏后再显示时走 resume 而非全量 reload
+    pub spine_ready: AtomicBool,
 }
 
 #[derive(Clone, Serialize)]
@@ -69,6 +75,7 @@ pub struct PetStatusPayload {
     pub power_mode: String,
     pub scale: f64,
     pub remark_interval_sec: i64,
+    pub bubble_enabled: bool,
     pub model_id: String,
     pub model_name: String,
     pub animations: Vec<String>,
@@ -109,17 +116,12 @@ pub struct PetConfigPayload {
     pub window_height: f64,
     pub offset_x: f64,
     pub offset_y: f64,
+    pub bubble_enabled: bool,
 }
 
 pub fn is_enabled(db: &rusqlite::Connection) -> bool {
     // 默认开启；仅当用户显式关闭（pet_enabled=0）时不显示
     crate::db::get_setting(db, "pet_enabled").as_deref() != Some("0")
-}
-
-pub fn get_power_mode(db: &rusqlite::Connection) -> String {
-    crate::db::get_setting(db, "pet_power_mode")
-        .filter(|s| matches!(s.as_str(), "minimal" | "balanced" | "full"))
-        .unwrap_or_else(|| "balanced".to_string())
 }
 
 pub fn get_scale(db: &rusqlite::Connection) -> f64 {
@@ -136,12 +138,21 @@ pub fn get_remark_interval_sec(db: &rusqlite::Connection) -> i64 {
         .clamp(0, 3600)
 }
 
-fn model_power_mode(db: &rusqlite::Connection, meta: &models::PetAnimationMeta) -> String {
-    meta.power_mode
-        .as_ref()
-        .filter(|s| matches!(s.as_str(), "minimal" | "balanced" | "full"))
-        .cloned()
-        .unwrap_or_else(|| get_power_mode(db))
+pub fn is_bubble_enabled(db: &rusqlite::Connection) -> bool {
+    crate::db::get_setting(db, "pet_bubble_enabled").as_deref() != Some("0")
+}
+
+pub fn set_bubble_enabled(db: &rusqlite::Connection, enabled: bool) -> Result<(), String> {
+    crate::db::set_setting(
+        db,
+        "pet_bubble_enabled",
+        if enabled { "1" } else { "0" },
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn model_power_mode(_db: &rusqlite::Connection, _meta: &models::PetAnimationMeta) -> String {
+    "balanced".to_string()
 }
 
 fn model_scale(db: &rusqlite::Connection, meta: &models::PetAnimationMeta) -> f64 {
@@ -261,6 +272,7 @@ pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), Strin
     let _ = win.unminimize();
     win.show().map_err(|e| e.to_string())?;
     win.set_focus().map_err(|e| e.to_string())?;
+    let _ = win.emit("main-window-visible", true);
     if let Some(page) = page.filter(|p| !p.is_empty()) {
         let _ = app.emit_to("main", "main-navigate", page.to_string());
     }
@@ -289,6 +301,7 @@ pub fn status(app: &AppHandle, st: &AppState) -> Result<PetStatusPayload, String
         power_mode: model_power_mode(&db, &anim_meta),
         scale: model_scale(&db, &anim_meta),
         remark_interval_sec: model_remark_interval_sec(&db, &anim_meta),
+        bubble_enabled: is_bubble_enabled(&db),
         model_id,
         model_name,
         animations: anim_meta.animations,
@@ -336,6 +349,7 @@ pub fn get_config(st: &AppState) -> Result<PetConfigPayload, String> {
         window_height,
         offset_x,
         offset_y,
+        bubble_enabled: is_bubble_enabled(&db),
     })
 }
 
@@ -468,10 +482,20 @@ fn set_pet_position(win: &WebviewWindow, rt: &PetRuntimeState, x: i32, y: i32) -
 }
 
 pub fn ensure_pet_window(app: &AppHandle, st: &AppState) -> Result<(), String> {
+    fn reset_page_load_state(app: &AppHandle) {
+        if let Some(rt) = app.try_state::<PetRuntimeState>() {
+            rt.page_load_finished.store(false, Ordering::Release);
+            rt.page_load_count.store(0, Ordering::Release);
+            rt.spine_ready.store(false, Ordering::Release);
+        }
+    }
+
     fn create(app: &AppHandle, st: &AppState) -> Result<(), String> {
         if app.get_webview_window(PET_LABEL).is_some() {
             return Ok(());
         }
+
+        reset_page_load_state(app);
 
         let (w, h) = {
             let db = crate::db::lock_conn(&st.db)?;
@@ -492,11 +516,16 @@ pub fn ensure_pet_window(app: &AppHandle, st: &AppState) -> Result<(), String> {
             .focused(false)
             .on_page_load(move |_window, payload| {
                 if payload.event() == PageLoadEvent::Finished {
-                    // 首启时窗口仍 hidden，此处 reload 会在 Spine 未可见时组装导致碎块；
-                    // 仅对已显示的窗口（HMR / 重导航）补发 reload。
-                    if let Some(win) = app_for_load.get_webview_window(PET_LABEL) {
-                        if win.is_visible().unwrap_or(false) {
-                            let _ = app_for_load.emit_to(PET_LABEL, "pet-reload", ());
+                    if let Some(rt) = app_for_load.try_state::<PetRuntimeState>() {
+                        rt.page_load_finished.store(true, Ordering::Release);
+                        let count = rt.page_load_count.fetch_add(1, Ordering::Relaxed) + 1;
+                        // 首启：show_pet 会在页面就绪后 nudge；此处 reload 会与 nudge 竞态致碎块
+                        if count > 1 {
+                            if let Some(win) = app_for_load.get_webview_window(PET_LABEL) {
+                                if win.is_visible().unwrap_or(false) {
+                                    let _ = app_for_load.emit_to(PET_LABEL, "pet-reload", ());
+                                }
+                            }
                         }
                     }
                 }
@@ -528,6 +557,9 @@ pub fn destroy_pet_window(app: &AppHandle) -> Result<(), String> {
     if let Some(rt) = app.try_state::<PetRuntimeState>() {
         rt.position_guard_attached
             .store(false, Ordering::SeqCst);
+        rt.page_load_finished.store(false, Ordering::Release);
+        rt.page_load_count.store(0, Ordering::Release);
+        rt.spine_ready.store(false, Ordering::Release);
     }
     Ok(())
 }
@@ -572,15 +604,62 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     let _ = win.set_always_on_top(true);
     win.show().map_err(|e| e.to_string())?;
     companion_session_start(st);
-    // 窗口可见后再 reload，与「关闭桌宠再打开」路径一致（doc 79：hidden 时 reload 竞态致碎块）
-    schedule_pet_reload_after_show(app);
+    if should_full_reload_pet(app) {
+        schedule_pet_reload_after_show(app);
+    } else {
+        schedule_pet_resume_after_show(app);
+    }
     Ok(())
+}
+
+fn should_full_reload_pet(app: &AppHandle) -> bool {
+    let Some(rt) = app.try_state::<PetRuntimeState>() else {
+        return true;
+    };
+    if !rt.page_load_finished.load(Ordering::Acquire) {
+        return true;
+    }
+    !rt.spine_ready.load(Ordering::Acquire)
+}
+
+fn schedule_pet_resume_after_show(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        if app
+            .get_webview_window(PET_LABEL)
+            .and_then(|w| w.is_visible().ok())
+            .unwrap_or(false)
+        {
+            resume_pet(&app);
+        }
+    });
+}
+
+pub fn mark_spine_ready(app: &AppHandle) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.spine_ready.store(true, Ordering::Release);
+    }
+}
+
+pub fn clear_spine_ready(app: &AppHandle) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.spine_ready.store(false, Ordering::Release);
+    }
+}
+
+pub fn resume_pet(app: &AppHandle) {
+    let _ = app.emit_to(PET_LABEL, "pet-resume", ());
 }
 
 fn schedule_pet_reload_after_show(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        if !wait_pet_page_ready(&app, Duration::from_secs(20)).await {
+            eprintln!("桌宠: pet.html 加载超时，仍尝试初始化");
+        }
+        // 可见后多等几帧，避免登录自启时 WebView 合成未就绪即组装 Spine
+        tokio::time::sleep(Duration::from_millis(180)).await;
         if app
             .get_webview_window(PET_LABEL)
             .and_then(|w| w.is_visible().ok())
@@ -589,6 +668,23 @@ fn schedule_pet_reload_after_show(app: &AppHandle) {
             nudge_pet(&app);
         }
     });
+}
+
+async fn wait_pet_page_ready(app: &AppHandle, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let ready = app
+            .try_state::<PetRuntimeState>()
+            .map(|rt| rt.page_load_finished.load(Ordering::Acquire))
+            .unwrap_or(false);
+        if ready {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 pub fn hide_pet(app: &AppHandle, destroy: bool) -> Result<(), String> {
@@ -623,6 +719,7 @@ pub fn reload_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
 
 /// 通知桌宠前端重新读配置（不销毁窗口）
 pub fn nudge_pet(app: &AppHandle) {
+    clear_spine_ready(app);
     let _ = app.emit_to(PET_LABEL, "pet-reload", ());
 }
 
@@ -742,7 +839,12 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
         #[cfg(debug_assertions)]
         wait_frontend_ready(45).await;
 
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let boot_delay = if crate::system::autostart::is_tray_launch() {
+            Duration::from_millis(1200)
+        } else {
+            Duration::from_millis(400)
+        };
+        tokio::time::sleep(boot_delay).await;
         for attempt in 0..30 {
             if st2.stop_flag.load(Ordering::Relaxed) {
                 break;
@@ -830,7 +932,15 @@ pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
                 model_remark_interval_sec(&db, &meta)
             };
 
-            if interval_sec == 0 || !pet_visible(&app) {
+            let bubble_on = {
+                let Ok(db) = st.lock_db() else {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                };
+                is_bubble_enabled(&db)
+            };
+
+            if interval_sec == 0 || !pet_visible(&app) || !bubble_on {
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -949,6 +1059,16 @@ pub fn emit_remark(
         .map(|db| is_enabled(&db))
         .unwrap_or(false);
     if !enabled {
+        return;
+    }
+
+    let bubble_on = st
+        .db
+        .lock()
+        .ok()
+        .map(|db| is_bubble_enabled(&db))
+        .unwrap_or(true);
+    if !bubble_on {
         return;
     }
 

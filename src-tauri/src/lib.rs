@@ -40,7 +40,7 @@ pub mod vault;
 pub mod work_type;
 
 use std::sync::Arc;
-use tauri::{Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow, WindowEvent};
 
 /// 主窗口首次显示前在隐藏状态下铺满工作区，避免先露出 960×640 再播放最大化动画。
 fn prepare_main_window_for_first_show(win: &WebviewWindow) {
@@ -69,6 +69,25 @@ pub fn run() {
             let app_state = state::AppState::new(app.handle())?;
             app.manage(app_state.clone());
 
+            // 启动后后台任务：不阻塞首屏（时间线 AI 日志合并等）
+            {
+                let st = app_state.clone();
+                std::thread::Builder::new()
+                    .name("startup-maint".into())
+                    .spawn(move || {
+                        crate::tracker::dampen_thread_priority();
+                        let data_dir = st.data_dir().to_path_buf();
+                        if let Err(e) =
+                            crate::timeline::json_log::consolidate_past_days_on_startup(&data_dir)
+                        {
+                            eprintln!(
+                                "xiaohan-daily: timeline-ai startup consolidate failed: {e}"
+                            );
+                        }
+                    })
+                    .ok();
+            }
+
             if let Ok(db) = crate::db::lock_conn(&app_state.db) {
                 crate::system::autostart::sync_on_startup(app.handle(), &db);
             }
@@ -95,13 +114,13 @@ pub fn run() {
             // 5. 时间线 AI：后台自动补全今日未缓存简介（不依赖打开时间线页）
             crate::timeline::scheduler::spawn(app.handle().clone(), app_state.clone());
 
-            // 5. 启动默认最大化；开发模式在隐藏状态下先铺好工作区再显示，避免小窗闪一下再放大
+            // 手动启动显示主窗口；--tray 登录自启动仅托盘常驻
             if let Some(win) = app.get_webview_window("main") {
                 prepare_main_window_for_first_show(&win);
-                #[cfg(debug_assertions)]
-                {
+                if !crate::system::autostart::is_tray_launch() {
                     let _ = win.show();
                     let _ = win.set_focus();
+                    let _ = win.emit("main-window-visible", true);
                 }
             }
 
@@ -188,6 +207,10 @@ pub fn run() {
             ipc::commands::pet_refresh_animations,
            ipc::commands::pet_preview_animation,
            ipc::commands::pet_log,
+           ipc::commands::pet_mark_spine_ready,
+           ipc::commands::pet_clear_spine_ready,
+           ipc::commands::pet_get_bubble_enabled,
+           ipc::commands::pet_set_bubble_enabled,
            ipc::commands::pet_get_config,
             ipc::commands::pet_list_models,
             ipc::commands::pet_set_model,
@@ -225,6 +248,7 @@ pub fn run() {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = window.hide();
+                    let _ = window.emit("main-window-visible", false);
                     crate::pet::restore_pet_topmost_if_visible(window.app_handle());
                 }
                 WindowEvent::Focused(false) => {
@@ -248,8 +272,12 @@ pub mod tray;
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     use tauri::RunEvent;
     match event {
-        RunEvent::ExitRequested { .. } => {
-            // 设停机标志，后台线程会在下次循环检查时退出
+        RunEvent::ExitRequested { api, code, .. } => {
+            // 用户关窗触发的退出（code=None）→ 托盘常驻，阻止进程结束
+            if code.is_none() {
+                api.prevent_exit();
+                return;
+            }
             if let Some(st) = app.try_state::<Arc<state::AppState>>() {
                 st.stop_flag
                     .store(true, std::sync::atomic::Ordering::Relaxed);

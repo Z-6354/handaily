@@ -303,6 +303,38 @@ pub fn latest_exe_path_for_key(db: &Connection, key: &str) -> Option<String> {
     .ok()
 }
 
+/// 批量查询各 aggregation_key 最近 exe 路径（一次 SQL，避免 N+1）
+pub fn latest_exe_paths_for_keys(
+    db: &Connection,
+    keys: &[String],
+) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    if keys.is_empty() {
+        return HashMap::new();
+    }
+    let placeholders = (0..keys.len()).map(|_| "?").collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT aggregation_key, exe_path FROM activity_segments \
+         WHERE aggregation_key IN ({placeholders}) AND exe_path != '' \
+         ORDER BY started_at DESC"
+    );
+    let params: Vec<&dyn rusqlite::ToSql> = keys
+        .iter()
+        .map(|k| k as &dyn rusqlite::ToSql)
+        .collect();
+    let mut map = HashMap::with_capacity(keys.len());
+    if let Ok(mut stmt) = db.prepare(&sql) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        }) {
+            for row in rows.flatten() {
+                map.entry(row.0).or_insert(row.1);
+            }
+        }
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

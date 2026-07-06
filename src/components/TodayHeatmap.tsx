@@ -52,6 +52,7 @@ export function TodayHeatmap({ day, workTypes }: Props) {
           const level = cellLevel(ms, maxSlot);
           const wtColor = colorForType(wt ?? null, workTypes);
           const showCount = ms > 0 && level >= 3;
+          const mins = Math.round(ms / 60_000);
           return (
             <div
               key={hour}
@@ -63,7 +64,7 @@ export function TodayHeatmap({ day, workTypes }: Props) {
                   : `${hour}:00 · ${formatDuration(ms)}`
               }
             >
-              {showCount && <span className="cell-count">{Math.round(ms / 60_000) || 1}</span>}
+              {showCount && mins > 0 && <span className="cell-count">{mins}</span>}
             </div>
           );
         })}

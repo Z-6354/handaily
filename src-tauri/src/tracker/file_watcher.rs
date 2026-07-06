@@ -12,6 +12,7 @@ use crate::state::AppState;
 
 pub fn spawn_file_watcher(state: Arc<AppState>) -> JoinHandle<()> {
     thread::spawn(move || {
+        crate::tracker::dampen_thread_priority();
         let dirs = watch_dirs();
         if dirs.is_empty() {
             return;
@@ -31,6 +32,11 @@ pub fn spawn_file_watcher(state: Arc<AppState>) -> JoinHandle<()> {
         }
         let stats = state.input_stats.clone();
         while !state.stop_flag.load(Ordering::Relaxed) {
+            if !state.tracking_enabled.load(Ordering::Relaxed) {
+                while rx.try_recv().is_ok() {}
+                thread::sleep(Duration::from_millis(500));
+                continue;
+            }
             match rx.recv_timeout(Duration::from_secs(1)) {
                 Ok(Ok(event)) => match event.kind {
                     EventKind::Create(_) => {

@@ -113,13 +113,3 @@ export function applyViewerExBindings(
 export function applySkinSetupPose(spine: Spine) {
   spine.skeleton.setSlotsToSetupPose();
 }
-
-export function pumpAnimationState(spine: Spine, seconds: number, steps = 24) {
-  if (seconds <= 0 || steps <= 0) return;
-  const dt = seconds / steps;
-  for (let i = 0; i < steps; i++) {
-    spine.state.update(dt);
-    spine.state.apply(spine.skeleton);
-  }
-  spine.skeleton.updateWorldTransform();
-}

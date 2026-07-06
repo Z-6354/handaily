@@ -3,7 +3,7 @@
 //! - `win32` — 前台窗口快照（GetForegroundWindow + exe_path）
 //! - `idle` — 空闲检测（GetLastInputInfo）
 //! - `poller` — 采样循环 + segment 合并/切分
-//! - `writer` — 延迟 flush + 短片段合并 + 60s checkpoint + 退出 flush
+//! - `writer` — 延迟 flush + 短片段合并 + 定期 WAL + 退出 flush
 
 pub mod activity_key;
 pub mod audio_classify;
@@ -19,11 +19,23 @@ pub mod poller;
 pub mod win32;
 pub mod writer;
 
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+};
+
+/// 后台采集线程降优先级，减少对前台交互的 CPU 争抢
+pub(crate) fn dampen_thread_priority() {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
 use serde::{Deserialize, Serialize};
 
 /// IPC 可序列化的前台快照
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForegroundPayload {
+    pub pid: u32,
     pub app_name: String,
     pub exe_path: String,
     pub window_title: String,
@@ -45,6 +57,7 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn to_payload(&self) -> ForegroundPayload {
         ForegroundPayload {
+            pid: self.pid,
             app_name: display_name::friendly_name(
                 &self.exe_path,
                 &self.app_name,

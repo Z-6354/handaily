@@ -8,7 +8,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import "./pet.css";
 
-import { SpinePet, type PetAssetConfig, type PowerMode } from "./spinePet";
+import { SpinePet, type PetAssetConfig } from "./spinePet";
 import { createPetAssetResolver, preloadModelAssets, type PetAssetResolver } from "./petAssetResolver";
 
 interface PetRemarkLine {
@@ -92,6 +92,18 @@ interface PetScreenBounds {
 interface PetPoint {
   x: number;
   y: number;
+}
+
+interface PetModelInfo {
+  id: string;
+  name: string;
+  builtin: boolean;
+}
+
+interface PersonaInfo {
+  id: string;
+  name: string;
+  active: boolean;
 }
 
 const SCREEN_MARGIN = 8;
@@ -227,6 +239,47 @@ menu.innerHTML = `
       <span class="pet-menu-text">编辑范围</span>
     </button>
     <div class="pet-menu-divider" role="separator"></div>
+    <div class="pet-menu-row">
+      <span class="pet-menu-row-label">气泡台词</span>
+      <button type="button" class="pet-menu-switch" data-action="toggle-bubble" aria-pressed="true" aria-label="气泡台词开关">
+        <span class="pet-menu-switch-track"><span class="pet-menu-switch-thumb"></span></span>
+      </button>
+    </div>
+    <div class="pet-menu-divider" role="separator"></div>
+    <div class="pet-menu-submenu" data-submenu="models">
+      <button type="button" class="pet-menu-item pet-menu-item--sub" data-action="submenu" data-submenu="models">
+        <span class="pet-menu-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M12 3v3M8 6l2 2M16 6l-2 2" />
+            <circle cx="12" cy="13" r="5" />
+            <path d="M9 21h6" />
+          </svg>
+        </span>
+        <span class="pet-menu-text">切换模型</span>
+        <span class="pet-menu-chevron" aria-hidden="true">›</span>
+      </button>
+      <div class="pet-menu-flyout" data-flyout="models" hidden>
+        <div class="pet-menu-flyout-title">选择模型</div>
+        <div class="pet-menu-sublist" data-menu-list="models"></div>
+      </div>
+    </div>
+    <div class="pet-menu-submenu" data-submenu="personas">
+      <button type="button" class="pet-menu-item pet-menu-item--sub" data-action="submenu" data-submenu="personas">
+        <span class="pet-menu-icon" aria-hidden="true">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <circle cx="12" cy="8" r="4" />
+            <path d="M6 20c0-3.3 2.7-6 6-6s6 2.7 6 6" />
+          </svg>
+        </span>
+        <span class="pet-menu-text">切换性格</span>
+        <span class="pet-menu-chevron" aria-hidden="true">›</span>
+      </button>
+      <div class="pet-menu-flyout" data-flyout="personas" hidden>
+        <div class="pet-menu-flyout-title">选择性格</div>
+        <div class="pet-menu-sublist" data-menu-list="personas"></div>
+      </div>
+    </div>
+    <div class="pet-menu-divider" role="separator"></div>
     <button type="button" class="pet-menu-item pet-menu-item--danger" data-action="hide">
       <span class="pet-menu-icon" aria-hidden="true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -261,6 +314,7 @@ root.append(stage, bubble, editOverlay, menu);
 
 let bubbleTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingBubble: { text: string; animation?: string | null } | null = null;
+let bubbleEnabled = true;
 
 let pet: SpinePet | null = null;
 let petAssetResolver: PetAssetResolver | null = null;
@@ -286,7 +340,13 @@ const DRAG_THRESHOLD = 10;
 
 let menuAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
-const MENU_AUTO_CLOSE_MS = 5000;
+let menuModelsEl: HTMLElement | null = menu.querySelector('[data-menu-list="models"]');
+let menuPersonasEl: HTMLElement | null = menu.querySelector('[data-menu-list="personas"]');
+let menuBubbleSwitchEl: HTMLButtonElement | null = menu.querySelector('[data-action="toggle-bubble"]');
+let menuSwitchBusy = false;
+let openSubmenuId: string | null = null;
+
+const MENU_AUTO_CLOSE_MS = 8000;
 
 let editBoundsMode = false;
 
@@ -419,7 +479,17 @@ function pickLineForAnimation(lines: PetRemarkLine[], animation?: string | null)
   return use[Math.floor(Math.random() * use.length)]?.text ?? null;
 }
 
+function clearBubble() {
+  bubble.classList.remove("visible");
+  if (bubbleTimer) {
+    clearTimeout(bubbleTimer);
+    bubbleTimer = null;
+  }
+  pendingBubble = null;
+}
+
 function showBubble(text: string, animation?: string | null) {
+  if (!bubbleEnabled) return;
   if (document.hidden) {
     pendingBubble = { text, animation };
     return;
@@ -440,6 +510,72 @@ function showBubble(text: string, animation?: string | null) {
 }
 
 
+
+function syncBubbleToggleUI() {
+  if (!menuBubbleSwitchEl) return;
+  menuBubbleSwitchEl.classList.toggle("is-on", bubbleEnabled);
+  menuBubbleSwitchEl.setAttribute("aria-pressed", bubbleEnabled ? "true" : "false");
+}
+
+async function loadBubbleEnabled() {
+  try {
+    bubbleEnabled = await invoke<boolean>("pet_get_bubble_enabled");
+  } catch {
+    bubbleEnabled = true;
+  }
+  syncBubbleToggleUI();
+}
+
+async function setBubbleEnabled(enabled: boolean) {
+  bubbleEnabled = enabled;
+  try {
+    await invoke("pet_set_bubble_enabled", { enabled });
+  } catch (e) {
+    console.error("保存气泡开关失败", e);
+    showPetLoadError(e);
+    return;
+  }
+  syncBubbleToggleUI();
+  if (!enabled) clearBubble();
+}
+
+function closeAllSubmenus() {
+  openSubmenuId = null;
+  menu.querySelectorAll(".pet-menu-submenu.is-open").forEach((el) => {
+    el.classList.remove("is-open");
+  });
+  menu.querySelectorAll(".pet-menu-flyout").forEach((el) => {
+    (el as HTMLElement).hidden = true;
+  });
+}
+
+function positionSubmenuFlyout(submenuId: string) {
+  const wrap = menu.querySelector(`.pet-menu-submenu[data-submenu="${submenuId}"]`);
+  const flyout = wrap?.querySelector(".pet-menu-flyout") as HTMLElement | null;
+  if (!wrap || !flyout) return;
+  flyout.classList.remove("pet-menu-flyout--left");
+  const menuRect = menu.getBoundingClientRect();
+  const flyoutW = flyout.offsetWidth || 168;
+  if (menuRect.right + flyoutW > window.innerWidth - 8) {
+    flyout.classList.add("pet-menu-flyout--left");
+  }
+}
+
+function toggleSubmenu(submenuId: string | null) {
+  if (openSubmenuId === submenuId) {
+    closeAllSubmenus();
+    return;
+  }
+  closeAllSubmenus();
+  if (!submenuId) return;
+  const wrap = menu.querySelector(`.pet-menu-submenu[data-submenu="${submenuId}"]`);
+  const flyout = wrap?.querySelector(".pet-menu-flyout") as HTMLElement | null;
+  if (!wrap || !flyout) return;
+  openSubmenuId = submenuId;
+  wrap.classList.add("is-open");
+  flyout.hidden = false;
+  positionSubmenuFlyout(submenuId);
+}
 
 async function loadConfig(): Promise<PetConfigPayload> {
 
@@ -804,60 +940,6 @@ function awaitAnimationFrames(count: number): Promise<void> {
   });
 }
 
-async function finalizePetAssembly(cfg: PetConfigPayload, meta: PetAnimationMeta | null) {
-  if (!pet) return;
-  await waitUntilVisibleForLoad();
-  pet.finalizeVisibleAssembly();
-  await awaitAnimationFrames(2);
-  pet.finalizeVisibleAssembly();
-  pet.configureAnimations(
-    {
-      idleAnimation: meta?.idle_animation ?? cfg.idle_animation,
-      clickAnimation: meta?.click_animation ?? cfg.click_animation,
-      bootAnimation: meta?.boot_animation ?? cfg.boot_animation,
-      returnIdleAnimation: meta?.return_idle_animation ?? cfg.return_idle_animation,
-      dragAnimation: meta?.drag_animation ?? cfg.drag_animation,
-      randomAnimations: meta?.random_animations ?? cfg.random_animations ?? [],
-      randomMinSec: meta?.random_min_sec ?? cfg.random_min_sec ?? 30,
-      randomMaxSec: meta?.random_max_sec ?? cfg.random_max_sec ?? 120,
-    },
-    { soft: true },
-  );
-  applyStageTransform();
-}
-
-
-
-function refitPetAfterVisible(
-  cfg: PetConfigPayload,
-  meta: PetAnimationMeta | null,
-) {
-  const refit = () => {
-    if (document.hidden || !pet) return;
-    pet.finalizeVisibleAssembly();
-    pet.configureAnimations({
-      idleAnimation: meta?.idle_animation ?? cfg.idle_animation,
-      clickAnimation: meta?.click_animation ?? cfg.click_animation,
-      bootAnimation: meta?.boot_animation ?? cfg.boot_animation,
-      returnIdleAnimation: meta?.return_idle_animation ?? cfg.return_idle_animation,
-      dragAnimation: meta?.drag_animation ?? cfg.drag_animation,
-      randomAnimations: meta?.random_animations ?? cfg.random_animations ?? [],
-      randomMinSec: meta?.random_min_sec ?? cfg.random_min_sec ?? 30,
-      randomMaxSec: meta?.random_max_sec ?? cfg.random_max_sec ?? 120,
-    }, { soft: true });
-    applyStageTransform();
-  };
-  if (document.hidden) {
-    document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) refit();
-    }, { once: true });
-  } else {
-    requestAnimationFrame(() => requestAnimationFrame(refit));
-  }
-}
-
-
-
 async function applyStageScale(scale: number) {
 
   stageScale = Math.max(0.4, Math.min(1.5, scale));
@@ -880,9 +962,8 @@ function applyStageOffset(x: number, y: number) {
 
 
 
-async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
+async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): Promise<boolean> {
 
-  const mode = (cfg.power_mode as PowerMode) || "balanced";
   const skipBoot = opts?.skipBoot ?? false;
 
   stageScale = cfg.scale || 0.8;
@@ -913,19 +994,6 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
   await awaitAnimationFrames(3);
   ensureCanvasAttached();
 
-  if (mode === "minimal") {
-
-    canvasWrap.style.display = "none";
-    canvasWrap.style.visibility = "visible";
-
-    fallback.style.display = "block";
-
-    applyStageTransform();
-
-    return;
-
-  }
-
   await waitUntilVisibleForLoad();
 
   const animOptions = {
@@ -953,7 +1021,6 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
     fallback.style.display = "none";
 
     pet = new SpinePet(canvas, assets, {
-      powerMode: mode,
       resolveAssetUrl: petAssetResolver.urlFor,
       skipBootAnimation: skipBoot,
       ...animOptions,
@@ -996,9 +1063,8 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
       runPreviewAnimation(p.animation, p.loop);
     }
 
-    refitPetAfterVisible(cfg, meta);
-    await finalizePetAssembly(cfg, meta);
     canvasWrap.style.visibility = "visible";
+    return true;
 
   } catch (e) {
 
@@ -1010,6 +1076,7 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }) {
     fallback.style.display = "block";
 
     applyStageTransform();
+    return false;
 
   }
 
@@ -1029,7 +1096,32 @@ function showPetLoadError(err: unknown) {
     root.appendChild(banner);
   }
   const msg = err instanceof Error ? err.message : String(err);
-  banner.textContent = `桌宠加载失败：${msg}`;
+  banner.innerHTML = "";
+  const text = document.createElement("span");
+  text.className = "pet-load-error-text";
+  text.textContent = `桌宠提示：${msg}`;
+  const closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "pet-load-error-close";
+  closeBtn.setAttribute("aria-label", "关闭");
+  closeBtn.textContent = "×";
+  closeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    banner?.remove();
+  });
+  banner.append(text, closeBtn);
+}
+
+async function resumePetFromHidden() {
+  if (reloadInProgress) return;
+  await waitUntilVisibleForLoad();
+  if (!pet) {
+    void reloadPet();
+    return;
+  }
+  pet.setRenderPaused(false);
+  pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
+  applyStageTransform();
 }
 
 async function reloadPet() {
@@ -1038,6 +1130,7 @@ async function reloadPet() {
     reloadInProgress = true;
     const skipBoot = pet !== null;
     try {
+      await invoke("pet_clear_spine_ready");
 
       await waitUntilVisibleForLoad();
 
@@ -1048,6 +1141,9 @@ async function reloadPet() {
       await initSpine(cfg, { skipBoot });
 
       clearBootHint();
+      if (pet) {
+        await invoke("pet_mark_spine_ready");
+      }
     } catch (e) {
 
       console.error("桌宠配置加载失败", e);
@@ -1076,6 +1172,10 @@ async function reloadPet() {
 // 尽早注册，避免 Rust on_page_load 发出的 pet-reload 在监听器就绪前丢失
 const petReloadUnlistenPromise = listen("pet-reload", () => {
   void reloadPet();
+});
+
+const petResumeUnlistenPromise = listen("pet-resume", () => {
+  void resumePetFromHidden();
 });
 
 async function refreshPetAnimations() {
@@ -1179,39 +1279,85 @@ function positionMenu(clientX: number, clientY: number) {
   });
 }
 
-function toggleMenu(open?: boolean, clientX?: number, clientY?: number) {
-
-  const next = open ?? !menu.classList.contains("open");
-
-  menu.classList.toggle("open", next);
-
-  if (menuAutoCloseTimer) {
-
-    clearTimeout(menuAutoCloseTimer);
-
-    menuAutoCloseTimer = null;
-
+function renderMenuSublist(
+  container: HTMLElement | null,
+  items: { id: string; label: string; active: boolean }[],
+  kind: "model" | "persona",
+) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "pet-menu-subempty";
+    empty.textContent = "暂无选项";
+    container.appendChild(empty);
+    return;
   }
+  for (const item of items) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `pet-menu-subitem${item.active ? " is-active" : ""}`;
+    btn.dataset.action = kind === "model" ? "switch-model" : "switch-persona";
+    btn.dataset.id = item.id;
+    btn.textContent = item.label;
+    btn.disabled = item.active || menuSwitchBusy;
+    container.appendChild(btn);
+  }
+}
 
+async function refreshPetMenuPickers() {
+  try {
+    const [models, personas, cfg] = await Promise.all([
+      invoke<PetModelInfo[]>("pet_list_models"),
+      invoke<PersonaInfo[]>("persona_list"),
+      loadConfig(),
+    ]);
+    await loadBubbleEnabled();
+    renderMenuSublist(
+      menuModelsEl,
+      models.map((m) => ({
+        id: m.id,
+        label: m.name,
+        active: m.id === cfg.model_id,
+      })),
+      "model",
+    );
+    renderMenuSublist(
+      menuPersonasEl,
+      personas.map((p) => ({
+        id: p.id,
+        label: p.name,
+        active: p.active,
+      })),
+      "persona",
+    );
+  } catch (e) {
+    console.error("桌宠菜单加载选项失败", e);
+    renderMenuSublist(menuModelsEl, [], "model");
+    renderMenuSublist(menuPersonasEl, [], "persona");
+  }
+}
+
+function toggleMenu(open?: boolean, clientX?: number, clientY?: number) {
+  const next = open ?? !menu.classList.contains("open");
+  menu.classList.toggle("open", next);
+  if (!next) closeAllSubmenus();
+  if (menuAutoCloseTimer) {
+    clearTimeout(menuAutoCloseTimer);
+    menuAutoCloseTimer = null;
+  }
   if (next) {
     positionMenu(
       clientX ?? Math.round(window.innerWidth * 0.5),
       clientY ?? Math.round(window.innerHeight * 0.4),
     );
-
+    void refreshPetMenuPickers();
     menuAutoCloseTimer = setTimeout(() => {
-
       menu.classList.remove("open");
-
       menuAutoCloseTimer = null;
-
     }, MENU_AUTO_CLOSE_MS);
-
   }
-
 }
-
-
 
 function setEditBoundsMode(on: boolean) {
 
@@ -1562,6 +1708,11 @@ stage.addEventListener("mousedown", (e) => {
 
   if (e.button !== 0) return;
 
+  if (menu.classList.contains("open") && !menu.contains(e.target as Node)) {
+    toggleMenu(false);
+    return;
+  }
+
   if (editBoundsMode) {
 
     e.preventDefault();
@@ -1664,6 +1815,37 @@ function openPetMenu(clientX?: number, clientY?: number) {
 
 
 
+document.addEventListener("mousedown", (e) => {
+
+  if (Date.now() < editBoundsSuppressUntil) {
+
+    return;
+
+  }
+
+  if (menu.classList.contains("open") && !menu.contains(e.target as Node)) {
+    toggleMenu(false);
+    return;
+  }
+
+  if (editBoundsMode) {
+
+    if (isInsideEditArea(e.target)) {
+
+      return;
+
+    }
+
+    void exitEditBounds();
+
+    return;
+
+  }
+
+});
+
+
+
 document.addEventListener("click", (e) => {
 
   if (Date.now() < editBoundsSuppressUntil) {
@@ -1692,8 +1874,6 @@ document.addEventListener("click", (e) => {
 
   }
 
-  toggleMenu(false);
-
 });
 
 
@@ -1709,6 +1889,8 @@ void getCurrentWindow().listen("tauri://blur", () => {
     return;
 
   }
+
+  toggleMenu(false);
 
   if (editBoundsMode) {
 
@@ -1734,22 +1916,6 @@ menu.addEventListener("mouseenter", () => {
 
 
 
-menu.addEventListener("mouseleave", () => {
-
-  if (!menu.classList.contains("open")) return;
-
-  menuAutoCloseTimer = setTimeout(() => {
-
-    menu.classList.remove("open");
-
-    menuAutoCloseTimer = null;
-
-  }, MENU_AUTO_CLOSE_MS);
-
-});
-
-
-
 menu.addEventListener("mousedown", (e) => {
   e.stopPropagation();
 });
@@ -1763,6 +1929,37 @@ menu.addEventListener("click", async (e) => {
   if (!btn) return;
 
   const action = btn.getAttribute("data-action");
+
+  if (action === "toggle-bubble") {
+    void setBubbleEnabled(!bubbleEnabled);
+    return;
+  }
+
+  if (action === "submenu") {
+    const submenuId = btn.getAttribute("data-submenu");
+    toggleSubmenu(submenuId);
+    return;
+  }
+
+  if (action === "switch-model" || action === "switch-persona") {
+    const id = btn.getAttribute("data-id");
+    if (!id || menuSwitchBusy) return;
+    menuSwitchBusy = true;
+    toggleMenu(false);
+    try {
+      if (action === "switch-model") {
+        await invoke("pet_set_model", { modelId: id });
+      } else {
+        await invoke("persona_set_active", { personaId: id });
+      }
+    } catch (err) {
+      console.error("桌宠菜单切换失败", err);
+      showPetLoadError(err);
+    } finally {
+      menuSwitchBusy = false;
+    }
+    return;
+  }
 
   if (action === "edit-bounds") {
 
@@ -1800,45 +1997,16 @@ menu.addEventListener("click", async (e) => {
 
 
 document.addEventListener("visibilitychange", () => {
-
   if (document.hidden) {
-
     pet?.setRenderPaused(true);
-
   } else {
-
-    pet?.setRenderPaused(false);
-
     if (pendingBubble) {
-
       const next = pendingBubble;
-
       pendingBubble = null;
-
       showBubble(next.text, next.animation);
-
     }
-
-    if (pet && !reloadInProgress) {
-      void loadConfig().then((cfg) => {
-        pet?.setPowerMode((cfg.power_mode as PowerMode) || "balanced");
-        pet?.finalizeVisibleAssembly();
-        pet?.configureAnimations({
-          idleAnimation: cfg.idle_animation,
-          clickAnimation: cfg.click_animation,
-          bootAnimation: cfg.boot_animation,
-          returnIdleAnimation: cfg.return_idle_animation,
-          dragAnimation: cfg.drag_animation,
-          randomAnimations: cfg.random_animations ?? [],
-          randomMinSec: cfg.random_min_sec ?? 30,
-          randomMaxSec: cfg.random_max_sec ?? 120,
-        }, { soft: true });
-        applyStageTransform();
-      });
-    }
-
+    void resumePetFromHidden();
   }
-
 });
 
 
@@ -1849,6 +2017,7 @@ async function setupPetEvents() {
   if (petEventUnlisten) return;
 
   const unlistenReload = await petReloadUnlistenPromise;
+  const unlistenResume = await petResumeUnlistenPromise;
 
   const unlistenRemark = await listen<PetRemarkPayload>("pet-remark", (ev) => {
     const payload = ev.payload;
@@ -1876,6 +2045,7 @@ async function setupPetEvents() {
   petEventUnlisten = () => {
     unlistenRemark();
     unlistenReload();
+    unlistenResume();
     unlistenAnimations();
     unlistenPreview();
     unlistenContext();
@@ -1889,10 +2059,8 @@ async function setupPetEvents() {
 
 async function bootPetWindow() {
   await setupPetEvents();
-  // 首载由 show_pet 可见后 nudge；此处作兜底，避免 nudge 早于脚本就绪而丢失
-  window.setTimeout(() => {
-    if (!pet && !reloadInProgress) void reloadPet();
-  }, 2500);
+  await loadBubbleEnabled();
+  // 首载由 show_pet 在 pet.html 就绪后 nudge；不再用定时兜底 reload，避免与 nudge 双重重载碎块
 }
 
 void bootPetWindow();

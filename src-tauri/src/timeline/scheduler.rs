@@ -21,6 +21,10 @@ pub fn spawn(app: AppHandle, st: Arc<AppState>) {
             if st.stop_flag.load(Ordering::Relaxed) {
                 break;
             }
+            if !st.tracking_enabled.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_secs(TICK_SECS)).await;
+                continue;
+            }
 
             match run_today_uncached(&st, &app).await {
                 Ok(n) if n > 0 => {

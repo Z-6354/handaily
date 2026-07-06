@@ -85,7 +85,13 @@ pub async fn settings_save(
     value: String,
 ) -> Result<(), String> {
     let db = crate::db::lock_conn(&st.db)?;
-    crate::db::set_setting(&db, &key, &value).map_err(|e| e.to_string())
+    crate::db::set_setting(&db, &key, &value).map_err(|e| e.to_string())?;
+    if key == "idle_threshold_secs" {
+        if let Ok(secs) = value.parse::<u64>() {
+            st.set_idle_threshold_secs(secs);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -101,7 +107,7 @@ pub async fn autostart_get_status(
     let db = crate::db::lock_conn(&st.db)?;
     Ok(AutostartStatusPayload {
         enabled: crate::system::autostart::is_enabled(&db),
-        supported: cfg!(windows),
+        supported: crate::system::autostart::platform_supported(),
     })
 }
 
@@ -172,12 +178,14 @@ pub async fn stats_app_breakdown(
 ) -> Result<Vec<AppBreakdownItem>, String> {
     let snap = st.aggregator.read().map_err(|e| e.to_string())?.clone();
     let db = crate::db::lock_conn(&st.db)?;
+    let keys: Vec<String> = snap.app_breakdown.keys().cloned().collect();
+    let exe_paths = crate::db::stats::latest_exe_paths_for_keys(&db, &keys);
 
     let mut items: Vec<AppBreakdownItem> = snap
         .app_breakdown
         .iter()
         .map(|(k, &v)| {
-            let exe_path = crate::db::stats::latest_exe_path_for_key(&db, k).unwrap_or_default();
+            let exe_path = exe_paths.get(k).cloned().unwrap_or_default();
             let icon_path = crate::tracker::icon::resolve_icon_path(k, &exe_path);
             let icon = icon_path.and_then(|p| crate::tracker::icon::icon_data_url(&p));
             AppBreakdownItem {
@@ -1612,6 +1620,33 @@ pub fn pet_preview_animation(
 #[tauri::command]
 pub fn pet_log(msg: String) {
     eprintln!("[pet-front] {}", msg);
+}
+
+#[tauri::command]
+pub fn pet_mark_spine_ready(app: tauri::AppHandle) {
+    crate::pet::mark_spine_ready(&app);
+}
+
+#[tauri::command]
+pub fn pet_clear_spine_ready(app: tauri::AppHandle) {
+    crate::pet::clear_spine_ready(&app);
+}
+
+#[tauri::command]
+pub async fn pet_get_bubble_enabled(
+    st: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    Ok(crate::pet::is_bubble_enabled(&db))
+}
+
+#[tauri::command]
+pub async fn pet_set_bubble_enabled(
+    st: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    crate::pet::set_bubble_enabled(&db, enabled)
 }
 
 #[tauri::command]

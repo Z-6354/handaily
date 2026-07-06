@@ -159,7 +159,13 @@ pub fn prepare_ai_chat(
         return Ok(None);
     }
     let prompt = build_ai_user_prompt(data_dir, gathered);
-    PreparedTextChat::prepare(config, catalog, vault, db, data_dir, prompt)
+    match PreparedTextChat::prepare(config, catalog, vault, db, data_dir, prompt) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            eprintln!("xiaohan-daily: report AI prep skipped: {e}");
+            Ok(None)
+        }
+    }
 }
 
 pub fn save_generated(

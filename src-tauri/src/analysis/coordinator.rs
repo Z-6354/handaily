@@ -67,6 +67,7 @@ impl AnalysisCoordinator {
 }
 
 fn worker_loop(state: Weak<AppState>, rx: Receiver<AnalysisJob>, guard: Arc<SystemGuard>) {
+    crate::tracker::dampen_thread_priority();
     loop {
         let Some(st) = state.upgrade() else { break };
         if st.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
@@ -81,6 +82,12 @@ fn worker_loop(state: Weak<AppState>, rx: Receiver<AnalysisJob>, guard: Arc<Syst
 }
 
 fn process_job(state: &AppState, guard: &SystemGuard, job: AnalysisJob) {
+    if !state
+        .tracking_enabled
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
     let settings = {
         let db = match state.lock_db() {
             Ok(d) => d,

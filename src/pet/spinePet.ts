@@ -4,16 +4,13 @@ import { TextureAtlas } from "@pixi-spine/base";
 import { AtlasAttachmentLoader, SkeletonBinary36 } from "./skeletonBinary36";
 import { loadViewerExSpineConfig, type ViewerExSpineConfig } from "./viewerExConfig";
 import {
- applyViewerExBindings,
- pickIdleAnimation,
- pickClickAnimation,
- isLikelyIdleName,
- pickStartAnimation,
- pumpAnimationState,
+  applyViewerExBindings,
+  pickIdleAnimation,
+  pickClickAnimation,
+  isLikelyIdleName,
+  pickStartAnimation,
 } from "./viewerExApply";
 import type { ResolveAssetUrl } from "./petAssetResolver";
-
-export type PowerMode = "minimal" | "balanced" | "full";
 
 export interface PetAssetConfig {
   pathPrefix: string;
@@ -26,10 +23,10 @@ export interface PetAssetConfig {
 export interface PetAnimationOptions {
   idleAnimation?: string | null;
   clickAnimation?: string | null;
- bootAnimation?: string | null;
- returnIdleAnimation?: string | null;
- dragAnimation?: string | null;
- randomAnimations?: string[];
+  bootAnimation?: string | null;
+  returnIdleAnimation?: string | null;
+  dragAnimation?: string | null;
+  randomAnimations?: string[];
   randomMinSec?: number;
   randomMaxSec?: number;
   onRandomAction?: (animation: string) => void;
@@ -37,9 +34,8 @@ export interface PetAnimationOptions {
 }
 
 const IDLE_MIX_SEC = 0.18;
-const ASSEMBLE_SEC = 0.55;
 const ACTION_MIX_SEC = 0.15;
-/** 鍗曡建妯″瀷锛氬緟鏈轰笌涓€娆℃€у姩浣滈兘鎾湪鍚屼竴鏉?track锛屽姩浣滄挱瀹岃嚜鍔ㄦ帓闃熷洖鍒板緟鏈恒€?*/
+/** 单轨模型：待机和一次性动作都在同一条 track 上播放 */
 const BASE_TRACK = 0;
 
 async function loadTextureAtlas(
@@ -74,7 +70,7 @@ async function loadTextureAtlas(
       },
       (atlas) => {
         if (atlas) resolve(atlas);
-        else reject(new Error("atlas 瑙ｆ瀽澶辫触"));
+        else reject(new Error("atlas 解析失败"));
       },
     );
   });
@@ -87,20 +83,19 @@ export class SpinePet {
 
   private idleName = "";
   private clickName: string | null = null;
- private bootName: string | null = null;
- private returnIdleName: string | null = null;
- private dragName: string | null = null;
+  private bootName: string | null = null;
+  private returnIdleName: string | null = null;
+  private dragName: string | null = null;
 
- private animationNames: string[] = [];
+  private animationNames: string[] = [];
   private randomAnimations: string[] = [];
   private randomMinSec = 30;
   private randomMaxSec = 120;
   private randomTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private powerMode: PowerMode = "balanced";
-  private running = true;
   private clickActionBusy = false;
   private actionPlaying = false;
+  private running = true;
 
   private viewerExConfig: ViewerExSpineConfig | null = null;
   private onTap?: (animation: string | null) => void;
@@ -113,7 +108,6 @@ export class SpinePet {
     canvas: HTMLCanvasElement,
     assets: PetAssetConfig,
     options?: {
-      powerMode?: PowerMode;
       onTap?: (animation: string | null) => void;
       onRandomAction?: (animation: string) => void;
       resolveAssetUrl?: ResolveAssetUrl;
@@ -122,7 +116,6 @@ export class SpinePet {
     this.canvas = canvas;
     this.assets = assets;
     this.resolveAssetUrl = options?.resolveAssetUrl;
-    this.powerMode = options?.powerMode ?? "balanced";
     this.onTap = options?.onTap;
     this.onRandomAction = options?.onRandomAction;
     this.applyAnimationOptions(options);
@@ -137,6 +130,10 @@ export class SpinePet {
     return this.clickActionBusy;
   }
 
+  isActionPlaying(): boolean {
+    return this.actionPlaying;
+  }
+
   configureAnimations(options: PetAnimationOptions, opts?: { soft?: boolean }) {
     this.applyAnimationOptions(options);
     if (!this.spine) return;
@@ -149,58 +146,58 @@ export class SpinePet {
     this.restartRandomScheduler();
   }
 
-  /** 鍔ㄤ綔鍒楄〃 sync 鍚庯細淇 idle 鍚嶅苟纭繚 track 姝ｅ湪寰幆寰呮満 */
+  /** 动作列表 sync 后：修正 idle 名并确保 track 正在循环待机 */
   syncBaseIdleAfterMeta() {
     if (!this.spine) return;
     this.configureAnimationMix();
     if (!this.isCorrectIdleLooping()) {
-      this.assembleBaseIdle();
+      this.ensureIdleLoop();
     }
   }
 
- private applyAnimationOptions(options?: PetAnimationOptions) {
-   if (!options) return;
-   if (options.idleAnimation) {
-     const idle = options.idleAnimation.trim();
-     if (this.animationNames.length === 0) {
-       this.idleName = idle;
+  private applyAnimationOptions(options?: PetAnimationOptions) {
+    if (!options) return;
+    if (options.idleAnimation) {
+      const idle = options.idleAnimation.trim();
+      if (this.animationNames.length === 0) {
+        this.idleName = idle;
       } else if (this.animationNames.includes(idle)) {
-       this.idleName = idle;
-     } else {
-       this.idleName = pickIdleAnimation(this.animationNames) ?? idle;
-     }
-   }
+        this.idleName = idle;
+      } else {
+        this.idleName = pickIdleAnimation(this.animationNames) ?? idle;
+      }
+    }
 
-   let click = options.clickAnimation?.trim() || null;
+    let click = options.clickAnimation?.trim() || null;
     if (click && this.animationNames.length > 0 && !this.animationNames.includes(click)) {
       click = null;
-   }
-   if (!click && this.animationNames.length > 0) {
-     click = pickClickAnimation(this.animationNames);
-   }
-   this.clickName = click;
-   this.bootName = options.bootAnimation?.trim() || null;
-   const ret = options.returnIdleAnimation?.trim() || "";
-   if (ret && (this.animationNames.length === 0 || this.animationNames.includes(ret))) {
-    this.returnIdleName = ret;
-  } else {
-    this.returnIdleName = null;
-  }
-  const drag = options.dragAnimation?.trim() || "";
-  if (drag && (this.animationNames.length === 0 || this.animationNames.includes(drag))) {
-    this.dragName = drag;
-  } else {
-    this.dragName = null;
-  }
-  if (options.onRandomAction) {
-     this.onRandomAction = options.onRandomAction;
-   }
+    }
+    if (!click && this.animationNames.length > 0) {
+      click = pickClickAnimation(this.animationNames);
+    }
+    this.clickName = click;
+    this.bootName = options.bootAnimation?.trim() || null;
+    const ret = options.returnIdleAnimation?.trim() || "";
+    if (ret && (this.animationNames.length === 0 || this.animationNames.includes(ret))) {
+      this.returnIdleName = ret;
+    } else {
+      this.returnIdleName = null;
+    }
+    const drag = options.dragAnimation?.trim() || "";
+    if (drag && (this.animationNames.length === 0 || this.animationNames.includes(drag))) {
+      this.dragName = drag;
+    } else {
+      this.dragName = null;
+    }
+    if (options.onRandomAction) {
+      this.onRandomAction = options.onRandomAction;
+    }
 
-   this.randomAnimations = [...(options.randomAnimations ?? [])].filter((n) => {
-     if (this.animationNames.length > 0 && !this.animationNames.includes(n)) return false;
-     if (n === this.idleName || n === this.returnIdleName) return false;
-     return true;
-   });
+    this.randomAnimations = [...(options.randomAnimations ?? [])].filter((n) => {
+      if (this.animationNames.length > 0 && !this.animationNames.includes(n)) return false;
+      if (n === this.idleName || n === this.returnIdleName) return false;
+      return true;
+    });
 
     this.randomMinSec = options.randomMinSec ?? 30;
     this.randomMaxSec = options.randomMaxSec ?? 120;
@@ -252,7 +249,8 @@ export class SpinePet {
 
     this.spine = new Spine(skeletonData);
     this.spine.state.data.defaultMix = IDLE_MIX_SEC;
-    this.spine.autoUpdate = false;
+    this.spine.autoUpdate = true;
+    this.running = true;
     this.app.stage.addChild(this.spine);
 
     this.animationNames = skeletonData.animations.map((a) => a.name);
@@ -270,11 +268,10 @@ export class SpinePet {
       this.spine.skeleton.setSkin(this.spine.skeleton.data.defaultSkin);
     }
 
-    const assemble = this.resolveAssembleIdleName();
-    this.idleName = assemble;
-    if (assemble && this.animationNames.includes(assemble)) {
-      this.spine.state.setAnimation(BASE_TRACK, assemble, true);
-      pumpAnimationState(this.spine, ASSEMBLE_SEC, 36);
+    const idle = this.resolveIdleName();
+    this.idleName = idle;
+    if (idle && this.animationNames.includes(idle)) {
+      this.spine.state.setAnimation(BASE_TRACK, idle, true);
     }
 
     const bootAnim =
@@ -284,7 +281,7 @@ export class SpinePet {
     if (
       !this.skipBootAnimation &&
       bootAnim &&
-      bootAnim !== assemble &&
+      bootAnim !== idle &&
       this.animationNames.includes(bootAnim)
     ) {
       this.playOneShot(bootAnim);
@@ -292,34 +289,18 @@ export class SpinePet {
 
     this.fitSpineToCanvas();
     this.restartRandomScheduler();
-
-    if (this.powerMode === "minimal") {
-      this.spine.autoUpdate = false;
-      this.spine.state.update(0);
-      this.spine.state.apply(this.spine.skeleton);
-      this.spine.skeleton.updateWorldTransform();
-      this.app.render();
-      this.running = false;
-      this.clearRandomTimer();
-    } else {
-      this.spine.autoUpdate = this.running;
-      pumpAnimationState(this.spine, 0.08, 6);
-      this.fitSpineToCanvas();
-      this.app.render();
-    }
+    this.app.render();
 
     return this.animationNames;
   }
 
- private resolveAssembleIdleName(): string {
-   if (
-     this.idleName &&
-     this.animationNames.includes(this.idleName)
-   ) {
-     return this.idleName;
-   }
-   return pickIdleAnimation(this.animationNames) ?? this.idleName;
- }
+  private resolveIdleName(): string {
+    const preferred = this.returnIdleName || this.idleName;
+    if (preferred && this.animationNames.includes(preferred)) {
+      return preferred;
+    }
+    return pickIdleAnimation(this.animationNames) ?? preferred;
+  }
 
   private isCorrectIdleLooping(): boolean {
     const idle = this.returnIdleName || this.idleName;
@@ -327,38 +308,24 @@ export class SpinePet {
     return Boolean(idle && cur?.animation?.name === idle && cur.loop);
   }
 
-  private isActionPlaying(): boolean {
-    return this.actionPlaying;
-  }
-
   private isBaseIdleAnimation(name: string): boolean {
     const idle = this.returnIdleName || this.idleName;
     return name === idle || isLikelyIdleName(name);
   }
 
-  /** 窗口可见后重新组装并 fit（启动 hidden→show 与右键隐藏再开路径一致） */
-  finalizeVisibleAssembly() {
-    if (!this.spine || !this.app) return;
-    this.assembleBaseIdle();
-    this.fitSpineToCanvas();
-    this.app.render();
-  }
-
-  /** track 切回 idle 并 pump 组装到稳定姿态 */
-  private assembleBaseIdle() {
-    if (!this.spine) return;
-    const idle = this.resolveAssembleIdleName();
+  /** 切回 idle 循环；动作播放中不打扰当前 track */
+  private ensureIdleLoop() {
+    if (!this.spine || this.actionPlaying) return;
+    const idle = this.resolveIdleName();
     if (!idle || !this.animationNames.includes(idle)) return;
     this.idleName = idle;
-    this.actionPlaying = false;
     this.spine.state.setAnimation(BASE_TRACK, idle, true);
-    pumpAnimationState(this.spine, ASSEMBLE_SEC, 36);
     this.app?.render();
   }
 
   private enablePlayback() {
     this.running = true;
-    if (this.spine) this.spine.autoUpdate = this.powerMode !== "minimal";
+    if (this.spine) this.spine.autoUpdate = true;
   }
 
   private configureAnimationMix() {
@@ -377,12 +344,13 @@ export class SpinePet {
   private returnToIdle() {
     if (!this.spine) return;
     if (this.isCorrectIdleLooping()) return;
-    this.assembleBaseIdle();
+    this.ensureIdleLoop();
   }
 
   /**
-   * 鍗曡建鎾斁涓€娆℃€у姩浣滐細鍦?track 0 涓婁粠褰撳墠寰呮満濮挎€?mix 鍒板姩浣滐紝
-   * 鎾畬鑷姩鎺掗槦鍥炲埌 idle 寰幆銆傚叏绋嬪彧鏈変竴鏉￠楠兼椂闂磋酱鐢熸晥锛?   * 涓嶅啀鍑虹幇鍙岃建鍙犲姞鎴?deform 鐩稿閿佹楠ㄩ椋炴暎瀵艰嚧鐨勭鍧椼€?   */
+   * 单轨播放一次性动作：在 track 0 上从当前待机 mix 到动作，
+   * 播完自动排队回到 idle 循环。
+   */
   private playOneShot(name: string, onComplete?: () => void): boolean {
     if (!this.spine || !name || !this.animationNames.includes(name)) return false;
     const idle = this.returnIdleName || this.idleName;
@@ -408,7 +376,6 @@ export class SpinePet {
       end: finish,
       dispose: finish,
     };
-    pumpAnimationState(this.spine, Math.max(ACTION_MIX_SEC, 0.12), 12);
     this.app?.render();
     return true;
   }
@@ -418,20 +385,20 @@ export class SpinePet {
     if (!this.animationNames.includes(name)) return false;
     this.enablePlayback();
     if (loop && this.isBaseIdleAnimation(name)) {
-      this.assembleBaseIdle();
+      this.ensureIdleLoop();
       this.app?.render();
       return true;
     }
     return this.playOneShot(name);
   }
 
-  /** 璁剧疆椤甸瑙?*/
+  /** 设置页预览 */
   previewPlay(name: string, loop = false): boolean {
     if (!this.spine || !name || !this.animationNames.includes(name)) return false;
     this.clearRandomTimer();
     this.enablePlayback();
     if (loop && this.isBaseIdleAnimation(name)) {
-      this.assembleBaseIdle();
+      this.ensureIdleLoop();
       return true;
     }
     return this.playOneShot(name, () => this.restartRandomScheduler());
@@ -458,8 +425,8 @@ export class SpinePet {
     this.restartRandomScheduler();
   }
 
- playTap(): boolean {
-   if (!this.spine || this.clickActionBusy) return false;
+  playTap(): boolean {
+    if (!this.spine || this.clickActionBusy) return false;
     const tap =
       this.clickName && this.animationNames.includes(this.clickName)
         ? this.clickName
@@ -468,33 +435,32 @@ export class SpinePet {
             ? this.idleName
             : "");
     if (!tap) return false;
-   this.clearRandomTimer();
-   this.clickActionBusy = true;
-   if (!this.playOneShot(tap, () => this.finishClickAction())) {
+    this.clearRandomTimer();
+    this.clickActionBusy = true;
+    if (!this.playOneShot(tap, () => this.finishClickAction())) {
       this.clickActionBusy = false;
       return false;
     }
     return true;
   }
 
-  /** 鎷栨嫿鏈熼棿寰幆鎾斁鎷栨嫿鍔ㄤ綔锛屾澗寮€鍚庣敱 stopDrag 鍥炲埌寰呮満 */
-playDrag(): boolean {
-  if (!this.spine || !this.dragName || !this.animationNames.includes(this.dragName)) return false;
-  this.clearRandomTimer();
+  /** 拖拽期间循环播放拖拽动作，松开后由 stopDrag 回到待机 */
+  playDrag(): boolean {
+    if (!this.spine || !this.dragName || !this.animationNames.includes(this.dragName)) return false;
+    this.clearRandomTimer();
     this.enablePlayback();
     this.actionPlaying = true;
     const entry = this.spine.state.setAnimation(BASE_TRACK, this.dragName, true);
     entry.mixDuration = ACTION_MIX_SEC;
-    this.spine.update(0);
     this.app?.render();
     return true;
   }
 
-  /** 鎷栨嫿缁撴潫锛氬垏鍥炲緟鏈哄惊鐜苟鎭㈠闅忔満璋冨害 */
+  /** 拖拽结束：切回待机循环并恢复随机调度 */
   stopDrag(): void {
     if (!this.spine) return;
     this.actionPlaying = false;
-    this.assembleBaseIdle();
+    this.ensureIdleLoop();
     this.restartRandomScheduler();
   }
 
@@ -505,28 +471,9 @@ playDrag(): boolean {
     this.restartRandomScheduler();
   }
 
-  setPowerMode(mode: PowerMode) {
-    this.powerMode = mode;
-    if (!this.spine) return;
-    if (mode === "minimal") {
-      this.running = false;
-      this.spine.autoUpdate = false;
-      this.clearRandomTimer();
-      this.app?.render();
-    } else {
-      this.running = true;
-      this.spine.autoUpdate = true;
-      this.restartRandomScheduler();
-    }
-  }
-
   setRenderPaused(paused: boolean) {
     if (!this.spine) return;
-    if (paused) {
-      this.spine.autoUpdate = false;
-    } else if (this.running && this.powerMode !== "minimal") {
-      this.spine.autoUpdate = true;
-    }
+    this.spine.autoUpdate = !paused && this.running;
   }
 
   handleClick(): boolean {
@@ -536,15 +483,11 @@ playDrag(): boolean {
       pickClickAnimation(this.animationNames) ??
       this.idleName ??
       null;
-    if (this.powerMode !== "minimal") {
-      const played = this.playTap();
-      if (played) {
-        this.onTap?.(tapAnim);
-      }
-      return played;
+    const played = this.playTap();
+    if (played) {
+      this.onTap?.(tapAnim);
     }
-    this.onTap?.(tapAnim);
-    return true;
+    return played;
   }
 
   resizeCanvas(width: number, height: number, refit = true) {
@@ -589,7 +532,6 @@ playDrag(): boolean {
     this.clearRandomTimer();
     if (
       !this.spine ||
-      this.powerMode === "minimal" ||
       this.randomAnimations.length === 0 ||
       this.clickActionBusy ||
       this.isActionPlaying()

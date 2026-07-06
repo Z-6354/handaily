@@ -139,13 +139,42 @@ export function TimelineView({ active }: TimelineViewProps) {
   const [logsPath, setLogsPath] = useState("");
   const [initialized, setInitialized] = useState(false);
   const [aiReady, setAiReady] = useState(false);
+  const [aiHint, setAiHint] = useState("");
   const aiReadyRef = useRef(false);
   const loadGenRef = useRef(0);
   const pageRef = useRef({ limit: 50, offset: 0 });
+  const itemsRef = useRef<Segment[]>([]);
   const filterRef = useRef(filter);
   filterRef.current = filter;
 
   const limit = 50;
+
+  const resolveAiHint = async (): Promise<string> => {
+    try {
+      if (await xiaohan.aiIsTextReady()) return "";
+      const cfg = await xiaohan.aiGetConfig();
+      const vendor = cfg.vendors.find((v) => v.id === cfg.text_vendor_id);
+      const vs = await xiaohan.vaultGetStatus();
+      if (!cfg.text_model?.trim()) {
+        return "请先在「设置 → AI 配置」选择文本模型";
+      }
+      if (!vendor) {
+        return "请先在「设置 → AI 配置」选择文本供应商";
+      }
+      if (vendor.api_style === "ollama") {
+        return "Ollama 未就绪，请确认本地服务已启动";
+      }
+      if (!vendor.vault_entry_id) {
+        return "请先在「设置 → AI 配置」为供应商关联密码本中的 API 密钥";
+      }
+      if (!vs.unlocked) {
+        return "密码本未解锁，无法调用 AI；请打开「密码本」解锁后再试";
+      }
+      return "AI 暂不可用，已显示本地活动描述";
+    } catch {
+      return "未绑定 AI，已显示本地活动描述";
+    }
+  };
 
   const refreshLogsPath = async () => {
     try {
@@ -173,11 +202,15 @@ export function TimelineView({ active }: TimelineViewProps) {
   );
 
   const applyChunk = useCallback((chunk: TimelineDescribeChunkEvent) => {
-    if (chunk.offset !== pageRef.current.offset || chunk.limit !== pageRef.current.limit) {
-      return;
-    }
-    applyDescribeResult(chunk.entries, loadGenRef.current, false);
+    const visibleKeys = new Set(itemsRef.current.map((s) => s.started_at));
+    const relevant = chunk.entries.filter((e) => visibleKeys.has(e.started_at));
+    if (relevant.length === 0) return;
+    applyDescribeResult(relevant, loadGenRef.current, false);
   }, [applyDescribeResult]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
 
   useEffect(() => {
     refreshLogsPath();
@@ -219,10 +252,12 @@ export function TimelineView({ active }: TimelineViewProps) {
         textAiReady = await xiaohan.aiIsTextReady();
         aiReadyRef.current = textAiReady;
         setAiReady(textAiReady);
+        setAiHint(textAiReady ? "" : await resolveAiHint());
       } catch {
         textAiReady = false;
         aiReadyRef.current = false;
         setAiReady(false);
+        setAiHint("未绑定 AI，已显示本地活动描述");
       }
 
       const [page, wt] = await Promise.all([
@@ -232,15 +267,10 @@ export function TimelineView({ active }: TimelineViewProps) {
       if (gen !== loadGenRef.current) return;
 
       setItems(page.items);
+      itemsRef.current = page.items;
       setTotal(page.total);
       setOffset(off);
       setWorkTypes(wt.types);
-
-      if (!textAiReady) {
-        setDescriptions([]);
-        setPendingDescribe(new Set());
-        return;
-      }
 
       const cached = await xiaohan.timelineCached(limit, off, undefined, sinceMinutes);
       if (gen !== loadGenRef.current) return;
@@ -266,7 +296,7 @@ export function TimelineView({ active }: TimelineViewProps) {
         }
       } catch (e) {
         if (gen === loadGenRef.current) {
-          setDescribeError(formatApiError(e, "时间线 AI 简介"));
+          setDescribeError(formatApiError(e, "时间线简介"));
           setPendingDescribe(new Set());
         }
       }
@@ -307,23 +337,22 @@ export function TimelineView({ active }: TimelineViewProps) {
 
   const enriched = useMemo(() => {
     return items.map((seg) => {
-      const ai = aiReady ? descByStarted.get(seg.started_at) : undefined;
+      const ai = descByStarted.get(seg.started_at);
       const category = ai?.work_type ?? "其他";
-      const text = aiReady && ai?.summary ? ai.summary : fallbackText(seg);
+      const text = ai?.summary ? ai.summary : fallbackText(seg);
       const isPending =
-        aiReady &&
-        pendingDescribe.has(seg.started_at) &&
-        !descByStarted.has(seg.started_at);
+        pendingDescribe.has(seg.started_at) && !descByStarted.has(seg.started_at);
       return {
         seg,
         category,
         text,
-        usedAi: aiReady && (ai?.used_ai ?? false),
+        usedAi: ai?.used_ai ?? false,
+        hasSummary: Boolean(ai?.summary),
         isPending,
         color: tagColor(category, workTypes),
       };
     });
-  }, [items, descByStarted, workTypes, pendingDescribe, aiReady]);
+  }, [items, descByStarted, workTypes, pendingDescribe]);
 
   const pendingCount = useMemo(
     () => enriched.filter((e) => e.isPending).length,
@@ -388,10 +417,8 @@ export function TimelineView({ active }: TimelineViewProps) {
             小寒正在写简介…（{pendingCount} 条待生成）
           </p>
         )}
-        {!aiReady && items.length > 0 && (
-          <p className="timeline-describe-hint">
-            未绑定 AI，时间线显示应用与窗口等原始活动描述
-          </p>
+        {!aiReady && items.length > 0 && aiHint && (
+          <p className="timeline-describe-hint">{aiHint}</p>
         )}
         {describeError && (
           <div className="error">简介生成：{describeError}</div>
@@ -416,7 +443,7 @@ export function TimelineView({ active }: TimelineViewProps) {
           />
         ) : (
           <div className="vtimeline">
-            {enriched.map(({ seg, category, text, usedAi, isPending, color }, i) => {
+            {enriched.map(({ seg, category, text, usedAi, hasSummary, isPending, color }, i) => {
               const audio = audioBadge(seg);
               return (
               <div className="vtimeline-item" key={`${seg.started_at}-${i}`}>
@@ -446,7 +473,7 @@ export function TimelineView({ active }: TimelineViewProps) {
                     <span className="vtimeline-meta">
                       {isPending
                         ? "生成中"
-                        : aiReady
+                        : hasSummary
                           ? usedAi
                             ? "AI 简介"
                             : "本地简介"

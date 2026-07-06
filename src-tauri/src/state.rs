@@ -6,7 +6,7 @@
 //! - command 用 `async fn`，临界区只 clone 快照不持锁做 I/O
 //! - 后台线程退出由 `stop_flag: AtomicBool` 控制，Tauri 不会 join 它
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread::JoinHandle;
 
@@ -37,6 +37,8 @@ pub struct AppState {
     pub db_path: std::path::PathBuf,
     /// 采集开关
     pub tracking_enabled: AtomicBool,
+    /// 空闲阈值（秒），避免 poller 每 tick 读 DB
+    pub idle_threshold_secs: AtomicU64,
     /// 停机标志——后台线程循环检查，true 时退出
     pub stop_flag: AtomicBool,
     /// Tauri 句柄（用于从后台线程发事件到前端）
@@ -107,9 +109,6 @@ impl AppState {
             let _ = crate::ai::seed_user_vendors(data_dir);
             let _ = crate::persona::seed_user_personas(data_dir);
             let _ = crate::timeline::json_log::ensure_logs_dir(data_dir);
-            if let Err(e) = crate::timeline::json_log::consolidate_past_days_on_startup(data_dir) {
-                eprintln!("xiaohan-daily: timeline-ai startup consolidate failed: {e}");
-            }
         }
 
         // 启动兜底：闭合孤儿段与会话
@@ -137,6 +136,10 @@ impl AppState {
             .map(|v| v == "1")
             .unwrap_or(true);
 
+        let idle_threshold = crate::db::get_setting(&db, "idle_threshold_secs")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(crate::tracker::idle::DEFAULT_IDLE_THRESHOLD_SECS);
+
         if enabled {
             let _ = crate::db::sessions::open_session(&db);
         }
@@ -152,6 +155,7 @@ impl AppState {
             foreground: Mutex::new(None),
             db_path: db_path.clone(),
             tracking_enabled: AtomicBool::new(enabled),
+            idle_threshold_secs: AtomicU64::new(idle_threshold),
             stop_flag: AtomicBool::new(false),
             app: app.clone(),
             vault,
@@ -171,8 +175,15 @@ impl AppState {
 
     /// 同步采集开关与会话表
     pub fn set_tracking_enabled(&self, enabled: bool) -> Result<(), String> {
+        let was_enabled = self
+            .tracking_enabled
+            .load(std::sync::atomic::Ordering::Relaxed);
         self.tracking_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
+        crate::tracker::input_monitor::set_input_enabled(enabled);
+        if was_enabled && !enabled {
+            crate::tracker::writer::pause_tracking(self);
+        }
         let db = self.lock_db()?;
         crate::db::set_setting(&db, "tracking_enabled", if enabled { "1" } else { "0" })
             .map_err(|e| e.to_string())?;
@@ -182,6 +193,15 @@ impl AppState {
             crate::db::sessions::close_open_session(&db).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    pub fn idle_threshold_secs(&self) -> u64 {
+        self.idle_threshold_secs.load(Ordering::Relaxed)
+    }
+
+    pub fn set_idle_threshold_secs(&self, secs: u64) {
+        self.idle_threshold_secs
+            .store(secs.max(1), Ordering::Relaxed);
     }
 
     pub fn data_dir(&self) -> &std::path::Path {
@@ -194,10 +214,9 @@ impl AppState {
         self.period_scheduler.join_all();
     }
 
-    /// 退出前 flush：把 open_segment + pending 写入 DB，WAL checkpoint
-    pub fn flush_on_exit(&self) {
+    /// 退出收尾：会话关闭 + WAL checkpoint（segment 由 writer::flush_all_segments 落盘）
+    pub fn finalize_shutdown(&self) {
         if let Ok(db) = self.lock_db() {
-            let _ = self.flush_open(&db);
             let _ = crate::db::sessions::close_open_session(&db);
             let _ = crate::db::usage::close_companion_session(&db);
             let _ = crate::db::usage::close_app_session(&db);
@@ -208,17 +227,6 @@ impl AppState {
         if let Ok(db) = self.lock_db() {
             let _ = crate::db::metrics::upsert_delta(&db, mouse, keys, &text, created, modified);
         }
-    }
-
-    /// 把 open_segment 和 pending_segment 落盘
-    fn flush_open(&self, db: &Connection) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(seg) = self.pending_segment.lock().unwrap().take() {
-            crate::db::insert_segment(db, &seg)?;
-        }
-        if let Some(seg) = self.open_segment.lock().unwrap().take() {
-            crate::db::insert_segment(db, &seg)?;
-        }
-        Ok(())
     }
 }
 

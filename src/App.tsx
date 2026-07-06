@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   xiaohan,
   type OverviewPayload,
@@ -9,17 +10,6 @@ import {
   type HeatmapDay,
 } from "./lib/xiaohan";
 import { TodayDashboard } from "./pages/TodayDashboard";
-import { TimelineView } from "./pages/TimelineView";
-import { PetPanel } from "./pages/PetPanel";
-import { SettingsPanel } from "./pages/SettingsPanel";
-import { PersonaPanel } from "./pages/PersonaPanel";
-import { VaultPanel } from "./pages/VaultPanel";
-import { HeatmapPage } from "./pages/HeatmapPage";
-import { AppRecordsPage } from "./pages/AppRecordsPage";
-import { ReportGeneratePage } from "./pages/ReportGeneratePage";
-import { HistoryReportsPage } from "./pages/HistoryReportsPage";
-import { AgentConnectPage } from "./pages/AgentConnectPage";
-import { PerformancePage } from "./pages/PerformancePage";
 import { HelpGuideGrid } from "./components/HelpGuideGrid";
 import { PageHeader } from "./components/PageHeader";
 import {
@@ -37,6 +27,48 @@ import {
   IconPet,
   IconPerformance,
 } from "./components/Icons";
+
+const TimelineView = lazy(() =>
+  import("./pages/TimelineView").then((m) => ({ default: m.TimelineView })),
+);
+const HeatmapPage = lazy(() =>
+  import("./pages/HeatmapPage").then((m) => ({ default: m.HeatmapPage })),
+);
+const AppRecordsPage = lazy(() =>
+  import("./pages/AppRecordsPage").then((m) => ({ default: m.AppRecordsPage })),
+);
+const ReportGeneratePage = lazy(() =>
+  import("./pages/ReportGeneratePage").then((m) => ({ default: m.ReportGeneratePage })),
+);
+const HistoryReportsPage = lazy(() =>
+  import("./pages/HistoryReportsPage").then((m) => ({ default: m.HistoryReportsPage })),
+);
+const AgentConnectPage = lazy(() =>
+  import("./pages/AgentConnectPage").then((m) => ({ default: m.AgentConnectPage })),
+);
+const PersonaPanel = lazy(() =>
+  import("./pages/PersonaPanel").then((m) => ({ default: m.PersonaPanel })),
+);
+const PetPanel = lazy(() => import("./pages/PetPanel").then((m) => ({ default: m.PetPanel })));
+const VaultPanel = lazy(() => import("./pages/VaultPanel").then((m) => ({ default: m.VaultPanel })));
+const SettingsPanel = lazy(() =>
+  import("./pages/SettingsPanel").then((m) => ({ default: m.SettingsPanel })),
+);
+const PerformancePage = lazy(() =>
+  import("./pages/PerformancePage").then((m) => ({ default: m.PerformancePage })),
+);
+
+function PageLoading() {
+  return (
+    <div className="panel">
+      <p className="empty empty--compact">加载中…</p>
+    </div>
+  );
+}
+
+function LazyPage({ children }: { children: ReactNode }) {
+  return <Suspense fallback={<PageLoading />}>{children}</Suspense>;
+}
 
 type Page =
   | "today"
@@ -90,6 +122,10 @@ const MORE_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
 
 const PAGE_IDS = new Set<string>(Object.keys(PAGE_META));
 
+const HEAVY_PAGES = new Set<Page>(["today", "heatmap", "apps"]);
+const LIGHT_INTERVAL_MS = 5000;
+const HEAVY_INTERVAL_MS = 30000;
+
 export default function App() {
   const [page, setPage] = useState<Page>("today");
   const [overview, setOverview] = useState<OverviewPayload | null>(null);
@@ -100,26 +136,46 @@ export default function App() {
   const [tracking, setTracking] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const refreshGenRef = useRef(0);
+  const pageRef = useRef<Page>(page);
+  const windowVisibleRef = useRef(false);
+  pageRef.current = page;
 
-  const refresh = async () => {
+  const refreshLight = async (gen: number) => {
+    const [ov, status, wt] = await Promise.all([
+      xiaohan.getOverview(),
+      xiaohan.getStatus(),
+      xiaohan.workTypesGet(),
+    ]);
+    if (gen !== refreshGenRef.current) return;
+    setOverview(ov);
+    setWorkTypes(wt.types);
+    setTracking(status.tracking);
+  };
+
+  const refreshHeavy = async (gen: number) => {
+    const [bd, hm, ps] = await Promise.all([
+      xiaohan.getAppBreakdown(),
+      xiaohan.getThreeDayHeatmap(),
+      xiaohan.periodListSummaries(20),
+    ]);
+    if (gen !== refreshGenRef.current) return;
+    setBreakdown(bd);
+    setHeatmap(hm);
+    setPeriodSummaries(ps);
+  };
+
+  const refresh = async (opts?: { heavy?: boolean }) => {
+    if (!windowVisibleRef.current) return;
     const gen = ++refreshGenRef.current;
     try {
       setError(null);
-      const [ov, bd, hm, status, wt, ps] = await Promise.all([
-        xiaohan.getOverview(),
-        xiaohan.getAppBreakdown(),
-        xiaohan.getThreeDayHeatmap(),
-        xiaohan.getStatus(),
-        xiaohan.workTypesGet(),
-        xiaohan.periodListSummaries(20),
-      ]);
+      await refreshLight(gen);
       if (gen !== refreshGenRef.current) return;
-      setOverview(ov);
-      setBreakdown(bd);
-      setHeatmap(hm);
-      setWorkTypes(wt.types);
-      setPeriodSummaries(ps);
-      setTracking(status.tracking);
+      const wantHeavy =
+        opts?.heavy ?? HEAVY_PAGES.has(pageRef.current);
+      if (wantHeavy) {
+        await refreshHeavy(gen);
+      }
     } catch (e) {
       if (gen !== refreshGenRef.current) return;
       setError(String(e));
@@ -127,10 +183,60 @@ export default function App() {
   };
 
   useEffect(() => {
-    refresh();
-    const id = setInterval(refresh, 5000);
-    return () => clearInterval(id);
+    let lastHeavy = Date.now();
+
+    void getCurrentWindow()
+      .isVisible()
+      .then((v) => {
+        windowVisibleRef.current = v;
+        if (v) void refresh({ heavy: true });
+      })
+      .catch(() => {
+        windowVisibleRef.current = true;
+        void refresh({ heavy: true });
+      });
+
+    const lightId = setInterval(() => {
+      if (!windowVisibleRef.current) return;
+      const now = Date.now();
+      const onHeavyPage = HEAVY_PAGES.has(pageRef.current);
+      const heavyDue = onHeavyPage && now - lastHeavy >= HEAVY_INTERVAL_MS;
+      if (heavyDue) lastHeavy = now;
+      void refresh({ heavy: heavyDue });
+    }, LIGHT_INTERVAL_MS);
+
+    let unlistenVisible: (() => void) | undefined;
+    void listen<boolean>("main-window-visible", (ev) => {
+      windowVisibleRef.current = Boolean(ev.payload);
+      if (windowVisibleRef.current) {
+        void refresh({ heavy: HEAVY_PAGES.has(pageRef.current) });
+      }
+    }).then((fn) => {
+      unlistenVisible = fn;
+    });
+
+    let unlistenFocus: (() => void) | undefined;
+    void getCurrentWindow()
+      .listen("tauri://focus", () => {
+        if (!windowVisibleRef.current) return;
+        void refresh({ heavy: HEAVY_PAGES.has(pageRef.current) });
+      })
+      .then((fn) => {
+        unlistenFocus = fn;
+      });
+
+    return () => {
+      clearInterval(lightId);
+      unlistenVisible?.();
+      unlistenFocus?.();
+    };
   }, []);
+
+  useEffect(() => {
+    if (HEAVY_PAGES.has(page)) {
+      void refresh({ heavy: true });
+    }
+  }, [page]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -151,8 +257,8 @@ export default function App() {
     <div className="app">
       <aside className="sidebar">
         <div className="sidebar-brand">
-          <div className="brand-icon">
-            <IconChart />
+          <div className="brand-icon brand-icon--app">
+            <img src="/app-icon.png" alt="" width={28} height={28} />
           </div>
           <div className="brand-name">小寒日报助手</div>
         </div>
@@ -205,19 +311,61 @@ export default function App() {
             periodSummaries={periodSummaries}
           />
         )}
-        {page === "report" && <ReportGeneratePage />}
-        {page === "timeline" && <TimelineView active />}
-        {page === "heatmap" && (
-          <HeatmapPage heatmap={heatmap} workTypes={workTypes} onRefresh={refresh} />
+        {page === "report" && (
+          <LazyPage>
+            <ReportGeneratePage />
+          </LazyPage>
         )}
-        {page === "apps" && <AppRecordsPage breakdown={breakdown} />}
-        {page === "history" && <HistoryReportsPage />}
-        {page === "agent" && <AgentConnectPage />}
-        {page === "persona" && <PersonaPanel />}
-        {page === "pet" && <PetPanel />}
-        {page === "vault" && <VaultPanel />}
-        {page === "settings" && <SettingsPanel onTrackingChange={setTracking} />}
-        {page === "performance" && <PerformancePage />}
+        {page === "timeline" && (
+          <LazyPage>
+            <TimelineView active />
+          </LazyPage>
+        )}
+        {page === "heatmap" && (
+          <LazyPage>
+            <HeatmapPage heatmap={heatmap} workTypes={workTypes} onRefresh={() => refresh({ heavy: true })} />
+          </LazyPage>
+        )}
+        {page === "apps" && (
+          <LazyPage>
+            <AppRecordsPage breakdown={breakdown} />
+          </LazyPage>
+        )}
+        {page === "history" && (
+          <LazyPage>
+            <HistoryReportsPage />
+          </LazyPage>
+        )}
+        {page === "agent" && (
+          <LazyPage>
+            <AgentConnectPage />
+          </LazyPage>
+        )}
+        {page === "persona" && (
+          <LazyPage>
+            <PersonaPanel />
+          </LazyPage>
+        )}
+        {page === "pet" && (
+          <LazyPage>
+            <PetPanel />
+          </LazyPage>
+        )}
+        {page === "vault" && (
+          <LazyPage>
+            <VaultPanel />
+          </LazyPage>
+        )}
+        {page === "settings" && (
+          <LazyPage>
+            <SettingsPanel onTrackingChange={setTracking} />
+          </LazyPage>
+        )}
+        {page === "performance" && (
+          <LazyPage>
+            <PerformancePage />
+          </LazyPage>
+        )}
         {page === "help" && (
           <div className="panel">
             <HelpGuideGrid />

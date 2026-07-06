@@ -1516,17 +1516,13 @@ pub fn save_model_display_settings(
     data_dir: &Path,
     db: &rusqlite::Connection,
     model_id: &str,
-    power_mode: Option<String>,
+    _power_mode: Option<String>,
     scale: Option<f64>,
     remark_interval_sec: Option<i64>,
 ) -> Result<PetAnimationMeta, String> {
     let mut meta = read_animation_meta(data_dir, db, model_id);
-    if let Some(p) = power_mode {
-        let p = p.trim().to_string();
-        if matches!(p.as_str(), "minimal" | "balanced" | "full") {
-            meta.power_mode = Some(p);
-        }
-    }
+    // 省电模式已移除，固定 balanced；忽略传入的 power_mode
+    meta.power_mode = None;
     if let Some(s) = scale {
         meta.scale = Some(s.clamp(0.4, 1.5));
     }

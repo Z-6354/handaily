@@ -118,6 +118,16 @@ pub fn execute_prepared(prepared: &VisionPrepared, jpeg: &[u8]) -> Result<Vision
     })
 }
 
+fn is_quota_or_rate_limit(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("accountquotaexceeded")
+        || lower.contains("toomanyrequests")
+        || lower.contains("rate limit")
+        || lower.contains("usage quota")
+        || msg.contains("超出")
+        || msg.contains("配额")
+}
+
 pub fn execute_or_fallback(
     prepared: &VisionPrepared,
     jpeg: &[u8],
@@ -126,7 +136,12 @@ pub fn execute_or_fallback(
     match execute_prepared(prepared, jpeg) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("xiaohan-daily: vision AI failed: {e}");
+            let msg = e.to_string();
+            if is_quota_or_rate_limit(&msg) {
+                eprintln!("xiaohan-daily: vision AI skipped (quota/rate limit)");
+            } else {
+                eprintln!("xiaohan-daily: vision AI failed: {msg}");
+            }
             fallback_insight(segment)
         }
     }

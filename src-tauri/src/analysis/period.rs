@@ -50,14 +50,20 @@ pub fn prepare_period_chat(
         ],
     );
 
-    PreparedTextChat::prepare(
+    match PreparedTextChat::prepare(
         config,
         &ai::load_catalog(data_dir),
         vault,
         db,
         data_dir,
         prompt,
-    )
+    ) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            eprintln!("xiaohan-daily: period AI prep skipped: {e}");
+            Ok(None)
+        }
+    }
 }
 
 pub fn finalize_period_analysis(

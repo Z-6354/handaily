@@ -24,11 +24,25 @@ npm run tauri:dev
 ### 打包
 
 ```bash
-npm run tauri:build:fast
+# 默认：release-fast + NSIS（比旧版 release 快，推荐日常导出）
+npm run tauri:build
+
+# 只要便携 exe、不要安装包（最快；仅改 Rust 时会自动跳过前端）
+npm run tauri:build:exe
+
+# 手动强制跳过 / 强制重建前端
+$env:SKIP_FE_BUILD=1; npm run tauri:build:exe
+$env:FORCE_FE_BUILD=1; npm run tauri:build:exe
+
+# 正式发布（LTO + tsc 严格检查）
+npm run tauri:build:full
+
+# 或使用脚本（自动检测，无需 -SkipFe）
+scripts\build.ps1 -ExeOnly
 ```
 
-日常验证优先用 `npm run check:rust` 或 `npm run tauri:build:debug`，会比 release 打包快很多。
-最终需要更小体积产物时再运行 `npm run tauri:build:small`。
+日常验证优先 `npm run check:rust` 或 `npm run tauri:build:debug`。
+需要更小体积时用 `npm run tauri:build:small`。
 
 打包前需：
 1. 在 `src-tauri/tauri.conf.json` 中设 `"bundle.active": true`

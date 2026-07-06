@@ -7,6 +7,8 @@ const GUIDE_ITEMS = [
   { emoji: "🔐", title: "密码本", desc: "密钥本地加密保存" },
 ] as const;
 
+const BILIBILI_HOME = "https://space.bilibili.com/146915875";
+
 export function HelpGuideGrid() {
   return (
     <div className="help-guide">
@@ -30,6 +32,21 @@ export function HelpGuideGrid() {
             </div>
           </div>
         ))}
+      </div>
+      <div className="help-guide-contact">
+        <div className="help-guide-contact-title">反馈与联系</div>
+        <p className="help-guide-contact-desc">
+          使用中遇到问题，欢迎到我的 B 站主页
+          <a
+            className="help-guide-link"
+            href={BILIBILI_HOME}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            万年烟火
+          </a>
+          反馈：可在视频下方评论，或直接私信我。
+        </p>
       </div>
     </div>
   );
