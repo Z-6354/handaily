@@ -195,14 +195,10 @@ pub fn consolidate_past_days_on_startup(data_dir: &Path) -> Result<Vec<Consolida
         }
         match consolidate_day(data_dir, &date) {
             Ok(r) if r.consolidated => {
-                eprintln!(
-                    "xiaohan-daily: timeline-ai consolidated {} ({} files → {} entries)",
-                    r.date, r.source_files, r.entries_kept
-                );
                 results.push(r);
             }
             Ok(_) => {}
-            Err(e) => eprintln!("xiaohan-daily: timeline-ai consolidate {date} failed: {e}"),
+            Err(e) => crate::log::warn(format!("timeline-ai consolidate {date} failed: {e}")),
         }
     }
     Ok(results)

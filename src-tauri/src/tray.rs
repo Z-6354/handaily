@@ -49,7 +49,7 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
                 if let Err(e) = crate::pet::show_main_window(app, None) {
-                    eprintln!("显示主窗口失败: {e}");
+                    crate::log::warn(format!("显示主窗口失败: {e}"));
                 }
             }
             "pet_toggle" => {
@@ -58,7 +58,7 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     if visible {
                         let _ = crate::pet::hide_pet(app, false);
                     } else if let Err(e) = crate::pet::show_pet(app, st.inner()) {
-                        eprintln!("显示桌宠失败: {e}");
+                        crate::log::warn(format!("显示桌宠失败: {e}"));
                     } else {
                         crate::pet::ensure_remark_scheduler(app.clone(), st.inner().clone());
                     }
@@ -103,7 +103,7 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     let _ = win.emit("main-window-visible", false);
                     crate::pet::restore_pet_topmost_if_visible(&app);
                 } else if let Err(e) = crate::pet::show_main_window(&app, None) {
-                    eprintln!("显示主窗口失败: {e}");
+                    crate::log::warn(format!("显示主窗口失败: {e}"));
                 }
                     }
                 }

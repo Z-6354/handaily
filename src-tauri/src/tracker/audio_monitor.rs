@@ -51,7 +51,7 @@ pub fn spawn_audio_monitor(state: Arc<AppState>) -> JoinHandle<()> {
     thread::spawn(move || {
         crate::tracker::dampen_thread_priority();
         if !init_com() {
-            eprintln!("xiaohan-daily: audio monitor COM init failed");
+            crate::log::warn("audio monitor COM init failed");
             return;
         }
         let mut open: HashMap<SessionKey, Segment> = HashMap::new();

@@ -210,10 +210,10 @@ fn run_period_job(state: &AppState, job: &PeriodJob) -> Result<(), String> {
         Some(p) => match p.run_sync() {
             Ok(raw) => Some(raw),
             Err(e) => {
-                eprintln!(
-                    "xiaohan-daily: period AI failed ({}): {e}",
+                crate::log::warn(format!(
+                    "period AI failed ({}): {e}",
                     job.trigger
-                );
+                ));
                 None
             }
         },

@@ -49,26 +49,11 @@ tokio = { version = "1", features = ["rt", "time", "sync"] }
 notify = "7"
 rfd = "0.15"
 
+# 唯一发布配置：关闭 LTO、提高 codegen-units，链接快（体积略大于 LTO 版）
 [profile.release]
 panic = "abort"
-codegen-units = 16
-incremental = true
-lto = "thin"
-opt-level = 2
-strip = true
-
-# 日常导出 exe / NSIS：关闭 LTO、提高 codegen-units，链接明显更快（体积略增）
-[profile.release-fast]
-inherits = "release"
-lto = false
 codegen-units = 256
+incremental = true
+lto = false
 opt-level = 2
 strip = true
-incremental = true
-
-[profile.release-small]
-inherits = "release"
-codegen-units = 1
-incremental = false
-lto = true
-opt-level = "s"

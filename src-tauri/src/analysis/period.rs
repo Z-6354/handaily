@@ -60,7 +60,7 @@ pub fn prepare_period_chat(
     ) {
         Ok(opt) => Ok(opt),
         Err(e) => {
-            eprintln!("xiaohan-daily: period AI prep skipped: {e}");
+            crate::log::info(format!("period AI prep skipped: {e}"));
             Ok(None)
         }
     }
@@ -99,7 +99,7 @@ pub fn analyze_period(
         Some(p) => match p.run_sync() {
             Ok(raw) => Some(raw),
             Err(e) => {
-                eprintln!("xiaohan-daily: period AI failed: {e}");
+                crate::log::warn(format!("period AI failed: {e}"));
                 None
             }
         },

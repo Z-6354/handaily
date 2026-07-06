@@ -231,7 +231,7 @@ async fn describe_chunks(
         let finalized = finalize_chunk(chunk, ai_map.as_ref(), work_types);
         let finalized_log = finalized_to_log(&finalized);
 
-        match json_log::save_batch_log(
+        if let Err(e) = json_log::save_batch_log(
             data_dir,
             &date_str,
             limit,
@@ -240,8 +240,7 @@ async fn describe_chunks(
             response_log,
             finalized_log,
         ) {
-            Ok(path) => eprintln!("xiaohan-daily: timeline AI log saved: {}", path.display()),
-            Err(e) => eprintln!("xiaohan-daily: timeline AI log save failed: {e}"),
+            crate::log::warn(format!("timeline AI log save failed: {e}"));
         }
 
         let saved = {

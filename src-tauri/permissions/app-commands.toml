@@ -104,7 +104,6 @@ commands.allow = [
   "pet_wiki_import_lines",
   "pet_save_window_size",
   "pet_save_layout",
-  "pet_log",
   "pet_mark_spine_ready",
   "pet_clear_spine_ready",
   "pet_get_bubble_enabled",

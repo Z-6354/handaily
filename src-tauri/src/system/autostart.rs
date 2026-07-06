@@ -36,7 +36,7 @@ pub fn set_enabled(app: &AppHandle, db: &rusqlite::Connection, enabled: bool) ->
 pub fn sync_on_startup(app: &AppHandle, db: &rusqlite::Connection) {
     let enabled = is_enabled(db);
     if let Err(e) = apply_registry(app, enabled) {
-        eprintln!("xiaohan-daily: autostart sync failed: {e}");
+        crate::log::warn(format!("autostart sync failed: {e}"));
     }
 }
 

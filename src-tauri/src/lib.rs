@@ -26,6 +26,7 @@ pub mod analysis;
 pub mod ai;
 pub mod db;
 pub mod ipc;
+pub mod log;
 pub mod persona;
 pub mod persona_builder;
 pub mod pet;
@@ -80,9 +81,9 @@ pub fn run() {
                         if let Err(e) =
                             crate::timeline::json_log::consolidate_past_days_on_startup(&data_dir)
                         {
-                            eprintln!(
-                                "xiaohan-daily: timeline-ai startup consolidate failed: {e}"
-                            );
+                            crate::log::warn(format!(
+                                "timeline-ai startup consolidate failed: {e}"
+                            ));
                         }
                     })
                     .ok();
@@ -108,7 +109,7 @@ pub fn run() {
 
             // 4. 桌宠：若已启用则启动显示
             if let Err(e) = crate::pet::sync_on_startup(app.handle(), app_state.clone()) {
-                eprintln!("桌宠启动失败: {e}");
+                crate::log::warn(format!("桌宠启动失败: {e}"));
             }
 
             // 5. 时间线 AI：后台自动补全今日未缓存简介（不依赖打开时间线页）
@@ -206,7 +207,6 @@ pub fn run() {
             ipc::commands::pet_nudge,
             ipc::commands::pet_refresh_animations,
            ipc::commands::pet_preview_animation,
-           ipc::commands::pet_log,
            ipc::commands::pet_mark_spine_ready,
            ipc::commands::pet_clear_spine_ready,
            ipc::commands::pet_get_bubble_enabled,

@@ -128,12 +128,12 @@ pub fn spawn_input_monitor(state: Arc<AppState>) -> JoinHandle<()> {
             let hwnd = match create_message_window() {
                 Ok(h) => h,
                 Err(e) => {
-                    eprintln!("xiaohan-daily: raw input window failed: {e}");
+                    crate::log::warn(format!("raw input window failed: {e}"));
                     return;
                 }
             };
             if let Err(e) = register_raw_input(hwnd) {
-                eprintln!("xiaohan-daily: RegisterRawInputDevices failed: {e}");
+                crate::log::warn(format!("RegisterRawInputDevices failed: {e}"));
                 let _ = DestroyWindow(hwnd);
                 return;
             }

@@ -860,8 +860,7 @@ async function syncAnimations(
         idle_animation: idle ?? null,
       },
     });
-  } catch (e) {
-    console.warn("同步动作列表失败", e);
+  } catch {
     return null;
   }
 }
@@ -1066,10 +1065,8 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): 
     canvasWrap.style.visibility = "visible";
     return true;
 
-  } catch (e) {
-
-    console.warn("Spine 加载失败，使用静态图", e);
-
+  } catch {
+    // Spine 不可用时由静态图兜底
     canvasWrap.style.visibility = "visible";
     canvasWrap.style.display = "none";
 
@@ -1193,8 +1190,8 @@ async function refreshPetAnimations() {
      randomMaxSec: cfg.random_max_sec ?? 120,
  }, { soft: true });
    petLines = cfg.lines ?? [];
- } catch (e) {
-   console.warn("刷新动作配置失败", e);
+ } catch {
+   // 刷新失败时保留当前配置
   }
 }
 
@@ -1467,10 +1464,8 @@ async function exitEditBounds() {
 
     await savePosition();
 
-  } catch (e) {
-
-    console.warn("保存窗口范围失败", e);
-
+  } catch {
+    // 保存失败时忽略，下次拖动会重试
   }
 
 }

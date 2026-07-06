@@ -162,7 +162,7 @@ pub fn prepare_ai_chat(
     match PreparedTextChat::prepare(config, catalog, vault, db, data_dir, prompt) {
         Ok(opt) => Ok(opt),
         Err(e) => {
-            eprintln!("xiaohan-daily: report AI prep skipped: {e}");
+            crate::log::info(format!("report AI prep skipped: {e}"));
             Ok(None)
         }
     }

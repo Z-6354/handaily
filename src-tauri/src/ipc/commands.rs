@@ -1393,7 +1393,7 @@ pub async fn report_generate(
             Ok(s) if !s.trim().is_empty() => Some(s),
             Ok(_) => None,
             Err(e) => {
-                eprintln!("xiaohan-daily: report AI fallback: {e}");
+                crate::log::warn(format!("report AI fallback: {e}"));
                 None
             }
         }
@@ -1615,11 +1615,6 @@ pub fn pet_preview_animation(
     loop_anim: Option<bool>,
 ) -> Result<(), String> {
     crate::pet::preview_animation(&app, st.inner(), &animation, loop_anim.unwrap_or(false))
-}
-
-#[tauri::command]
-pub fn pet_log(msg: String) {
-    eprintln!("[pet-front] {}", msg);
 }
 
 #[tauri::command]

@@ -138,9 +138,9 @@ pub fn execute_or_fallback(
         Err(e) => {
             let msg = e.to_string();
             if is_quota_or_rate_limit(&msg) {
-                eprintln!("xiaohan-daily: vision AI skipped (quota/rate limit)");
+                crate::log::info("vision AI skipped (quota/rate limit)");
             } else {
-                eprintln!("xiaohan-daily: vision AI failed: {msg}");
+                crate::log::warn(format!("vision AI failed: {msg}"));
             }
             fallback_insight(segment)
         }

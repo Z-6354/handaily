@@ -47,7 +47,7 @@ impl AnalysisCoordinator {
         match self.tx.try_send(job) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
-                eprintln!("xiaohan-daily: analysis queue full, dropping segment");
+                crate::log::info("analysis queue full, dropping segment");
             }
             Err(TrySendError::Disconnected(_)) => {}
         }

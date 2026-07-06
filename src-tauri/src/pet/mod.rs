@@ -246,7 +246,7 @@ async fn wait_frontend_ready(max_secs: u64) {
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
     }
-    eprintln!("桌宠: 等待 Vite dev server 超时，仍将尝试显示");
+    crate::log::info("桌宠: 等待 Vite dev server 超时，仍将尝试显示");
 }
 
 fn prepare_pet_webview(win: &tauri::WebviewWindow) -> Result<(), String> {
@@ -592,7 +592,10 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
         let (x, y) = resolve_pet_position(pos.0, pos.1, win_w, win_h);
         if (x, y) != pos {
             let _ = save_position(&db, x, y);
-            eprintln!("桌宠: 位置 ({},{}) 在屏幕外，已重置为 ({},{})", pos.0, pos.1, x, y);
+            crate::log::info(format!(
+                "桌宠: 位置 ({},{}) 在屏幕外，已重置为 ({},{})",
+                pos.0, pos.1, x, y
+            ));
         }
         (x, y, pw, ph)
     };
@@ -656,7 +659,7 @@ fn schedule_pet_reload_after_show(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if !wait_pet_page_ready(&app, Duration::from_secs(20)).await {
-            eprintln!("桌宠: pet.html 加载超时，仍尝试初始化");
+            crate::log::info("桌宠: pet.html 加载超时，仍尝试初始化");
         }
         // 可见后多等几帧，避免登录自启时 WebView 合成未就绪即组装 Spine
         tokio::time::sleep(Duration::from_millis(180)).await;
@@ -861,7 +864,7 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
             match show_pet(&app2, &st2) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("桌宠 show_pet 失败 (attempt {attempt}): {e}");
+                    crate::log::warn(format!("桌宠 show_pet 失败 (attempt {attempt}): {e}"));
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -872,7 +875,7 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
             if attempt == 29 {
-                eprintln!("桌宠启动失败: 窗口已创建但多次尝试后仍不可见");
+                crate::log::warn("桌宠启动失败: 窗口已创建但多次尝试后仍不可见");
             }
         }
     });

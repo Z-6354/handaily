@@ -27,11 +27,8 @@ pub fn spawn(app: AppHandle, st: Arc<AppState>) {
             }
 
             match run_today_uncached(&st, &app).await {
-                Ok(n) if n > 0 => {
-                    eprintln!("xiaohan-daily: timeline background described {n} segments");
-                }
                 Ok(_) => {}
-                Err(e) => eprintln!("xiaohan-daily: timeline background describe failed: {e}"),
+                Err(e) => crate::log::warn(format!("timeline background describe failed: {e}")),
             }
 
             tokio::time::sleep(Duration::from_secs(TICK_SECS)).await;

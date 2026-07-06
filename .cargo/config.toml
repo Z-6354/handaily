@@ -1,9 +1,6 @@
-# 加速本地 release / release-fast 链接与增量编译
+# 加速 release 链接与增量编译（与 src-tauri/Cargo.toml [profile.release] 一致）
 [build]
 incremental = true
 
 [profile.release]
-incremental = true
-
-[profile.release-fast]
 incremental = true

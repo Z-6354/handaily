@@ -47,8 +47,8 @@ export async function preloadModelAssets(
     for (const [name, b64] of Object.entries(bundle.files ?? {})) {
       blobUrlFromBase64(modelId, name, b64);
     }
-  } catch (e) {
-    console.warn("预加载模型资源失败，将按需读取", e);
+  } catch {
+    // 预加载失败时按需读取
   }
 }
 

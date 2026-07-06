@@ -24,7 +24,7 @@ pub fn lock_conn(db: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>, S
     match db.lock() {
         Ok(guard) => Ok(guard),
         Err(poison) => {
-            eprintln!("xiaohan-daily: db mutex poisoned, attempting recovery");
+            crate::log::warn("db mutex poisoned, attempting recovery");
             Ok(poison.into_inner())
         }
     }

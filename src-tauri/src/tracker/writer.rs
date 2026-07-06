@@ -161,10 +161,10 @@ fn flush_segment(state: &AppState, seg: &Segment) {
         Err(_) => false,
     };
     if !inserted {
-        eprintln!(
-            "xiaohan-daily: insert_segment failed ({}, {} ms)",
+        crate::log::warn(format!(
+            "insert_segment failed ({}, {} ms)",
             seg.started_at, seg.duration_ms
-        );
+        ));
         return;
     }
     apply_to_aggregator(state, seg);
