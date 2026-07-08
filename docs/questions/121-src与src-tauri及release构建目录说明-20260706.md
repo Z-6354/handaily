@@ -1,4 +1,4 @@
-# 121 · src / src-tauri / release / release-fast 目录说明
+# 121 · src / src-tauri / release 构建目录说明
 
 **日期**：2026-07-06  
 **标签**：项目结构、Tauri、Cargo、构建
@@ -13,9 +13,12 @@
 |------|------|----------------|
 | `src/` | **前端源码**（React + Vite + TS） | 是 |
 | `src-tauri/` | **桌面端 Rust 后端**（Tauri） | 是 |
-| `target/release/`、`target/release-fast/` | **Rust 编译产物**（Cargo 输出） | 否（已在 `.gitignore`） |
+| `target/release/` | **Rust 编译产物**（Cargo 默认 release profile） | 否（已在 `.gitignore`） |
+| `target/release-fast/` | **历史产物**（122 之前的多 profile 遗留） | 否，可删除 |
 
-`release` 与 `release-fast` **不是**与 `src` 并列的「业务源码目录」，而是 Cargo 在 `target/` 下按**编译配置（profile）**生成的输出子目录。
+`release` **不是**与 `src` 并列的「业务源码目录」，而是 Cargo 在 `target/` 下按**编译配置（profile）**生成的输出子目录。
+
+> **122 之后**：仅保留单一 `[profile.release]`（参数等同原 `release-fast`），产物统一输出到 `target/release/`。详见 [122](./122-构建统一release-fast单配置-20260706.md)。
 
 ## 1. `src` 与 `src-tauri`：Tauri 双端结构
 
@@ -37,24 +40,37 @@ HANDAILY/
 - `vite.config.ts` 将 `src/` 编译到 `dist/`；开发时 `tauri dev` 起 Vite + Rust。
 - 根目录 `src/` 与 `src-tauri/src/` **职责不同、互不重复**：前者是 Web UI，后者是系统级 Rust 逻辑。
 
-## 2. `release` 与 `release-fast`：Cargo 编译配置
+## 2. `release`：Cargo 发布配置（122 后唯一 profile）
 
-二者定义在 `src-tauri/Cargo.toml`：
+`src-tauri/Cargo.toml` 中 `[profile.release]` 参数（关闭 LTO、`codegen-units=256`）：
 
-| Profile | 用途 | 特点 |
-|---------|------|------|
-| `release` | 正式发布（`npm run tauri:build:full`） | `thin LTO`、较低 `codegen-units`，体积小、链接慢 |
-| `release-fast` | 日常导出 exe（**默认** `npm run tauri:build`） | 关闭 LTO、`codegen-units=256`，链接明显更快 |
-| `release-small` | 可选更小体积 | 全 LTO + `opt-level=s` |
+| 项 | 值 |
+|----|-----|
+| 用途 | 所有发布构建（`npm run tauri:build` / `tauri:build:exe`） |
+| 特点 | 链接快、体积略大于 LTO 版 |
+| 产物路径 | `src-tauri/target/release/` |
 
 编译后产物路径示例：
 
 ```
-src-tauri/target/release-fast/xiaohan-daily.exe
-src-tauri/target/release-fast/bundle/nsis/小寒日报_0.1.0_x64-setup.exe
+src-tauri/target/release/xiaohan-daily.exe
+src-tauri/target/release/bundle/nsis/小寒日报_0.1.0_x64-setup.exe
 ```
 
-根目录若存在 `target/`（含 `debug` / `release` / `release-fast`），多为历史误在仓库根执行 `cargo build` 产生；**正确入口**应通过 `npm run tauri:build` 或 `--manifest-path src-tauri/Cargo.toml`。二者均可安全删除以释放磁盘（会重新编译）。
+根目录若存在 `target/`（含 `debug` / `release` / `release-fast`），多为历史误在仓库根执行 `cargo build` 产生；**正确入口**应通过 `npm run tauri:build` 或 `--manifest-path src-tauri/Cargo.toml`。`target/release-fast/` 为 122 之前遗留，可安全删除。
+
+**137 之后**：`.cargo/config.toml` 已设置 `build.target-dir = "src-tauri/target"`，无论从仓库根或 `src-tauri/` 执行 cargo，产物统一写入 `src-tauri/target/`。误生成的根目录 `target/` 可运行 `.\scripts\clean-stale-target.ps1` 清理。
+
+### `debug/` 与 `debug/deps/` 不是重复
+
+Cargo 标准布局（仅一套 `src-tauri/target` 下）：
+
+| 路径 | 内容 |
+|------|------|
+| `target/debug/*.exe` | 可执行文件（`xiaohan-daily.exe` 等） |
+| `target/debug/deps/*` | 依赖库 `.rlib` / `.dll` 等中间产物 |
+
+二者职责不同，**不是两套重复构建**；勿手动删除 `deps/`。
 
 ## 3. 与 `dist/` 的区别
 
@@ -67,3 +83,4 @@ src-tauri/target/release-fast/bundle/nsis/小寒日报_0.1.0_x64-setup.exe
 
 - [103 · 导出 exe 构建加速](./103-导出exe构建加速-20260705.md)
 - [115 · 自启动修复需完整 Tauri 打包](./115-自启动修复需完整Tauri打包-20260705.md)
+- [122 · 构建统一为 release-fast 单配置](./122-构建统一release-fast单配置-20260706.md)

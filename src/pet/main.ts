@@ -1,4 +1,4 @@
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { cursorPosition, getCurrentWindow } from "@tauri-apps/api/window";
 
 import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 
@@ -94,16 +94,20 @@ interface PetPoint {
   y: number;
 }
 
-interface PetModelInfo {
+interface CharacterSkinInfo {
   id: string;
   name: string;
-  builtin: boolean;
+  model_id: string;
+  model_name: string;
+  active: boolean;
 }
 
-interface PersonaInfo {
+interface CharacterInfo {
   id: string;
   name: string;
   active: boolean;
+  active_skin_id: string;
+  skins: CharacterSkinInfo[];
 }
 
 const SCREEN_MARGIN = 8;
@@ -219,8 +223,9 @@ const menu = document.createElement("div");
 
 menu.className = "pet-menu";
 menu.innerHTML = `
-  <div class="pet-menu-head">桌宠菜单</div>
-  <div class="pet-menu-body">
+  <div class="pet-menu-view" data-menu-view="main">
+    <div class="pet-menu-head">桌宠菜单</div>
+    <div class="pet-menu-body">
     <button type="button" class="pet-menu-item" data-action="main">
       <span class="pet-menu-icon" aria-hidden="true">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
@@ -246,8 +251,8 @@ menu.innerHTML = `
       </button>
     </div>
     <div class="pet-menu-divider" role="separator"></div>
-    <div class="pet-menu-submenu" data-submenu="models">
-      <button type="button" class="pet-menu-item pet-menu-item--sub" data-action="submenu" data-submenu="models">
+    <div class="pet-menu-submenu" data-submenu="skins">
+      <button type="button" class="pet-menu-item pet-menu-item--sub" data-action="submenu" data-submenu="skins">
         <span class="pet-menu-icon" aria-hidden="true">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
             <path d="M12 3v3M8 6l2 2M16 6l-2 2" />
@@ -255,30 +260,24 @@ menu.innerHTML = `
             <path d="M9 21h6" />
           </svg>
         </span>
-        <span class="pet-menu-text">切换模型</span>
+        <span class="pet-menu-text">切换皮肤</span>
         <span class="pet-menu-chevron" aria-hidden="true">›</span>
       </button>
-      <div class="pet-menu-flyout" data-flyout="models" hidden>
-        <div class="pet-menu-flyout-title">选择模型</div>
-        <div class="pet-menu-sublist" data-menu-list="models"></div>
+      <div class="pet-menu-flyout" data-flyout="skins" hidden>
+        <div class="pet-menu-flyout-title">选择皮肤</div>
+        <div class="pet-menu-sublist" data-menu-list="skins"></div>
       </div>
     </div>
-    <div class="pet-menu-submenu" data-submenu="personas">
-      <button type="button" class="pet-menu-item pet-menu-item--sub" data-action="submenu" data-submenu="personas">
+    <button type="button" class="pet-menu-item" data-action="open-characters-menu">
         <span class="pet-menu-icon" aria-hidden="true">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
             <circle cx="12" cy="8" r="4" />
             <path d="M6 20c0-3.3 2.7-6 6-6s6 2.7 6 6" />
           </svg>
         </span>
-        <span class="pet-menu-text">切换性格</span>
+        <span class="pet-menu-text">切换人物</span>
         <span class="pet-menu-chevron" aria-hidden="true">›</span>
       </button>
-      <div class="pet-menu-flyout" data-flyout="personas" hidden>
-        <div class="pet-menu-flyout-title">选择性格</div>
-        <div class="pet-menu-sublist" data-menu-list="personas"></div>
-      </div>
-    </div>
     <div class="pet-menu-divider" role="separator"></div>
     <button type="button" class="pet-menu-item pet-menu-item--danger" data-action="hide">
       <span class="pet-menu-icon" aria-hidden="true">
@@ -301,6 +300,16 @@ menu.innerHTML = `
       </span>
       <span class="pet-menu-text">退出</span>
     </button>
+    </div>
+  </div>
+  <div class="pet-menu-view" data-menu-view="characters" hidden>
+    <div class="pet-menu-head pet-menu-head--with-back">
+      <button type="button" class="pet-menu-back" data-action="menu-back" aria-label="返回">‹</button>
+      <span class="pet-menu-head-title">选择人物</span>
+    </div>
+    <div class="pet-menu-body">
+      <div class="pet-menu-sublist" data-menu-list="characters"></div>
+    </div>
   </div>
 `;
 
@@ -340,13 +349,27 @@ const DRAG_THRESHOLD = 10;
 
 let menuAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
 
-let menuModelsEl: HTMLElement | null = menu.querySelector('[data-menu-list="models"]');
-let menuPersonasEl: HTMLElement | null = menu.querySelector('[data-menu-list="personas"]');
+let menuSkinsEl: HTMLElement | null = menu.querySelector('[data-menu-list="skins"]');
+let menuCharactersEl: HTMLElement | null = menu.querySelector('[data-menu-list="characters"]');
+let menuMainViewEl: HTMLElement | null = menu.querySelector('[data-menu-view="main"]');
+let menuCharactersViewEl: HTMLElement | null = menu.querySelector('[data-menu-view="characters"]');
 let menuBubbleSwitchEl: HTMLButtonElement | null = menu.querySelector('[data-action="toggle-bubble"]');
 let menuSwitchBusy = false;
 let openSubmenuId: string | null = null;
 
 const MENU_AUTO_CLOSE_MS = 8000;
+const FAVORITES_SETTING_KEY = "character_favorites";
+
+function parseFavoriteIds(raw: string | null | undefined): string[] {
+  if (!raw?.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((id): id is string => typeof id === "string" && id.length > 0);
+  } catch {
+    return [];
+  }
+}
 
 let editBoundsMode = false;
 
@@ -390,7 +413,126 @@ const MIN_H = 200;
 
 const MAX_H = 600;
 
+const petWindow = getCurrentWindow();
+let ignoreCursorActive = false;
+let clickThroughPoll = 0;
+let clickThroughInterval = 0;
+const CLICK_THROUGH_POLL_MS = 100;
 
+function collectInteractiveRects(): DOMRect[] {
+  const rects: DOMRect[] = [];
+  const add = (el: HTMLElement | null, pad = 0) => {
+    if (!el) return;
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden") return;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 && r.height < 2) return;
+    rects.push(new DOMRect(r.left - pad, r.top - pad, r.width + pad * 2, r.height + pad * 2));
+  };
+  // 角色区域：优先用 Spine 实际包围盒，避免整窗透明边距挡桌面
+  const charRect = pet?.getCharacterScreenRect(12);
+  if (charRect) {
+    rects.push(charRect);
+  } else {
+    add(canvasWrap, 6);
+    if (fallback.style.display === "block") add(fallback, 6);
+  }
+  if (bubble.classList.contains("visible")) add(bubble, 4);
+  if (menu.classList.contains("open")) add(menu, 0);
+  if (editOverlay.classList.contains("active")) add(editOverlay, 0);
+  add(document.getElementById("pet-load-error"), 0);
+  return rects;
+}
+
+function hitInteractive(clientX: number, clientY: number): boolean {
+  return collectInteractiveRects().some(
+    (r) => clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom,
+  );
+}
+
+function mustCapturePointer(): boolean {
+  return (
+    pointerDown ||
+    windowDragStarted ||
+    resizeDragging ||
+    offsetDragging ||
+    menu.classList.contains("open") ||
+    editBoundsMode
+  );
+}
+
+async function applyClickThrough(ignore: boolean) {
+  if (ignore === ignoreCursorActive) return;
+  try {
+    await petWindow.setIgnoreCursorEvents(ignore);
+    ignoreCursorActive = ignore;
+  } catch {
+    // 权限或平台不支持时静默降级
+  }
+}
+
+function stopClickThroughPoll() {
+  if (clickThroughPoll) {
+    cancelAnimationFrame(clickThroughPoll);
+    clickThroughPoll = 0;
+  }
+  if (clickThroughInterval) {
+    clearInterval(clickThroughInterval);
+    clickThroughInterval = 0;
+  }
+}
+
+function scheduleClickThroughPoll(ignore: boolean) {
+  stopClickThroughPoll();
+  if (!ignore || document.hidden) return;
+  clickThroughPoll = requestAnimationFrame(() => {
+    clickThroughPoll = 0;
+    void syncClickThroughState();
+  });
+  // 穿透时 WebView 收不到 mousemove，需定时用屏幕坐标检测是否进入角色区
+  clickThroughInterval = window.setInterval(() => {
+    if (document.hidden || mustCapturePointer()) return;
+    void syncClickThroughState();
+  }, CLICK_THROUGH_POLL_MS);
+}
+
+async function syncClickThroughState(pointer?: { x: number; y: number }) {
+  if (mustCapturePointer()) {
+    scheduleClickThroughPoll(false);
+    await applyClickThrough(false);
+    return;
+  }
+  let x: number;
+  let y: number;
+  if (pointer) {
+    x = pointer.x;
+    y = pointer.y;
+  } else {
+    const [cursor, pos, sf] = await Promise.all([
+      cursorPosition(),
+      petWindow.outerPosition(),
+      petWindow.scaleFactor(),
+    ]);
+    x = (cursor.x - pos.x) / sf;
+    y = (cursor.y - pos.y) / sf;
+  }
+  const ignore = !hitInteractive(x, y);
+  await applyClickThrough(ignore);
+  scheduleClickThroughPoll(ignore);
+}
+
+function startClickThrough() {
+  if (document.hidden) {
+    stopClickThroughPoll();
+    return;
+  }
+  void syncClickThroughState();
+}
+
+function stopClickThrough() {
+  stopClickThroughPoll();
+  void applyClickThrough(false);
+}
 
 function isInsideEditArea(target: EventTarget | null): boolean {
 
@@ -403,7 +545,7 @@ function isInsideEditArea(target: EventTarget | null): boolean {
 
 
 function modelAssetFilenames(cfg: PetConfigPayload): string[] {
-  const files = [cfg.skel_file, cfg.atlas_file, cfg.png_file];
+  const files = [cfg.skel_file, cfg.atlas_file];
   if (cfg.config_file) files.push(cfg.config_file);
   return files.filter(Boolean);
 }
@@ -502,11 +644,15 @@ function showBubble(text: string, animation?: string | null) {
   positionBubble();
 
   if (bubbleTimer) clearTimeout(bubbleTimer);
-  bubbleTimer = setTimeout(() => bubble.classList.remove("visible"), 8000);
+  bubbleTimer = setTimeout(() => {
+    bubble.classList.remove("visible");
+    startClickThrough();
+  }, 8000);
 
   if (animation && pet) {
     pet.playAnimation(animation, false);
   }
+  startClickThrough();
 }
 
 
@@ -537,6 +683,19 @@ async function setBubbleEnabled(enabled: boolean) {
   }
   syncBubbleToggleUI();
   if (!enabled) clearBubble();
+}
+
+function setMenuView(view: "main" | "characters") {
+  menuMainViewEl?.toggleAttribute("hidden", view !== "main");
+  menuCharactersViewEl?.toggleAttribute("hidden", view !== "characters");
+  if (view === "characters") {
+    closeAllSubmenus();
+    void refreshPetMenuPickers();
+  }
+}
+
+function resetMenuView() {
+  setMenuView("main");
 }
 
 function closeAllSubmenus() {
@@ -961,7 +1120,10 @@ function applyStageOffset(x: number, y: number) {
 
 
 
-async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): Promise<boolean> {
+async function initSpine(
+  cfg: PetConfigPayload,
+  opts?: { skipBoot?: boolean; skipVisibilityWait?: boolean },
+): Promise<boolean> {
 
   const skipBoot = opts?.skipBoot ?? false;
 
@@ -973,13 +1135,15 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): 
 
   clampStageOffset();
 
-  await preloadModelAssets(cfg.model_id, modelAssetFilenames(cfg), cfg.use_file_src);
-
   petAssetResolver?.dispose();
   petAssetResolver = createPetAssetResolver(cfg);
   const assets = assetConfigFromPayload(cfg);
-  lastFallbackSrc = await petAssetResolver.urlFor(cfg.png_file);
-  fallback.src = lastFallbackSrc;
+  const [, fallbackUrl] = await Promise.all([
+    preloadModelAssets(cfg.model_id, modelAssetFilenames(cfg), cfg.use_file_src),
+    petAssetResolver.urlFor(cfg.png_file),
+  ]);
+  lastFallbackSrc = fallbackUrl;
+  fallback.src = fallbackUrl;
 
   const nextW = cfg.window_width || 240;
   const nextH = cfg.window_height || 320;
@@ -990,10 +1154,12 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): 
   canvasWrap.style.visibility = "hidden";
   pet?.dispose();
   pet = null;
-  await awaitAnimationFrames(3);
+  await awaitAnimationFrames(1);
   ensureCanvasAttached();
 
-  await waitUntilVisibleForLoad();
+  if (!opts?.skipVisibilityWait) {
+    await waitUntilVisibleForLoad();
+  }
 
   const animOptions = {
     idleAnimation: cfg.idle_animation,
@@ -1034,19 +1200,16 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): 
 
    pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
 
-    const meta = await syncAnimations(cfg.model_id, names, cfg.idle_animation);
-
     pet.configureAnimations({
-      idleAnimation: meta?.idle_animation ?? cfg.idle_animation,
-      clickAnimation: meta?.click_animation ?? cfg.click_animation,
-      bootAnimation: meta?.boot_animation ?? cfg.boot_animation,
-     returnIdleAnimation: meta?.return_idle_animation ?? cfg.return_idle_animation,
-     dragAnimation: meta?.drag_animation ?? cfg.drag_animation,
-     randomAnimations: meta?.random_animations ?? cfg.random_animations ?? [],
-     randomMinSec: meta?.random_min_sec ?? cfg.random_min_sec ?? 30,
-     randomMaxSec: meta?.random_max_sec ?? cfg.random_max_sec ?? 120,
+      idleAnimation: cfg.idle_animation,
+      clickAnimation: cfg.click_animation,
+      bootAnimation: cfg.boot_animation,
+     returnIdleAnimation: cfg.return_idle_animation,
+     dragAnimation: cfg.drag_animation,
+     randomAnimations: cfg.random_animations ?? [],
+     randomMinSec: cfg.random_min_sec ?? 30,
+     randomMaxSec: cfg.random_max_sec ?? 120,
   }, { soft: true });
-   petLines = meta?.lines ?? cfg.lines ?? [];
 
     await applyStageScale(stageScale);
 
@@ -1063,6 +1226,25 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): 
     }
 
     canvasWrap.style.visibility = "visible";
+    startClickThrough();
+
+    if (names.length > 0) {
+      void syncAnimations(cfg.model_id, names, cfg.idle_animation).then((meta) => {
+        if (!pet) return;
+        if (!meta) return;
+        pet.configureAnimations({
+          idleAnimation: meta.idle_animation ?? cfg.idle_animation,
+          clickAnimation: meta.click_animation ?? cfg.click_animation,
+          bootAnimation: meta.boot_animation ?? cfg.boot_animation,
+         returnIdleAnimation: meta.return_idle_animation ?? cfg.return_idle_animation,
+         dragAnimation: meta.drag_animation ?? cfg.drag_animation,
+         randomAnimations: meta.random_animations ?? cfg.random_animations ?? [],
+         randomMinSec: meta.random_min_sec ?? cfg.random_min_sec ?? 30,
+         randomMaxSec: meta.random_max_sec ?? cfg.random_max_sec ?? 120,
+        }, { soft: true });
+        petLines = meta.lines ?? cfg.lines ?? petLines;
+      });
+    }
     return true;
 
   } catch {
@@ -1073,6 +1255,7 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): 
     fallback.style.display = "block";
 
     applyStageTransform();
+    startClickThrough();
     return false;
 
   }
@@ -1083,6 +1266,9 @@ async function initSpine(cfg: PetConfigPayload, opts?: { skipBoot?: boolean }): 
 
 let reloadSerial: Promise<void> = Promise.resolve();
 let reloadInProgress = false;
+let resumeInFlight = false;
+let lastResumeAt = 0;
+const RESUME_DEBOUNCE_MS = 250;
 
 function showPetLoadError(err: unknown) {
   let banner = document.getElementById("pet-load-error");
@@ -1110,15 +1296,24 @@ function showPetLoadError(err: unknown) {
 }
 
 async function resumePetFromHidden() {
-  if (reloadInProgress) return;
-  await waitUntilVisibleForLoad();
-  if (!pet) {
-    void reloadPet();
-    return;
+  if (reloadInProgress || mainWindowCovering) return;
+  if (Date.now() < suppressVisibilityUntil) return;
+  const now = Date.now();
+  if (resumeInFlight || now - lastResumeAt < RESUME_DEBOUNCE_MS) return;
+  resumeInFlight = true;
+  lastResumeAt = now;
+  try {
+    await waitUntilVisibleForLoad();
+    if (!pet) {
+      void reloadPet();
+      return;
+    }
+    pet.setRenderPaused(false);
+    pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
+    applyStageTransform();
+  } finally {
+    resumeInFlight = false;
   }
-  pet.setRenderPaused(false);
-  pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
-  applyStageTransform();
 }
 
 async function reloadPet() {
@@ -1133,9 +1328,10 @@ async function reloadPet() {
 
       const cfg = await loadConfig();
 
-      await refreshScreenBounds();
-
-      await initSpine(cfg, { skipBoot });
+      await Promise.all([
+        refreshScreenBounds(),
+        initSpine(cfg, { skipBoot, skipVisibilityWait: true }),
+      ]);
 
       clearBootHint();
       if (pet) {
@@ -1167,6 +1363,28 @@ async function reloadPet() {
 }
 
 // 尽早注册，避免 Rust on_page_load 发出的 pet-reload 在监听器就绪前丢失
+let suppressVisibilityUntil = 0;
+let mainWindowCovering = false;
+
+void listen<number>("pet-main-opening", (ev) => {
+  mainWindowCovering = true;
+  suppressVisibilityUntil = Date.now() + (ev.payload ?? 1500);
+  pet?.setRenderPaused(true);
+});
+
+void listen("pet-main-closed", () => {
+  mainWindowCovering = false;
+  suppressVisibilityUntil = Date.now() + 400;
+  if (pet) {
+    pet.setRenderPaused(false);
+    pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
+    applyStageTransform();
+    startClickThrough();
+    return;
+  }
+  void resumePetFromHidden();
+});
+
 const petReloadUnlistenPromise = listen("pet-reload", () => {
   void reloadPet();
 });
@@ -1279,14 +1497,17 @@ function positionMenu(clientX: number, clientY: number) {
 function renderMenuSublist(
   container: HTMLElement | null,
   items: { id: string; label: string; active: boolean }[],
-  kind: "model" | "persona",
+  kind: "character" | "skin",
 ) {
   if (!container) return;
   container.innerHTML = "";
   if (items.length === 0) {
     const empty = document.createElement("div");
     empty.className = "pet-menu-subempty";
-    empty.textContent = "暂无选项";
+    empty.textContent =
+      kind === "character"
+        ? "暂无收藏人物，请在主窗口人物列表中收藏"
+        : "暂无选项";
     container.appendChild(empty);
     return;
   }
@@ -1294,7 +1515,7 @@ function renderMenuSublist(
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `pet-menu-subitem${item.active ? " is-active" : ""}`;
-    btn.dataset.action = kind === "model" ? "switch-model" : "switch-persona";
+    btn.dataset.action = kind === "skin" ? "switch-skin" : "switch-character";
     btn.dataset.id = item.id;
     btn.textContent = item.label;
     btn.disabled = item.active || menuSwitchBusy;
@@ -1304,41 +1525,46 @@ function renderMenuSublist(
 
 async function refreshPetMenuPickers() {
   try {
-    const [models, personas, cfg] = await Promise.all([
-      invoke<PetModelInfo[]>("pet_list_models"),
-      invoke<PersonaInfo[]>("persona_list"),
-      loadConfig(),
+    const [characters, favoritesRaw] = await Promise.all([
+      invoke<CharacterInfo[]>("characters_list"),
+      invoke<string | null>("settings_get", { key: FAVORITES_SETTING_KEY }),
     ]);
     await loadBubbleEnabled();
+    const active = characters.find((c) => c.active) ?? characters[0];
     renderMenuSublist(
-      menuModelsEl,
-      models.map((m) => ({
-        id: m.id,
-        label: m.name,
-        active: m.id === cfg.model_id,
+      menuSkinsEl,
+      (active?.skins ?? []).map((s) => ({
+        id: s.id,
+        label: s.name,
+        active: s.active,
       })),
-      "model",
+      "skin",
     );
+    const favoriteIds = new Set(parseFavoriteIds(favoritesRaw));
+    const favoriteCharacters = characters.filter((c) => favoriteIds.has(c.id));
     renderMenuSublist(
-      menuPersonasEl,
-      personas.map((p) => ({
-        id: p.id,
-        label: p.name,
-        active: p.active,
+      menuCharactersEl,
+      favoriteCharacters.map((c) => ({
+        id: c.id,
+        label: c.name,
+        active: c.active,
       })),
-      "persona",
+      "character",
     );
   } catch (e) {
     console.error("桌宠菜单加载选项失败", e);
-    renderMenuSublist(menuModelsEl, [], "model");
-    renderMenuSublist(menuPersonasEl, [], "persona");
+    renderMenuSublist(menuSkinsEl, [], "skin");
+    renderMenuSublist(menuCharactersEl, [], "character");
   }
 }
 
 function toggleMenu(open?: boolean, clientX?: number, clientY?: number) {
   const next = open ?? !menu.classList.contains("open");
   menu.classList.toggle("open", next);
-  if (!next) closeAllSubmenus();
+  if (!next) {
+    closeAllSubmenus();
+    resetMenuView();
+  }
   if (menuAutoCloseTimer) {
     clearTimeout(menuAutoCloseTimer);
     menuAutoCloseTimer = null;
@@ -1352,8 +1578,10 @@ function toggleMenu(open?: boolean, clientX?: number, clientY?: number) {
     menuAutoCloseTimer = setTimeout(() => {
       menu.classList.remove("open");
       menuAutoCloseTimer = null;
+      startClickThrough();
     }, MENU_AUTO_CLOSE_MS);
   }
+  startClickThrough();
 }
 
 function setEditBoundsMode(on: boolean) {
@@ -1397,6 +1625,8 @@ function setEditBoundsMode(on: boolean) {
     resetEditOverlayLayout();
 
   }
+
+  startClickThrough();
 
 }
 
@@ -1602,6 +1832,10 @@ window.addEventListener("mousemove", (e: Event) => {
 
   }
 
+  if (!ignoreCursorActive && !mustCapturePointer()) {
+    void syncClickThroughState({ x: me.clientX, y: me.clientY });
+  }
+
 });
 
 
@@ -1673,6 +1907,8 @@ window.addEventListener("mouseup", (e: Event) => {
 
   offsetDragging = false;
 
+  void syncClickThroughState({ x: me.clientX, y: me.clientY });
+
 });
 
 
@@ -1713,6 +1949,7 @@ stage.addEventListener("mousedown", (e) => {
     e.preventDefault();
 
     offsetDragging = true;
+    void applyClickThrough(false);
 
     offsetDragStart = {
 
@@ -1731,6 +1968,7 @@ stage.addEventListener("mousedown", (e) => {
   }
 
   pointerDown = true;
+  void applyClickThrough(false);
 
   windowDragStarted = false;
 
@@ -1873,40 +2111,23 @@ document.addEventListener("click", (e) => {
 
 
 
-void getCurrentWindow().listen("tauri://focus", () => {
-  void getCurrentWindow().setAlwaysOnTop(true);
-});
-
 void getCurrentWindow().listen("tauri://blur", () => {
-
   if (Date.now() < editBoundsSuppressUntil) {
-
     return;
-
   }
-
   toggleMenu(false);
-
   if (editBoundsMode) {
-
     void exitEditBounds();
-
   }
-
 });
 
 
 
 menu.addEventListener("mouseenter", () => {
-
   if (menuAutoCloseTimer) {
-
     clearTimeout(menuAutoCloseTimer);
-
     menuAutoCloseTimer = null;
-
   }
-
 });
 
 
@@ -1930,22 +2151,36 @@ menu.addEventListener("click", async (e) => {
     return;
   }
 
+  if (action === "open-characters-menu") {
+    setMenuView("characters");
+    return;
+  }
+
+  if (action === "menu-back") {
+    setMenuView("main");
+    return;
+  }
+
   if (action === "submenu") {
     const submenuId = btn.getAttribute("data-submenu");
     toggleSubmenu(submenuId);
     return;
   }
 
-  if (action === "switch-model" || action === "switch-persona") {
+  if (action === "switch-skin" || action === "switch-character") {
     const id = btn.getAttribute("data-id");
     if (!id || menuSwitchBusy) return;
     menuSwitchBusy = true;
     toggleMenu(false);
     try {
-      if (action === "switch-model") {
-        await invoke("pet_set_model", { modelId: id });
+      if (action === "switch-character") {
+        await invoke("characters_set_active", { characterId: id });
       } else {
-        await invoke("persona_set_active", { personaId: id });
+        const characters = await invoke<CharacterInfo[]>("characters_list");
+        const active = characters.find((c) => c.active);
+        if (active) {
+          await invoke("characters_set_skin", { characterId: active.id, skinId: id });
+        }
       }
     } catch (err) {
       console.error("桌宠菜单切换失败", err);
@@ -1992,8 +2227,12 @@ menu.addEventListener("click", async (e) => {
 
 
 document.addEventListener("visibilitychange", () => {
+  if (mainWindowCovering || Date.now() < suppressVisibilityUntil) {
+    return;
+  }
   if (document.hidden) {
     pet?.setRenderPaused(true);
+    stopClickThrough();
   } else {
     if (pendingBubble) {
       const next = pendingBubble;
@@ -2002,6 +2241,7 @@ document.addEventListener("visibilitychange", () => {
     }
     void resumePetFromHidden();
   }
+  startClickThrough();
 });
 
 
@@ -2037,6 +2277,10 @@ async function setupPetEvents() {
     // debounce 由 Rust 端处理，此处仅预留
   });
 
+  const unlistenClickThrough = await listen("pet-sync-click-through", () => {
+    startClickThrough();
+  });
+
   petEventUnlisten = () => {
     unlistenRemark();
     unlistenReload();
@@ -2044,6 +2288,7 @@ async function setupPetEvents() {
     unlistenAnimations();
     unlistenPreview();
     unlistenContext();
+    unlistenClickThrough();
     petEventUnlisten = null;
   };
 

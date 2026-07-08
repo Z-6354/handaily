@@ -5,10 +5,23 @@ description = "小寒日报 — 本地活动追踪与日报"
 authors = ["hanagent"]
 edition = "2021"
 rust-version = "1.77"
+default-run = "xiaohan-daily"
 
 [lib]
 name = "xiaohan_daily_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "blhx_import"
+path = "src/bin/blhx_import.rs"
+
+[[bin]]
+name = "live2d_import"
+path = "src/bin/live2d_import.rs"
+
+[[bin]]
+name = "avatar_import"
+path = "src/bin/avatar_import.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -45,9 +58,12 @@ windows = { version = "0.61", features = [
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 base64 = "0.22"
-tokio = { version = "1", features = ["rt", "time", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 notify = "7"
 rfd = "0.15"
+
+[dev-dependencies]
+tempfile = "3"
 
 # 唯一发布配置：关闭 LTO、提高 codegen-units，链接快（体积略大于 LTO 版）
 [profile.release]

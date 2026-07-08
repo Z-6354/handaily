@@ -1,0 +1,36 @@
+{
+  "name": "@handaily/blhx-wiki-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MCP server: scrape Azur Lane BWIKI ship data for HANDAILY character import",
+  "type": "module",
+  "bin": {
+    "blhx-wiki-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "probe": "node scripts/probe.mjs",
+    "live2d-plan": "tsx scripts/live2d-plan.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^11.9.0",
+    "pinyin-pro": "^3.28.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.14.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true,
+    "esbuild@0.28.1": true
+  }
+}

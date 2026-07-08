@@ -7,10 +7,21 @@ export interface PetAssetResolver {
   dispose: () => void;
 }
 
+/** 最多保留约 2 套模型的 blob URL，切换模型时释放旧资源 */
+const MAX_BLOB_ENTRIES = 8;
+
 const GLOBAL_BLOB_CACHE = new Map<string, string>();
 
 function cacheKey(modelId: string, filename: string) {
   return `${modelId}:${filename}`;
+}
+
+function evictOldestBlob() {
+  const first = GLOBAL_BLOB_CACHE.keys().next().value;
+  if (!first) return;
+  const url = GLOBAL_BLOB_CACHE.get(first);
+  if (url) URL.revokeObjectURL(url);
+  GLOBAL_BLOB_CACHE.delete(first);
 }
 
 function mimeForFilename(filename: string): string {
@@ -24,10 +35,17 @@ function blobUrlFromBase64(modelId: string, filename: string, b64: string): stri
   const key = cacheKey(modelId, filename);
   const hit = GLOBAL_BLOB_CACHE.get(key);
   if (hit) return hit;
+  while (GLOBAL_BLOB_CACHE.size >= MAX_BLOB_ENTRIES) {
+    evictOldestBlob();
+  }
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
   const url = URL.createObjectURL(new Blob([bytes], { type: mimeForFilename(filename) }));
   GLOBAL_BLOB_CACHE.set(key, url);
   return url;
+}
+
+export function petBlobCacheSize(): number {
+  return GLOBAL_BLOB_CACHE.size;
 }
 
 /** 批量预读模型资源（单次 IPC），切换模型前调用可显著缩短等待。 */
@@ -66,8 +84,6 @@ export function createPetAssetResolver(cfg: {
     };
   }
 
-  const localUrls: string[] = [];
-
   return {
     urlFor: async (filename) => {
       const key = cacheKey(cfg.model_id, filename);
@@ -78,12 +94,8 @@ export function createPetAssetResolver(cfg: {
         modelId: cfg.model_id,
         filename,
       });
-      const url = blobUrlFromBase64(cfg.model_id, filename, b64);
-      localUrls.push(url);
-      return url;
+      return blobUrlFromBase64(cfg.model_id, filename, b64);
     },
-    dispose: () => {
-      localUrls.length = 0;
-    },
+    dispose: () => {},
   };
 }

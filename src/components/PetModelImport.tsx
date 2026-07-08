@@ -6,6 +6,8 @@ interface Props {
   importStaging: PetImportStagingPreview | null;
   petModelId: string;
   currentModel?: PetModelInfo;
+  nameLabel?: string;
+  namePlaceholder?: string;
   onModelNameChange: (name: string) => void;
   onPickFolder: () => void;
   onStageFiles: (files: File[]) => void;
@@ -20,6 +22,8 @@ export function PetModelImport({
   importStaging,
   petModelId,
   currentModel,
+  nameLabel = "模型名称",
+  namePlaceholder = "例如：我的桌宠",
   onModelNameChange,
   onPickFolder,
   onStageFiles,
@@ -31,12 +35,12 @@ export function PetModelImport({
     <div className="pet-import-body">
       <div className="pet-dev-shared">
         <label className="pet-dev-shared-label" htmlFor="pet-dev-model-name">
-          模型名称
+          {nameLabel}
         </label>
         <input
           id="pet-dev-model-name"
           className="pet-dev-input"
-          placeholder="例如：我的桌宠"
+          placeholder={namePlaceholder}
           value={importModelName}
           disabled={busy}
           onChange={(e) => onModelNameChange(e.target.value)}

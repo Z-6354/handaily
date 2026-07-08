@@ -1,5 +1,7 @@
 //! 人设：仓库 `personas/*.md` + manifest，运行时优先读用户数据目录
 
+pub mod import_reference;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -81,6 +83,8 @@ pub struct PersonaDetail {
     pub skill_md: String,
     pub profile_json: CharacterProfileData,
     pub is_builtin: bool,
+    pub profile_ai_updated: bool,
+    pub profile_ai_updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,10 +151,16 @@ fn sync_embedded_builtin_files(data_dir: &Path) -> std::io::Result<()> {
     let dir = personas_dir(data_dir);
     fs::create_dir_all(&dir)?;
     for (id, content) in EMBEDDED_PERSONAS {
-        fs::write(dir.join(format!("{id}.md")), content)?;
+        let path = dir.join(format!("{id}.md"));
+        if !path.exists() {
+            fs::write(&path, content)?;
+        }
     }
     for (id, content) in EMBEDDED_PROFILES {
-        fs::write(dir.join(format!("{id}.json")), content)?;
+        let path = dir.join(format!("{id}.json"));
+        if !path.exists() {
+            fs::write(&path, content)?;
+        }
     }
     Ok(())
 }
@@ -169,44 +179,47 @@ fn remove_legacy_persona_files(data_dir: &Path) {
 pub fn migrate_legacy_personas(data_dir: &Path, db: &rusqlite::Connection) -> Result<(), String> {
     let embedded: PersonaManifest =
         serde_json::from_str(EMBEDDED_MANIFEST).expect("embedded personas/manifest.json");
-    let mut manifest = load_manifest(data_dir);
-    let mut changed = false;
 
-    let before = manifest.personas.len();
-    manifest
-        .personas
-        .retain(|p| !REMOVED_BUILTIN_PERSONAS.contains(&p.id.as_str()));
-    if manifest.personas.len() != before {
-        changed = true;
-    }
+    let manifest: PersonaManifest = crate::manifest_lock::with_lock(|| -> Result<PersonaManifest, String> {
+        let mut manifest = load_manifest(data_dir);
+        let mut changed = false;
 
-    for bp in &embedded.personas {
-        if !manifest.personas.iter().any(|p| p.id == bp.id) {
-            manifest.personas.push(bp.clone());
+        let before = manifest.personas.len();
+        manifest
+            .personas
+            .retain(|p| !REMOVED_BUILTIN_PERSONAS.contains(&p.id.as_str()));
+        if manifest.personas.len() != before {
             changed = true;
         }
-    }
 
-    for (legacy, slug) in LEGACY_BUILTIN_PERSONA_IDS {
-        if let Some(pos) = manifest.personas.iter().position(|p| p.id == *legacy) {
-            if manifest.personas.iter().any(|p| p.id == *slug) {
-                manifest.personas.remove(pos);
-            } else {
-                manifest.personas[pos].id = (*slug).to_string();
+        for bp in &embedded.personas {
+            if !manifest.personas.iter().any(|p| p.id == bp.id) {
+                manifest.personas.push(bp.clone());
+                changed = true;
             }
+        }
+
+        for (legacy, slug) in LEGACY_BUILTIN_PERSONA_IDS {
+            if let Some(pos) = manifest.personas.iter().position(|p| p.id == *legacy) {
+                if manifest.personas.iter().any(|p| p.id == *slug) {
+                    manifest.personas.remove(pos);
+                } else {
+                    manifest.personas[pos].id = (*slug).to_string();
+                }
+                changed = true;
+            }
+        }
+
+        if !manifest.personas.iter().any(|p| p.id == manifest.default_id) {
+            manifest.default_id = embedded.default_id.clone();
             changed = true;
         }
-    }
 
-    if !manifest.personas.iter().any(|p| p.id == manifest.default_id) {
-        manifest.default_id = embedded.default_id.clone();
-        changed = true;
-    }
-
-    if changed {
-        let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-        fs::write(manifest_path(data_dir), json).map_err(|e| e.to_string())?;
-    }
+        if changed {
+            write_persona_manifest(data_dir, &manifest)?;
+        }
+        Ok(manifest)
+    })?;
 
     let active = active_persona_id(db, &manifest);
     let resolved_active = LEGACY_BUILTIN_PERSONA_IDS
@@ -240,6 +253,23 @@ pub fn load_manifest(data_dir: &Path) -> PersonaManifest {
         }
     }
     serde_json::from_str(EMBEDDED_MANIFEST).expect("embedded personas/manifest.json")
+}
+
+fn write_persona_manifest(data_dir: &Path, manifest: &PersonaManifest) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
+    crate::manifest_lock::atomic_write(&manifest_path(data_dir), &json)
+}
+
+fn mutate_persona_manifest<F, T>(data_dir: &Path, f: F) -> Result<T, String>
+where
+    F: FnOnce(&mut PersonaManifest) -> Result<T, String>,
+{
+    crate::manifest_lock::with_lock(|| {
+        let mut manifest = load_manifest(data_dir);
+        let result = f(&mut manifest)?;
+        write_persona_manifest(data_dir, &manifest)?;
+        Ok(result)
+    })
 }
 
 pub fn is_builtin_persona(id: &str) -> bool {
@@ -306,6 +336,12 @@ pub fn get_persona_detail(
         _ => profile_from_meta(meta),
     };
 
+    let (profile_ai_updated, profile_ai_updated_at) = if is_builtin {
+        (false, None)
+    } else {
+        crate::persona_builder::resolve_profile_ai_update_meta(data_dir, id, &profile_json)
+    };
+
     Ok(PersonaDetail {
         id: meta.id.clone(),
         name: meta.name.clone(),
@@ -315,6 +351,8 @@ pub fn get_persona_detail(
         skill_md,
         profile_json,
         is_builtin,
+        profile_ai_updated,
+        profile_ai_updated_at,
     })
 }
 
@@ -360,17 +398,16 @@ pub fn save_persona_file(data_dir: &Path, id: &str, body: &str) -> Result<(), St
 }
 
 pub fn upsert_manifest_entry(data_dir: &Path, meta: &PersonaMeta) -> Result<(), String> {
-    let mut manifest = load_manifest(data_dir);
-    if let Some(p) = manifest.personas.iter_mut().find(|p| p.id == meta.id) {
-        p.name = meta.name.clone();
-        p.source = meta.source.clone();
-        p.description = meta.description.clone();
-    } else {
-        manifest.personas.push(meta.clone());
-    }
-    let path = manifest_path(data_dir);
-    let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(&path, json).map_err(|e| e.to_string())
+    mutate_persona_manifest(data_dir, |manifest| {
+        if let Some(p) = manifest.personas.iter_mut().find(|p| p.id == meta.id) {
+            p.name = meta.name.clone();
+            p.source = meta.source.clone();
+            p.description = meta.description.clone();
+        } else {
+            manifest.personas.push(meta.clone());
+        }
+        Ok(())
+    })
 }
 
 pub fn update_persona(
@@ -407,20 +444,21 @@ pub fn delete_persona(
         return Err("内置人设不可删除".into());
     }
 
-    let mut manifest = load_manifest(data_dir);
-    if !manifest.personas.iter().any(|p| p.id == id) {
+    let pre = load_manifest(data_dir);
+    if !pre.personas.iter().any(|p| p.id == id) {
         return Err(format!("未知人设: {id}"));
     }
-    if manifest.personas.len() <= 1 {
+    if pre.personas.len() <= 1 {
         return Err("至少需要保留一个人设".into());
     }
+    let was_active = active_persona_id(db, &pre) == id;
 
-    let was_active = active_persona_id(db, &manifest) == id;
-    manifest.personas.retain(|p| p.id != id);
+    mutate_persona_manifest(data_dir, |manifest| {
+        manifest.personas.retain(|p| p.id != id);
+        Ok(())
+    })?;
 
-    let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    fs::write(manifest_path(data_dir), json).map_err(|e| e.to_string())?;
-
+    let manifest = load_manifest(data_dir);
     let dir = personas_dir(data_dir);
     let _ = fs::remove_file(dir.join(format!("{id}.md")));
     let _ = fs::remove_file(dir.join(format!("{id}.json")));
@@ -433,6 +471,8 @@ pub fn delete_persona(
         };
         set_active_persona_id(db, &manifest, &fallback)?;
     }
+
+    crate::character::purge_character_for_persona(data_dir, db, id)?;
 
     Ok(())
 }

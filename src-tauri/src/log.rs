@@ -6,7 +6,7 @@ pub fn warn(msg: impl std::fmt::Display) {
 }
 
 #[inline]
-pub fn info(msg: impl std::fmt::Display) {
+pub fn info(_msg: impl std::fmt::Display) {
     #[cfg(debug_assertions)]
-    eprintln!("xiaohan-daily: {msg}");
+    eprintln!("xiaohan-daily: {_msg}");
 }

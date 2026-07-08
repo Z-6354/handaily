@@ -1,5 +1,6 @@
 //! 桌宠模型：内置 + 用户导入（Spine skel/atlas/png）
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -74,6 +75,10 @@ fn find_builtin(id: &str) -> Option<&'static BuiltinModelDef> {
 
 fn is_builtin_id(id: &str) -> bool {
     find_builtin(id).is_some()
+}
+
+pub fn is_builtin_model(id: &str) -> bool {
+    is_builtin_id(resolve_builtin_id(id))
 }
 
 fn legacy_builtin_slug(id: &str) -> Option<&'static str> {
@@ -412,6 +417,70 @@ pub fn set_active_model_id(db: &rusqlite::Connection, id: &str) -> Result<(), St
     crate::db::set_setting(db, "pet_model_id", id).map_err(|e| e.to_string())
 }
 
+/// 仅收集模型 id（不 inspect Spine），供人物列表等高频路径使用
+pub fn list_model_id_set(data_dir: &Path) -> Result<std::collections::HashSet<String>, String> {
+    use std::collections::HashSet;
+    let mut ids = HashSet::new();
+    for m in BUILTIN_MODELS {
+        ids.insert(m.id.to_string());
+    }
+    let dir = models_dir(data_dir);
+    if dir.is_dir() {
+        for entry in fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.path().is_dir() {
+                ids.insert(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    Ok(ids)
+}
+
+pub fn model_display_name(data_dir: &Path, model_id: &str) -> String {
+    let resolved = resolve_builtin_id(model_id);
+    if let Some(m) = find_builtin(resolved) {
+        return m.name.to_string();
+    }
+    let dir = models_dir(data_dir).join(model_id);
+    read_model_name(&dir).unwrap_or_else(|| model_id.to_string())
+}
+
+/// 轻量模型名索引：只读 display_name / model.json，不 inspect Spine
+pub fn model_names_map(data_dir: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for m in BUILTIN_MODELS {
+        map.insert(m.id.to_string(), m.name.to_string());
+    }
+    let dir = models_dir(data_dir);
+    if dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                if !entry.path().is_dir() {
+                    continue;
+                }
+                let id = entry.file_name().to_string_lossy().to_string();
+                if is_legacy_or_builtin_id(&id) {
+                    continue;
+                }
+                let name = read_model_name(&entry.path()).unwrap_or_else(|| id.clone());
+                map.insert(id, name);
+            }
+        }
+    }
+    map
+}
+
+pub fn model_names_for_ids(data_dir: &Path, model_ids: &[String]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for id in model_ids {
+        if map.contains_key(id) {
+            continue;
+        }
+        map.insert(id.clone(), model_display_name(data_dir, id));
+    }
+    map
+}
+
 pub fn list_models(data_dir: &Path) -> Result<Vec<PetModelInfo>, String> {
     let mut out: Vec<PetModelInfo> = BUILTIN_MODELS
         .iter()
@@ -479,6 +548,7 @@ pub fn resolve_assets(data_dir: &Path, model_id: &str) -> Result<PetModelAssets,
     })
 }
 
+#[derive(Debug)]
 struct SpineTriple(String, String, String);
 
 fn try_triple_from_config(dir: &Path) -> Option<SpineTriple> {
@@ -515,43 +585,56 @@ fn inspect_spine_folder(dir: &Path) -> Result<SpineTriple, String> {
     if let Some(triple) = try_triple_from_config(dir) {
         return Ok(triple);
     }
-    let skel = find_file_with_ext_optional(dir, "skel");
-    let atlas = find_file_with_ext_optional(dir, "atlas");
-    let png = find_file_with_ext_optional(dir, "png");
-    if skel.is_none() || atlas.is_none() || png.is_none() {
-        let mut missing = Vec::new();
-        if skel.is_none() {
-            missing.push(".skel");
-        }
-        if atlas.is_none() {
-            missing.push(".atlas");
-        }
-        if png.is_none() {
-            missing.push(".png");
-        }
-        return Err(format!(
-            "该文件夹不是有效的 Spine 模型：缺少 {}（需要 .skel、.atlas、.png 三件套齐全）",
-            missing.join("、")
-        ));
-    }
-    Ok(SpineTriple(skel.unwrap(), atlas.unwrap(), png.unwrap()))
+    let skel = find_file_with_ext(dir, "skel")?;
+    let atlas = find_file_with_ext(dir, "atlas")?;
+    let png = find_file_with_ext(dir, "png")?;
+    Ok(SpineTriple(skel, atlas, png))
 }
 
 fn resolve_user_dir(dir: &Path) -> Result<SpineTriple, String> {
     inspect_spine_folder(dir)
 }
 
-fn find_file_with_ext_optional(dir: &Path, ext: &str) -> Option<String> {
-    fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+fn find_files_with_ext(dir: &Path, ext: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
-            return None;
+            continue;
         }
-        path.extension()
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if path
+            .extension()
             .and_then(|e| e.to_str())
-            .filter(|e| e.eq_ignore_ascii_case(ext))?;
-        Some(path.file_name()?.to_str()?.to_string())
-    })
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+        {
+            out.push(name.to_string());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn find_file_with_ext(dir: &Path, ext: &str) -> Result<String, String> {
+    let matches = find_files_with_ext(dir, ext);
+    match matches.len() {
+        0 => Err(format!("缺少 .{ext} 文件")),
+        1 => Ok(matches[0].clone()),
+        n => Err(format!(
+            "目录中存在 {n} 个 .{ext} 文件（{}），请保留一份或在 config.json 中指定",
+            matches.join("、")
+        )),
+    }
+}
+
+#[allow(dead_code)]
+fn find_file_with_ext_optional(dir: &Path, ext: &str) -> Option<String> {
+    find_file_with_ext(dir, ext).ok()
 }
 
 fn file_stem(filename: &str) -> String {
@@ -1817,6 +1900,20 @@ mod tests {
         assert_eq!(triple.0, "edu_3.skel");
         assert_eq!(triple.1, "edu_3.atlas");
         assert_eq!(triple.2, "edu_3.png");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn inspect_spine_folder_rejects_multiple_same_ext() {
+        let dir = std::env::temp_dir().join(format!("pet-dup-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.skel"), b"a").unwrap();
+        fs::write(dir.join("b.skel"), b"b").unwrap();
+        fs::write(dir.join("model.atlas"), "model.png\nsize: 1,1\n").unwrap();
+        fs::write(dir.join("model.png"), b"png").unwrap();
+        let err = inspect_spine_folder(&dir).unwrap_err();
+        assert!(err.contains("2 个 .skel"));
         let _ = fs::remove_dir_all(&dir);
     }
 

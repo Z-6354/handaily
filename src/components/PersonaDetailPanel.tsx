@@ -1,33 +1,50 @@
 import { useMemo, useState } from "react";
+import { CharacterAvatar } from "./CharacterAvatar";
+import { CharacterPetSettings } from "./CharacterPetSettings";
+import { CharacterSkinPicker } from "./CharacterSkinPicker";
 import { PersonaEditForm } from "./PersonaEditForm";
 import { PersonaTextImportForm } from "./PersonaTextImportForm";
-import type { CharacterProfileData, PersonaDetail, PersonaInfo } from "../lib/xiaohan";
+import { PersonaRegenerateButton } from "./PersonaRegenerateButton";
+import type { SettingsFeedback } from "../lib/apiErrorMessage";
+import type { CharacterProfileData, PersonaDetail } from "../lib/xiaohan";
+import { characterAccent } from "../lib/characterDisplay";
 
-type Tab = "skill" | "profile" | "json" | "import" | "edit";
+type Tab = "appearance" | "personality";
 
-const PERSONA_ACCENT: Record<string, string> = {
-  cheshire: "#f59e0b",
-  edu: "#8b5cf6",
-  wushiling: "#06b6d4",
-  qiye: "#64748b",
-  tashigan: "#3b82f6",
+type CharacterOption = {
+  id: string;
+  name: string;
 };
 
 type Props = {
+  characterId: string;
   detail: PersonaDetail | null;
   loading: boolean;
   deleting?: boolean;
-  personas: PersonaInfo[];
-  onSelectPersona: (id: string) => void;
-  onActivate: (id: string) => void;
-  onDelete: (id: string) => void | Promise<void>;
+  characters: CharacterOption[];
+  activeSkinId?: string;
+  activeSkinName?: string;
+  activeModelId?: string;
+  activeModelName?: string;
+  activeModelReady?: boolean;
+  skinRefreshKey?: number;
+  switchingSkinId?: string | null;
+  onSkinSelect?: (skinId: string) => void;
+  onDeleteSkin?: (skinId: string) => void;
+  onSelectCharacter: (characterId: string) => void;
+  onActivate: () => void;
+  onDelete: () => void | Promise<void>;
   onBack: () => void;
   onUpdated: () => void | Promise<void>;
+  onSkinRefresh?: () => void | Promise<void>;
+  setFeedback: (f: SettingsFeedback | null) => void;
+  avatarPath?: string | null;
+  characterIdForAvatar?: string;
+  displayTags?: [string, string];
 };
 
-function personaInitial(name: string) {
-  const t = name.trim();
-  return t ? t.charAt(0) : "?";
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <h4 className="persona-section-title">{children}</h4>;
 }
 
 function FieldBlock({ label, children }: { label: string; children: React.ReactNode }) {
@@ -38,6 +55,23 @@ function FieldBlock({ label, children }: { label: string; children: React.ReactN
       <div className="persona-field-value">{children}</div>
     </div>
   );
+}
+
+function profileNeedsAi(data: CharacterProfileData): boolean {
+  return (
+    !data.introduction.trim() ||
+    (data.personality.length === 0 && !data.speech_style.trim())
+  );
+}
+
+function profileUpdateStatus(detail: PersonaDetail): string {
+  if (!detail.profile_ai_updated) {
+    return "未更新";
+  }
+  if (detail.profile_ai_updated_at) {
+    return `已更新 · ${detail.profile_ai_updated_at}`;
+  }
+  return "已更新";
 }
 
 function StructuredProfile({ data }: { data: CharacterProfileData }) {
@@ -90,19 +124,34 @@ function StructuredProfile({ data }: { data: CharacterProfileData }) {
 }
 
 export function PersonaDetailPanel({
+  characterId,
   detail,
   loading,
   deleting = false,
-  personas,
-  onSelectPersona,
+  characters,
+  activeSkinId,
+  activeSkinName,
+  activeModelId,
+  activeModelName,
+  activeModelReady,
+  skinRefreshKey = 0,
+  switchingSkinId,
+  onSkinSelect,
+  onDeleteSkin,
+  onSelectCharacter,
   onActivate,
   onDelete,
   onBack,
   onUpdated,
+  onSkinRefresh,
+  setFeedback,
+  avatarPath,
+  characterIdForAvatar,
+  displayTags,
 }: Props) {
-  const [tab, setTab] = useState<Tab>("skill");
+  const [tab, setTab] = useState<Tab>("appearance");
 
-  const accent = detail ? (PERSONA_ACCENT[detail.id] ?? "#722ed1") : "#722ed1";
+  const accent = characterAccent(characterId);
   const jsonText = useMemo(
     () => (detail ? JSON.stringify(detail.profile_json, null, 2) : ""),
     [detail],
@@ -114,39 +163,45 @@ export function PersonaDetailPanel({
       style={{ "--persona-accent": accent } as React.CSSProperties}
     >
       <div className="persona-detail-top">
-        <button type="button" className="persona-detail-back" onClick={onBack}>
-          ← 返回选角
-        </button>
-        {personas.length > 1 && detail && (
-          <select
-            className="persona-detail-switcher"
-            value={detail.id}
-            onChange={(e) => onSelectPersona(e.target.value)}
-          >
-            {personas.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        )}
+        <div className="persona-detail-top-left">
+          <button type="button" className="persona-detail-back" onClick={onBack}>
+            ← 返回
+          </button>
+          {characters.length > 1 && detail && (
+            <select
+              className="persona-detail-switcher"
+              value={characterId}
+              onChange={(e) => onSelectCharacter(e.target.value)}
+            >
+              {characters.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
         {detail && (
           <div className="persona-detail-actions">
             {!detail.active && (
-              <button
-                type="button"
-                className="btn-primary btn-sm"
-                onClick={() => onActivate(detail.id)}
-              >
-                选用此人设
+              <button type="button" className="btn-primary btn-sm" onClick={onActivate}>
+                选用此人物
               </button>
             )}
+            {detail.active && (
+              <span className="persona-detail-active-pill">当前使用</span>
+            )}
+            <PersonaRegenerateButton
+              personaId={detail.id}
+              setFeedback={setFeedback}
+              onSuccess={onUpdated}
+            />
             {!detail.is_builtin && (
               <button
                 type="button"
                 className="btn-secondary btn-sm persona-detail-delete"
                 disabled={deleting}
-                onClick={() => onDelete(detail.id)}
+                onClick={onDelete}
               >
                 {deleting ? "删除中…" : "删除"}
               </button>
@@ -162,13 +217,35 @@ export function PersonaDetailPanel({
           <aside className="persona-detail-side">
             <div className="persona-detail-side-cover" />
             <div className="persona-detail-side-avatar" aria-hidden>
-              {personaInitial(detail.name)}
+              <CharacterAvatar
+                name={detail.name}
+                characterId={characterIdForAvatar ?? characterId}
+                avatarPath={avatarPath}
+                deferDownload
+              />
             </div>
             <h3 className="persona-detail-side-name">{detail.name}</h3>
-            {detail.source && <span className="persona-detail-side-chip">{detail.source}</span>}
+            {displayTags && (
+              <div className="persona-card-tags persona-card-tags--detail">
+                <span className="persona-detail-side-chip">{displayTags[0]}</span>
+                <span className="persona-detail-side-chip persona-card-chip--trait">
+                  {displayTags[1]}
+                </span>
+              </div>
+            )}
             <p className="persona-detail-side-desc">{detail.description}</p>
+            {activeModelName && (
+              <p className="persona-detail-side-meta">
+                皮肤 · {activeModelName}
+                {activeModelId && (
+                  <>
+                    <br />
+                    <span className="persona-detail-model-id">模型 {activeModelId}</span>
+                  </>
+                )}
+              </p>
+            )}
             <div className="persona-detail-badges">
-              {detail.active && <span className="persona-badge persona-badge--active">当前使用</span>}
               {detail.is_builtin && <span className="persona-badge">内置</span>}
             </div>
           </aside>
@@ -177,11 +254,8 @@ export function PersonaDetailPanel({
             <div className="persona-detail-tabs">
               {(
                 [
-                  ["skill", "Skill 文档"],
-                  ["profile", "结构化资料"],
-                  ["json", "JSON"],
-                  ["import", "导入资料"],
-                  ["edit", "编辑"],
+                  ["appearance", "皮肤 · 桌宠"],
+                  ["personality", "性格"],
                 ] as [Tab, string][]
               ).map(([k, label]) => (
                 <button
@@ -196,20 +270,78 @@ export function PersonaDetailPanel({
             </div>
 
             <div className="persona-detail-body">
-              {tab === "skill" && (
-                <pre className="persona-md-preview">{detail.skill_md || "（暂无 Skill 文档）"}</pre>
+              {tab === "appearance" && (
+                <div className="persona-detail-sections">
+                  {onSkinSelect ? (
+                    <CharacterSkinPicker
+                      characterId={characterId}
+                      activeId={activeSkinId ?? ""}
+                      refreshKey={skinRefreshKey}
+                      switchingId={switchingSkinId ?? null}
+                      disabled={Boolean(switchingSkinId)}
+                      onSelect={onSkinSelect}
+                      onDeleteSkin={onDeleteSkin}
+                      canDeleteSkin={!detail.is_builtin}
+                      characterActive={detail.active}
+                      switchUpdatesPet={true}
+                      activeModelId={activeModelId}
+                      activeModelName={activeModelName}
+                      activeSkinName={activeSkinName}
+                      onImportComplete={onSkinRefresh}
+                      setFeedback={setFeedback}
+                    />
+                  ) : null}
+                  {activeModelId && activeModelReady !== false && (
+                    <CharacterPetSettings
+                      modelId={activeModelId}
+                      setFeedback={setFeedback}
+                    />
+                  )}
+                </div>
               )}
-              {tab === "profile" && <StructuredProfile data={detail.profile_json} />}
-              {tab === "json" && <pre className="persona-json-preview">{jsonText}</pre>}
-              {tab === "import" && (
-                <PersonaTextImportForm
-                  mode="update"
-                  personaId={detail.id}
-                  compact
-                  onSuccess={onUpdated}
-                />
+
+              {tab === "personality" && (
+                <div className="persona-detail-sections">
+                  <div className="persona-detail-section-head-row">
+                    <SectionTitle>基本信息</SectionTitle>
+                  </div>
+                  {profileNeedsAi(detail.profile_json) && (
+                    <p className="hint-block persona-profile-hint">
+                      简介/介绍/说话风格/性格尚未完整生成。可点击右上角「AI 更新性格」，或使用下方「从 Wiki 更新」（需配置思考模型）。
+                    </p>
+                  )}
+                  <FieldBlock label="性格 AI 更新">{profileUpdateStatus(detail)}</FieldBlock>
+                  <FieldBlock label="简介">{detail.description || "（暂无）"}</FieldBlock>
+                  <StructuredProfile data={detail.profile_json} />
+
+                  <SectionTitle>性格 · Skill</SectionTitle>
+                  <pre className="persona-md-preview">
+                    {detail.skill_md || "（暂无 Skill 文档）"}
+                  </pre>
+
+                  <SectionTitle>导入资料</SectionTitle>
+                  <p className="hint-block">
+                    输入 BWIKI 舰娘名称即可更新简介、性格、Skill 与当前皮肤台词；也可粘贴文本或使用本地库。
+                  </p>
+                  <PersonaTextImportForm
+                    mode="update"
+                    personaId={detail.id}
+                    characterId={characterId}
+                    defaultWikiTitle={detail.name}
+                    compact
+                    onSuccess={async () => {
+                      await onUpdated();
+                      await onSkinRefresh?.();
+                    }}
+                  />
+
+                  <SectionTitle>JSON</SectionTitle>
+                  <pre className="persona-json-preview">{jsonText}</pre>
+
+                  <SectionTitle>编辑</SectionTitle>
+                  <PersonaEditForm detail={detail} onSaved={onUpdated} />
+                </div>
               )}
-              {tab === "edit" && <PersonaEditForm detail={detail} onSaved={onUpdated} />}
             </div>
           </section>
         </div>

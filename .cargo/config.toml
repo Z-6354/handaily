@@ -1,5 +1,7 @@
-# 加速 release 链接与增量编译（与 src-tauri/Cargo.toml [profile.release] 一致）
+# 统一 Cargo 产物目录（无论从仓库根或 src-tauri 执行 cargo / tauri）
+# 避免 HANDAILY/target 与 src-tauri/target 两套 debug/deps 重复占用磁盘
 [build]
+target-dir = "src-tauri/target"
 incremental = true
 
 [profile.release]

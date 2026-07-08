@@ -215,23 +215,38 @@ export class SpinePet {
     let atlasFile = this.assets.atlasFile;
     this.viewerExConfig = null;
 
-    const viewerEx = await loadViewerExSpineConfig("", configFile, resolveUrl);
+    const loadAtlasSkel = async (skel: string, atlas: string) =>
+      Promise.all([
+        fetch(await resolveUrl(atlas)).then((r) => {
+          if (!r.ok) throw new Error(`atlas 加载失败: ${atlas}`);
+          return r.text();
+        }),
+        fetch(await resolveUrl(skel)).then(async (r) => {
+          if (!r.ok) throw new Error(`skel 加载失败: ${skel}`);
+          return new Uint8Array(await r.arrayBuffer());
+        }),
+      ] as const);
+
+    const defaultAssetsPromise = loadAtlasSkel(skelFile, atlasFile);
+    const viewerExPromise = configFile
+      ? loadViewerExSpineConfig("", configFile, resolveUrl)
+      : Promise.resolve(null);
+
+    const viewerEx = await viewerExPromise;
+    let atlasText: string;
+    let skelBuf: Uint8Array;
     if (viewerEx) {
       skelFile = viewerEx.skelFile;
       atlasFile = viewerEx.atlasFile;
       this.viewerExConfig = viewerEx.config;
+      if (skelFile === this.assets.skelFile && atlasFile === this.assets.atlasFile) {
+        [atlasText, skelBuf] = await defaultAssetsPromise;
+      } else {
+        [atlasText, skelBuf] = await loadAtlasSkel(skelFile, atlasFile);
+      }
+    } else {
+      [atlasText, skelBuf] = await defaultAssetsPromise;
     }
-
-    const [atlasText, skelBuf] = await Promise.all([
-      fetch(await resolveUrl(atlasFile)).then((r) => {
-        if (!r.ok) throw new Error(`atlas 加载失败: ${atlasFile}`);
-        return r.text();
-      }),
-      fetch(await resolveUrl(skelFile)).then(async (r) => {
-        if (!r.ok) throw new Error(`skel 加载失败: ${skelFile}`);
-        return new Uint8Array(await r.arrayBuffer());
-      }),
-    ]);
 
     const atlas = await loadTextureAtlas(resolveUrl, atlasText, this.assets.pngFile);
     const binary = new SkeletonBinary36(new AtlasAttachmentLoader(atlas));
@@ -488,6 +503,22 @@ export class SpinePet {
       this.onTap?.(tapAnim);
     }
     return played;
+  }
+
+  /** 角色在页面上的可点击区域（用于 OS 级点击穿透） */
+  getCharacterScreenRect(pad = 10): DOMRect | null {
+    if (!this.spine || !this.app) return null;
+    const bounds = this.spine.getBounds();
+    if (bounds.width < 2 || bounds.height < 2) return null;
+    const canvasRect = this.canvas.getBoundingClientRect();
+    const sx = canvasRect.width / Math.max(this.app.screen.width, 1);
+    const sy = canvasRect.height / Math.max(this.app.screen.height, 1);
+    return new DOMRect(
+      canvasRect.left + bounds.x * sx - pad,
+      canvasRect.top + bounds.y * sy - pad,
+      bounds.width * sx + pad * 2,
+      bounds.height * sy + pad * 2,
+    );
   }
 
   resizeCanvas(width: number, height: number, refit = true) {

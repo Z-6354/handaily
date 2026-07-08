@@ -24,7 +24,6 @@ import {
   IconAgent,
   IconPersona,
   IconHelp,
-  IconPet,
   IconPerformance,
 } from "./components/Icons";
 
@@ -49,7 +48,6 @@ const AgentConnectPage = lazy(() =>
 const PersonaPanel = lazy(() =>
   import("./pages/PersonaPanel").then((m) => ({ default: m.PersonaPanel })),
 );
-const PetPanel = lazy(() => import("./pages/PetPanel").then((m) => ({ default: m.PetPanel })));
 const VaultPanel = lazy(() => import("./pages/VaultPanel").then((m) => ({ default: m.VaultPanel })));
 const SettingsPanel = lazy(() =>
   import("./pages/SettingsPanel").then((m) => ({ default: m.SettingsPanel })),
@@ -79,7 +77,6 @@ type Page =
   | "history"
   | "agent"
   | "persona"
-  | "pet"
   | "vault"
   | "settings"
   | "performance"
@@ -93,8 +90,10 @@ const PAGE_META: Record<Page, { title: string; subtitle?: string }> = {
   apps: { title: "应用记录", subtitle: "时间都花在哪些软件上啦" },
   history: { title: "历史报告", subtitle: "以前写好的小记都在这里" },
   agent: { title: "接入 Agent", subtitle: "让别的助手也能读到你的工作记录" },
-  persona: { title: "AI 人设", subtitle: "换种语气，总结更像在聊天" },
-  pet: { title: "桌宠" },
+  persona: {
+    title: "人物",
+    subtitle: "性格、皮肤与桌宠模型统一管理",
+  },
   vault: { title: "密码本", subtitle: "API 密钥本地加密保存" },
   settings: { title: "设置", subtitle: "模型、人设与采集习惯" },
   performance: { title: "性能检测", subtitle: "系统与本应用的实时占用" },
@@ -109,8 +108,7 @@ const MAIN_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
   { id: "apps", label: "应用记录", icon: <IconApps /> },
   { id: "history", label: "历史报告", icon: <IconHistory /> },
   { id: "agent", label: "接入 Agent", icon: <IconAgent /> },
-  { id: "persona", label: "AI 人设", icon: <IconPersona /> },
-  { id: "pet", label: "桌宠", icon: <IconPet /> },
+  { id: "persona", label: "人物", icon: <IconPersona /> },
 ];
 
 const MORE_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
@@ -241,7 +239,8 @@ export default function App() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listen<string>("main-navigate", (ev) => {
-      const id = ev.payload?.trim();
+      const raw = ev.payload?.trim();
+      const id = raw === "pet" ? "persona" : raw;
       if (id && PAGE_IDS.has(id)) setPage(id as Page);
     }).then((fn) => {
       unlisten = fn;
@@ -299,7 +298,7 @@ export default function App() {
       </aside>
 
       <main className={`content${page === "persona" ? " content--persona" : ""}`}>
-        {page !== "pet" && <PageHeader title={meta.title} subtitle={meta.subtitle} />}
+        {page !== "persona" && <PageHeader title={meta.title} subtitle={meta.subtitle} />}
 
         {error && <div className="error">加载失败：{error}</div>}
 
@@ -344,11 +343,6 @@ export default function App() {
         {page === "persona" && (
           <LazyPage>
             <PersonaPanel />
-          </LazyPage>
-        )}
-        {page === "pet" && (
-          <LazyPage>
-            <PetPanel />
           </LazyPage>
         )}
         {page === "vault" && (

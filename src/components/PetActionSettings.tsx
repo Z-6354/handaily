@@ -19,9 +19,11 @@ export interface PetActionLayout {
 interface PetActionSettingsProps {
   modelId: string;
   animations: string[];
+  animationsLoading?: boolean;
   layout: PetActionLayout;
   busy: boolean;
   section: "actions" | "lines" | "lines-import";
+  applyLive?: boolean;
   onLayoutChange: Dispatch<SetStateAction<PetActionLayout>>;
   onSaved: () => Promise<void>;
   setFeedback: (f: SettingsFeedback | null) => void;
@@ -72,9 +74,11 @@ function layoutFromMeta(meta: {
 export function PetActionSettings({
   modelId,
   animations,
+  animationsLoading = false,
   layout,
   busy,
   section,
+  applyLive = true,
   onLayoutChange,
   onSaved,
   setFeedback,
@@ -161,7 +165,9 @@ export function PetActionSettings({
           lines: layoutToSave.lines,
         });
         if (serial !== saveSerial.current || mid !== modelIdRef.current) return;
-        await xiaohan.petRefreshAnimations();
+        if (applyLive) {
+          await xiaohan.petRefreshAnimations();
+        }
         onLayoutChange(layoutFromMeta(meta));
         await onSaved();
         setFeedback(successFeedback("动作与台词已自动保存"));
@@ -171,7 +177,7 @@ export function PetActionSettings({
         }
       }
     },
-    [onLayoutChange, onSaved, setFeedback],
+    [applyLive, onLayoutChange, onSaved, setFeedback],
   );
 
   const scheduleAutoSave = useCallback(
@@ -255,6 +261,14 @@ export function PetActionSettings({
 
  const previewAnimation = useCallback(
    async (name: string) => {
+     if (!applyLive) {
+       setFeedback({
+         tone: "info",
+         title: "预览不可用",
+         detail: "当前桌宠未加载此模型，无法在桌宠上预览动作。",
+       });
+       return;
+     }
      try {
         // 不调 petShow：show_pet 末尾会发 pet-reload 触发 SpinePet 整体重建，
         // 与紧随其后的预览事件竞态，previewPlay 会作用在即将销毁的旧实例上导致渲染碎块。
@@ -267,7 +281,7 @@ export function PetActionSettings({
        setFeedback(parseApiError(e, "预览动作"));
      }
    },
-   [layout.idleAnimation, layout.returnIdleAnimation, setFeedback],
+   [applyLive, layout.idleAnimation, layout.returnIdleAnimation, setFeedback],
  );
 
   const parseImportLines = (raw: string): PetRemarkLine[] => {
@@ -439,11 +453,10 @@ export function PetActionSettings({
   );
 
   if (section === "actions" && animations.length === 0) {
-    return (
-      <p className="hint-block">
-        请先启动桌宠并完成一次加载，动作列表会自动同步；也可点「立即更新」。
-      </p>
-    );
+    if (animationsLoading) {
+      return <p className="hint-block">正在加载动作与台词…</p>;
+    }
+    return <p className="hint-block">暂无动作数据，请确认桌宠已启用且模型文件完整。</p>;
   }
 
   if (section === "actions") {

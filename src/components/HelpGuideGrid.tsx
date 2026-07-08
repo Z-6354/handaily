@@ -3,7 +3,7 @@ const GUIDE_ITEMS = [
   { emoji: "✨", title: "生成报告", desc: "把碎片收成一篇小记" },
   { emoji: "🕐", title: "工作时间线", desc: "按时间翻应用切换" },
   { emoji: "💬", title: "AI 人设", desc: "换语气，更像在聊天" },
-  { emoji: "🐾", title: "桌宠", desc: "桌面小伙伴陪你干活" },
+  { emoji: "🐾", title: "人物", desc: "性格、皮肤与桌宠一体管理" },
   { emoji: "🔐", title: "密码本", desc: "密钥本地加密保存" },
 ] as const;
 

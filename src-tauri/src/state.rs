@@ -108,6 +108,7 @@ impl AppState {
             let _ = crate::prompts::seed_user_prompts(data_dir);
             let _ = crate::ai::seed_user_vendors(data_dir);
             let _ = crate::persona::seed_user_personas(data_dir);
+            let _ = crate::character::seed_user_characters(data_dir);
             let _ = crate::timeline::json_log::ensure_logs_dir(data_dir);
         }
 
@@ -121,6 +122,7 @@ impl AppState {
             let _ = crate::pet::models::migrate_legacy_builtin_models(&db);
             if let Some(ref data_dir) = data_dir {
                 let _ = crate::persona::migrate_legacy_personas(data_dir, &db);
+                let _ = crate::character::migrate_on_startup(data_dir, &db);
             }
         }
 

@@ -10,6 +10,91 @@ use tauri::AppHandle;
 const WIKI_STEP_TOTAL: u32 = 4;
 const SKIP_WORD_KEYS: &[&str] = &["extra", "drop_descrip"];
 
+/// 碧蓝航线 BWIKI 基础路径（与 mcp/blhx-wiki 一致）
+pub const BLHX_WIKI_BASE: &str = "https://wiki.biligame.com/blhx";
+
+pub fn wiki_url_for_title(title: &str) -> String {
+    format!(
+        "{}/{}",
+        BLHX_WIKI_BASE,
+        percent_encode_path_segment(title.trim())
+    )
+}
+
+pub fn resolve_wiki_fetch_url(url: Option<&str>, wiki_title: Option<&str>) -> Result<String, String> {
+    if let Some(u) = url.map(str::trim).filter(|s| !s.is_empty()) {
+        validate_wiki_url(u)?;
+        return Ok(u.to_string());
+    }
+    let title = wiki_title
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "请输入舰娘名称或 Wiki 链接".to_string())?;
+    Ok(wiki_url_for_title(title))
+}
+
+fn percent_encode_path_segment(s: &str) -> String {
+    let mut out = String::new();
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(out, "%{:02X}", b);
+        }
+    }
+    out
+}
+
+/// 从已抓取的 Wiki HTML 提取舰船台词（结构化优先，必要时走 AI 清洗）
+pub async fn extract_wiki_lines_from_html(
+    app: &AppHandle,
+    st: &AppState,
+    model_id: &str,
+    html: &str,
+) -> Result<Vec<PetRemarkLine>, String> {
+    let mut lines = extract_biligame_ship_words(html);
+    if lines.is_empty() {
+        let section = extract_wiki_section(html, "舰船台词")
+            .or_else(|| extract_mw_parser_output(html));
+        if let Some(text) = section {
+            lines = lines_import::local_extract_lines(&text);
+        }
+    }
+
+    if !lines.is_empty() {
+        return Ok(lines_import::dedupe_lines(lines));
+    }
+
+    let fallback_text = extract_mw_parser_output(html)
+        .or_else(|| Some(strip_html_to_text(html)))
+        .filter(|t| t.trim().len() > 80)
+        .ok_or_else(|| "未能从页面中解析出台词".to_string())?;
+
+    lines_import::ai_clean_import_text(app, st, model_id, &fallback_text, 1, 1, 1).await
+}
+
+pub fn save_lines_to_model(
+    data_dir: &std::path::Path,
+    db: &rusqlite::Connection,
+    model_id: &str,
+    lines: Vec<PetRemarkLine>,
+    append: bool,
+) -> Result<usize, String> {
+    use crate::pet::models::PetImportLinesPayload;
+    let count = lines.len();
+    if count == 0 {
+        return Ok(0);
+    }
+    let payload = PetImportLinesPayload {
+        model_id: model_id.to_string(),
+        lines,
+        append,
+    };
+    crate::pet::models::import_lines(data_dir, db, &payload)?;
+    Ok(count)
+}
+
 pub async fn wiki_import_lines(
     app: &AppHandle,
     st: &AppState,
@@ -23,44 +108,23 @@ pub async fn wiki_import_lines(
 
     lines_import::emit_lines_progress(app, "parse", "正在解析页面内容…", 2, WIKI_STEP_TOTAL);
 
-    let mut lines = extract_biligame_ship_words(&html);
-    if lines.is_empty() {
-        let section = extract_wiki_section(&html, "舰船台词")
-            .or_else(|| extract_mw_parser_output(&html));
-        if let Some(text) = section {
-            lines = lines_import::local_extract_lines(&text);
-        }
-    }
+    let lines = extract_wiki_lines_from_html(app, st, model_id, &html).await?;
 
-    if !lines.is_empty() {
-        lines = lines_import::dedupe_lines(lines);
-        lines_import::emit_lines_progress(
-            app,
-            "extract",
-            &format!("已识别 {} 条结构化台词", lines.len()),
-            3,
-            WIKI_STEP_TOTAL,
-        );
-        lines_import::emit_lines_progress(
-            app,
-            "validate",
-            &format!("正在校验台词完整性（共 {} 条）…", lines.len()),
-            4,
-            WIKI_STEP_TOTAL,
-        );
-        return Ok(lines);
-    }
-
-    let fallback_text = extract_mw_parser_output(&html)
-        .or_else(|| Some(strip_html_to_text(&html)))
-        .filter(|t| t.trim().len() > 80)
-        .ok_or_else(|| {
-            "未能从页面中解析出台词；请确认链接为舰娘 Wiki 页面，或改用粘贴导入".to_string()
-        })?;
-
-    lines_import::emit_lines_progress(app, "extract", "正在 AI 清洗提取台词…", 3, WIKI_STEP_TOTAL);
-    lines_import::ai_clean_import_text(app, st, model_id, &fallback_text, 3, 4, WIKI_STEP_TOTAL)
-        .await
+    lines_import::emit_lines_progress(
+        app,
+        "extract",
+        &format!("已识别 {} 条台词", lines.len()),
+        3,
+        WIKI_STEP_TOTAL,
+    );
+    lines_import::emit_lines_progress(
+        app,
+        "validate",
+        &format!("正在校验台词完整性（共 {} 条）…", lines.len()),
+        4,
+        WIKI_STEP_TOTAL,
+    );
+    Ok(lines)
 }
 
 pub fn validate_wiki_url(url: &str) -> Result<(), String> {
@@ -722,6 +786,26 @@ mod tests {
         assert!(extract.text.contains("舰船台词"));
         assert!(extract.text.contains("呼啊"));
         assert_eq!(extract.name_hint.as_deref(), Some("柴郡"));
+    }
+
+    #[test]
+    fn wiki_url_for_title_encodes_chinese() {
+        let url = wiki_url_for_title("柴郡");
+        assert!(url.starts_with("https://wiki.biligame.com/blhx/"));
+        assert!(url.contains("%"));
+    }
+
+    #[test]
+    fn resolve_wiki_fetch_url_prefers_explicit_url() {
+        let url = "https://wiki.biligame.com/blhx/foo";
+        let resolved = resolve_wiki_fetch_url(Some(url), Some("柴郡")).unwrap();
+        assert_eq!(resolved, url);
+    }
+
+    #[test]
+    fn resolve_wiki_fetch_url_builds_from_title() {
+        let resolved = resolve_wiki_fetch_url(None, Some("柴郡")).unwrap();
+        assert_eq!(resolved, wiki_url_for_title("柴郡"));
     }
 
     #[test]

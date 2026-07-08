@@ -12,6 +12,9 @@ use crate::db::character_profiles::{
 use crate::persona::{self, PersonaMeta};
 use crate::prompts;
 
+/// `CharacterProfileData.extra` 中记录 AI 性格结构化更新的本地时间
+pub const EXTRA_AI_PROFILE_UPDATED_AT: &str = "ai_profile_updated_at";
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CharacterOpResult {
     pub profile: CharacterProfileRow,
@@ -122,6 +125,7 @@ pub fn build_preprocess_prompt(data_dir: &Path, row: &CharacterProfileRow) -> Re
 const MAX_REFERENCE_CHARS: usize = 24_000;
 const MAX_REFERENCE_CHARS_COMPACT: usize = 8_000;
 const MAX_REFERENCE_CHARS_MINIMAL: usize = 4_000;
+const MAX_REFERENCE_CHARS_ULTRA: usize = 600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreprocessMode {
@@ -199,6 +203,7 @@ pub fn preprocess_attempt_tiers(from_wiki: bool, text_len: usize) -> Vec<(Prepro
             (PreprocessMode::Minimal, MAX_REFERENCE_CHARS_MINIMAL),
             (PreprocessMode::Minimal, 1_500),
             (PreprocessMode::Compact, 2_500),
+            (PreprocessMode::Minimal, MAX_REFERENCE_CHARS_ULTRA),
         ];
     }
     if text_len > MAX_REFERENCE_CHARS_COMPACT {
@@ -386,13 +391,27 @@ fn parse_field_line(text: &str, field: &str) -> Option<String> {
     None
 }
 
+fn trim_at_next_info_field(s: &str) -> String {
+    const MARKERS: &[&str] = &[
+        " 关键词", " 持有物", " 发色", " 瞳色", " 萌点", " CV ", " 画师", " 微博",
+        " 推特", " PIXIV", " B站", " 5sing",
+    ];
+    let mut end = s.chars().count();
+    for marker in MARKERS {
+        if let Some(pos) = s.find(marker) {
+            end = end.min(pos);
+        }
+    }
+    s.chars().take(end).collect::<String>().trim().to_string()
+}
+
 fn parse_info_scalar_field(info: &str, field: &str) -> Option<String> {
     for line in info.lines() {
         let t = line.trim();
         if t.starts_with(field) {
             let rest = t.trim_start_matches(field).trim_start_matches(['：', ':', ' ']);
             if !rest.is_empty() && rest != field {
-                return Some(rest.to_string());
+                return Some(trim_at_next_info_field(rest));
             }
         }
     }
@@ -495,6 +514,63 @@ pub fn profile_has_content(profile: &CharacterProfileData) -> bool {
         || !profile.extra.is_empty()
 }
 
+/// 简介/介绍/说话风格/性格等结构化字段是否齐全（批量导入后常缺此项）
+pub fn profile_is_structured(profile: &CharacterProfileData) -> bool {
+    !profile.introduction.trim().is_empty()
+        && (!profile.personality.is_empty() || !profile.speech_style.trim().is_empty())
+}
+
+pub fn stamp_ai_profile_updated(profile: &mut CharacterProfileData) {
+    profile.extra.insert(
+        EXTRA_AI_PROFILE_UPDATED_AT.to_string(),
+        Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+    );
+}
+
+pub fn resolve_profile_ai_update_meta(
+    data_dir: &Path,
+    id: &str,
+    profile: &CharacterProfileData,
+) -> (bool, Option<String>) {
+    if let Some(at) = profile
+        .extra
+        .get(EXTRA_AI_PROFILE_UPDATED_AT)
+        .filter(|s| !s.trim().is_empty())
+    {
+        return (true, Some(at.clone()));
+    }
+    if !profile_is_structured(profile) {
+        return (false, None);
+    }
+    let path = persona::personas_dir(data_dir).join(format!("{id}.json"));
+    if let Ok(meta) = std::fs::metadata(&path) {
+        if let Ok(modified) = meta.modified() {
+            let dt: chrono::DateTime<Local> = modified.into();
+            return (true, Some(dt.format("%Y-%m-%d %H:%M:%S").to_string()));
+        }
+    }
+    (true, None)
+}
+
+pub fn persona_reference_path(data_dir: &Path, id: &str) -> std::path::PathBuf {
+    persona::personas_dir(data_dir).join(format!("{id}.reference.md"))
+}
+
+pub fn save_persona_reference(data_dir: &Path, id: &str, text: &str) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(());
+    }
+    let path = persona_reference_path(data_dir, id);
+    std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())
+}
+
+pub fn load_persona_reference(data_dir: &Path, id: &str) -> Option<String> {
+    let path = persona_reference_path(data_dir, id);
+    std::fs::read_to_string(&path).ok().filter(|s| !s.trim().is_empty())
+}
+
 pub fn build_skill_prompt_from_profile(
     data_dir: &Path,
     profile: &CharacterProfileData,
@@ -513,17 +589,21 @@ pub fn build_skill_prompt_from_profile(
 pub fn save_processed_persona(
     data_dir: &Path,
     id: &str,
-    profile: &CharacterProfileData,
+    mut profile: CharacterProfileData,
     skill_md: &str,
     name_hint: Option<&str>,
     source_hint: Option<&str>,
+    mark_ai_updated: bool,
 ) -> Result<PersonaMeta, String> {
     let skill = skill_md.trim();
     if skill.is_empty() {
         return Err("Skill 文档为空".into());
     }
+    if mark_ai_updated && profile_is_structured(&profile) {
+        stamp_ai_profile_updated(&mut profile);
+    }
     persona::save_persona_file(data_dir, id, skill)?;
-    persona::save_persona_profile(data_dir, id, profile)?;
+    persona::save_persona_profile(data_dir, id, &profile)?;
 
     let manifest = persona::load_manifest(data_dir);
     let existing = manifest.personas.iter().find(|p| p.id == id);
@@ -899,6 +979,25 @@ mod tests {
     fn preprocess_wiki_uses_compact_tiers() {
         let tiers = preprocess_attempt_tiers(true, 20_000);
         assert!(tiers.iter().any(|(m, _)| *m == PreprocessMode::Compact));
+        assert!(tiers.iter().any(|(_, cap)| *cap == MAX_REFERENCE_CHARS_ULTRA));
+    }
+
+    #[test]
+    fn wiki_reference_messy_info_fields() {
+        let text = r#"# 角色：33
+来源：碧蓝航线 BWIKI
+
+## 角色信息
+身份：看板娘 性格 三无（但有点腹黑） 关键词 网站维护
+性格：三无（但有点腹黑） 关键词 网站维护 持有物 小电视发饰
+
+## 舰船台词（原文，共 2 条，已抽样 2 条）
+- 我是33，22的妹妹，平时可能会吐槽。
+- 登陆成功，请触摸33执行权限认证......认证成功，指挥官，欢迎回来。
+"#;
+        let profile = try_profile_from_wiki_reference(text, "33", "碧蓝航线 BWIKI").unwrap();
+        assert!(profile.personality.iter().any(|p| p.contains("三无")));
+        assert!(profile_is_structured(&profile));
     }
 
     #[test]

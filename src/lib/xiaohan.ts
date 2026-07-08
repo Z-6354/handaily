@@ -337,6 +337,119 @@ export interface PersonaInfo {
   is_builtin: boolean;
 }
 
+export interface CharacterSkinInfo {
+  id: string;
+  name: string;
+  model_id: string;
+  model_name: string;
+  active: boolean;
+  model_ready: boolean;
+}
+
+export interface CharacterInfo {
+  id: string;
+  name: string;
+  source: string;
+  description: string;
+  persona_id: string;
+  active: boolean;
+  active_skin_id: string;
+  skins: CharacterSkinInfo[];
+  is_builtin: boolean;
+}
+
+/** 人物列表轻量项（网格懒加载，详情页再拉完整皮肤） */
+export interface CharacterBrief {
+  id: string;
+  name: string;
+  source: string;
+  description: string;
+  persona_id: string;
+  active: boolean;
+  active_skin_id: string;
+  active_skin_name: string;
+  skin_count: number;
+  is_builtin: boolean;
+  faction: string;
+  ship_type: string;
+  rarity: string;
+  trait_summary: string;
+  avatar_path: string | null;
+  avatar_url: string | null;
+}
+
+export interface CharacterListPage {
+  total: number;
+  offset: number;
+  limit: number;
+  items: CharacterBrief[];
+}
+
+export interface CharacterMemoryStats {
+  roster_cached: number;
+  avatar_files: number;
+}
+
+export interface Live2dImportResult {
+  ok: number;
+  skipped: number;
+  failed: number;
+  processed: number;
+  remaining: number;
+  message: string;
+}
+
+export interface AvatarImportResult {
+  ok: number;
+  skipped: number;
+  failed: number;
+  processed: number;
+  remaining: number;
+  tags_updated: number;
+  message: string;
+}
+
+export interface CharacterSkinsPage {
+  total: number;
+  offset: number;
+  limit: number;
+  active_skin_id: string;
+  items: CharacterSkinInfo[];
+}
+
+export interface CharacterWikiImportResult {
+  message: string;
+  lines_imported: number;
+  persona_id: string;
+}
+
+export interface CharacterDetail {
+  id: string;
+  name: string;
+  source: string;
+  description: string;
+  persona_id: string;
+  active: boolean;
+  active_skin_id: string;
+  active_skin_name: string;
+  active_model_id: string;
+  active_model_name: string;
+  active_model_ready: boolean;
+  skin_count: number;
+  is_builtin: boolean;
+  faction: string;
+  ship_type: string;
+  rarity: string;
+  trait_summary: string;
+  avatar_path: string | null;
+  avatar_url: string | null;
+  skill_md: string;
+  profile_json: CharacterProfileData;
+  has_profile: boolean;
+  profile_ai_updated: boolean;
+  profile_ai_updated_at: string | null;
+}
+
 export interface PersonaDetail {
   id: string;
   name: string;
@@ -346,6 +459,8 @@ export interface PersonaDetail {
   skill_md: string;
   profile_json: CharacterProfileData;
   is_builtin: boolean;
+  profile_ai_updated: boolean;
+  profile_ai_updated_at: string | null;
 }
 
 export interface PersonaImportFile {
@@ -356,6 +471,23 @@ export interface PersonaImportFile {
 export interface PersonaImportResult {
   imported_ids: string[];
   message: string;
+}
+
+export interface PersonaBatchRegenerateResult {
+  ok: number;
+  skipped: number;
+  failed: number;
+  remaining: number;
+  message: string;
+  last_id?: string | null;
+  last_error?: string | null;
+}
+
+export interface AgentStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  base_url: string;
 }
 
 export interface PersonaImportProgressEvent {
@@ -423,6 +555,7 @@ export interface TimelineDescribeChunkEvent {
 
 export const xiaohan = {
   ping: () => invoke<string>("app_ping"),
+  memoryStats: () => invoke<CharacterMemoryStats>("app_memory_stats"),
   getDataPath: () => invoke<string>("app_get_data_path"),
   getPromptsPath: () => invoke<string>("app_get_prompts_path"),
   getVendorsConfigPath: () => invoke<string>("app_get_vendors_config_path"),
@@ -447,21 +580,120 @@ export const xiaohan = {
       text: args.text,
     }),
   personaImportWiki: (args: {
-    url: string;
+    url?: string | null;
+    wikiTitle?: string | null;
     personaId?: string | null;
     id?: string | null;
     name?: string | null;
   }) =>
     invoke<PersonaImportResult>("persona_import_wiki", {
-      url: args.url,
+      url: args.url ?? null,
+      wikiTitle: args.wikiTitle ?? null,
       personaId: args.personaId ?? null,
       id: args.id ?? null,
       name: args.name ?? null,
     }),
+  charactersImportWiki: (args: {
+    characterId: string;
+    wikiTitle?: string | null;
+    url?: string | null;
+  }) =>
+    invoke<CharacterWikiImportResult>("character_import_wiki", {
+      characterId: args.characterId,
+      wikiTitle: args.wikiTitle ?? null,
+      url: args.url ?? null,
+    }),
+  personaImportBlhxLocal: (args: {
+    wikiTitle: string;
+    personaId?: string | null;
+    id?: string | null;
+    name?: string | null;
+  }) =>
+    invoke<PersonaImportResult>("persona_import_blhx_local", {
+      wikiTitle: args.wikiTitle,
+      personaId: args.personaId ?? null,
+      id: args.id ?? null,
+      name: args.name ?? null,
+    }),
+  personaRegenerateProfile: (personaId: string) =>
+    invoke<PersonaImportResult>("persona_regenerate_profile", { personaId }),
+  personaBatchRegenerateProfiles: (args?: { limit?: number; onlyMissing?: boolean }) =>
+    invoke<PersonaBatchRegenerateResult>("persona_batch_regenerate_profiles", {
+      limit: args?.limit ?? 10,
+      onlyMissing: args?.onlyMissing ?? true,
+    }),
+  agentGetStatus: () => invoke<AgentStatus>("agent_get_status"),
+  agentSetEnabled: (enabled: boolean) =>
+    invoke<AgentStatus>("agent_set_enabled", { enabled }),
   personaUpdate: (personaId: string, input: PersonaUpdateInput) =>
     invoke<void>("persona_update", { personaId, input }),
   personaDelete: (personaId: string) => invoke<void>("persona_delete", { personaId }),
   aiTestPersona: () => invoke<PersonaTestResult>("ai_test_persona"),
+  charactersList: () => invoke<CharacterInfo[]>("characters_list"),
+  charactersListBrief: () => invoke<CharacterBrief[]>("characters_list_brief"),
+  charactersListPage: (args: {
+    offset: number;
+    limit: number;
+    query?: string;
+    favoritesOnly?: boolean;
+    favoriteIds?: string[];
+  }) => {
+    const payload: Record<string, unknown> = {
+      offset: args.offset,
+      limit: args.limit,
+    };
+    if (args.query?.trim()) payload.query = args.query.trim();
+    if (args.favoritesOnly) {
+      payload.favoritesOnly = true;
+      if (args.favoriteIds?.length) payload.favoriteIds = args.favoriteIds;
+    }
+    return invoke<CharacterListPage>("characters_list_page", payload);
+  },
+  charactersRemoveSkin: (
+    characterId: string,
+    skinId: string,
+    deleteModelFiles = true
+  ) =>
+    invoke<void>("characters_remove_skin", {
+      characterId,
+      skinId,
+      deleteModelFiles,
+    }),
+  charactersImportLive2d: (characterId: string, planPath?: string) =>
+    invoke<Live2dImportResult>("characters_import_live2d", {
+      characterId,
+      planPath: planPath ?? null,
+    }),
+  live2dImportBatch: (args?: { limit?: number; planPath?: string; dryRun?: boolean }) =>
+    invoke<Live2dImportResult>("live2d_import_batch", {
+      limit: args?.limit ?? null,
+      planPath: args?.planPath ?? null,
+      dryRun: args?.dryRun ?? null,
+    }),
+  charactersImportAvatarsBatch: (args?: {
+    limit?: number;
+    skipExisting?: boolean;
+    syncTags?: boolean;
+  }) =>
+    invoke<AvatarImportResult>("characters_import_avatars_batch", {
+      limit: args?.limit ?? null,
+      skipExisting: args?.skipExisting ?? null,
+      syncTags: args?.syncTags ?? null,
+    }),
+  charactersGetDetail: (characterId: string) =>
+    invoke<CharacterDetail>("characters_get_detail", { characterId }),
+  charactersCacheAvatar: (characterId: string) =>
+    invoke<string | null>("characters_cache_avatar", { characterId }),
+  charactersReadAvatar: (characterId: string) =>
+    invoke<string | null>("characters_read_avatar", { characterId }),
+  charactersCacheAvatarsBatch: (characterIds: string[]) =>
+    invoke<Record<string, string>>("characters_cache_avatars_batch", { characterIds }),
+  charactersSkinsPage: (characterId: string, offset = 0, limit = 12) =>
+    invoke<CharacterSkinsPage>("characters_skins_page", { characterId, offset, limit }),
+  charactersSetActive: (characterId: string) =>
+    invoke<void>("characters_set_active", { characterId }),
+  charactersSetSkin: (characterId: string, skinId: string) =>
+    invoke<void>("characters_set_skin", { characterId, skinId }),
   getStatus: () => invoke<StatusPayload>("tracking_get_status"),
   setEnabled: (enabled: boolean) => invoke<void>("tracking_set_enabled", { enabled }),
   getSetting: (key: string) => invoke<string | null>("settings_get", { key }),
@@ -555,6 +787,8 @@ export const xiaohan = {
   reportList: (limit = 50) => invoke<GeneratedReport[]>("report_list", { limit }),
   reportDelete: (id: number) => invoke<void>("report_delete", { id }),
   petGetStatus: () => invoke<PetStatus>("pet_get_status"),
+  petGetModelStatus: (modelId: string) =>
+    invoke<PetStatus>("pet_get_model_status", { modelId }),
   petGetConfig: () => invoke<PetConfig>("pet_get_config"),
   petListModels: () => invoke<PetModelInfo[]>("pet_list_models"),
   petSetModel: (modelId: string) => invoke<void>("pet_set_model", { modelId }),
@@ -564,6 +798,7 @@ export const xiaohan = {
       powerMode?: string;
       scale?: number;
       remarkIntervalSec?: number;
+      applyLive?: boolean;
     },
   ) =>
     invoke<void>("pet_save_model_settings", {
@@ -571,6 +806,7 @@ export const xiaohan = {
       powerMode: settings.powerMode ?? null,
       scale: settings.scale ?? null,
       remarkIntervalSec: settings.remarkIntervalSec ?? null,
+      applyLive: settings.applyLive ?? null,
     }),
   petImportFromFolder: (name: string, folder: string) =>
     invoke<PetModelInfo>("pet_import_from_folder", { name, folder }),
@@ -584,7 +820,8 @@ export const xiaohan = {
   petGetImportStaging: () =>
     invoke<PetImportStagingPreview | null>("pet_get_import_staging"),
   petClearImportStaging: () => invoke<void>("pet_clear_import_staging"),
-  petCommitImport: (name: string) => invoke<PetModelInfo>("pet_commit_import", { name }),
+  petCommitImport: (name: string, characterId?: string) =>
+    invoke<PetModelInfo>("pet_commit_import", { name, characterId: characterId ?? null }),
   petDeleteModel: (modelId: string) => invoke<void>("pet_delete_model", { modelId }),
   petShow: () => invoke<void>("pet_show"),
   petHide: (destroy = false) => invoke<void>("pet_hide", { destroy }),

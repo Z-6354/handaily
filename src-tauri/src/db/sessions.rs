@@ -26,13 +26,9 @@ pub fn close_open_session(db: &Connection) -> Result<(), rusqlite::Error> {
     Ok(())
 }
 
-/// 启动兜底：闭合孤儿会话
+/// 启动兜底：闭合孤儿会话并保留已采集时长
 pub fn recover_orphan_sessions(db: &Connection) -> Result<(), rusqlite::Error> {
-    db.execute(
-        "UPDATE tracking_sessions SET ended_at = started_at, duration_ms = 0 WHERE ended_at IS NULL",
-        [],
-    )?;
-    Ok(())
+    close_open_session(db)
 }
 
 /// 今日后台总时长：从最新会话往回累计（含当前进行中会话）

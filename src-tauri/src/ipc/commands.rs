@@ -1,6 +1,5 @@
 //! `#[tauri::command]` 处理器
 
-use std::path::Path;
 use std::sync::Arc;
 
 use chrono::Local;
@@ -14,6 +13,11 @@ use crate::vault::VaultEntryInput;
 #[tauri::command]
 pub fn app_ping() -> String {
     "xiaohan-daily v0.2.0".to_string()
+}
+
+#[tauri::command]
+pub fn app_memory_stats(st: State<'_, Arc<AppState>>) -> Result<crate::character::CharacterMemoryStats, String> {
+    Ok(crate::character::memory_stats(st.data_dir()))
 }
 
 #[tauri::command]
@@ -653,12 +657,19 @@ pub async fn persona_list(
 
 #[tauri::command]
 pub async fn persona_set_active(
+    app: tauri::AppHandle,
     st: State<'_, Arc<AppState>>,
     persona_id: String,
 ) -> Result<(), String> {
-    let db = crate::db::lock_conn(&st.db)?;
-    let manifest = crate::persona::load_manifest(st.data_dir());
-    crate::persona::set_active_persona_id(&db, &manifest, &persona_id)
+    let data_dir = st.data_dir();
+    let model_id = {
+        let db = crate::db::lock_conn(&st.db)?;
+        let manifest = crate::persona::load_manifest(data_dir);
+        crate::persona::set_active_persona_id(&db, &manifest, &persona_id)?;
+        crate::character::sync_from_persona(data_dir, &db, &persona_id);
+        crate::pet::models::active_model_id(&db)
+    };
+    crate::pet::set_active_model(&app, st.inner().clone(), &model_id)
 }
 
 #[tauri::command]
@@ -693,9 +704,16 @@ pub async fn persona_import(
             .personas
             .iter()
             .any(|p| p.id == id);
-        let result = persona_process_reference(
-            &app,
-            &st,
+        let db = crate::db::lock_conn(&st.db)?;
+        let ctx = crate::persona::import_reference::ImportReferenceContext {
+            data_dir,
+            db: &st.db,
+            vault: &st.vault,
+            app: Some(&app),
+        };
+        drop(db);
+        let result = crate::persona::import_reference::import_from_reference(
+            &ctx,
             if exists {
                 Some(id.as_str())
             } else {
@@ -705,7 +723,8 @@ pub async fn persona_import(
             None,
             None,
             &text,
-            PersonaImportProgress::text(),
+            crate::persona::import_reference::ImportReferenceProgress::text(),
+            false,
             false,
         )
         .await?;
@@ -734,31 +753,148 @@ pub async fn persona_import_text(
     id: Option<String>,
     name: Option<String>,
     text: String,
+    from_wiki: Option<bool>,
 ) -> Result<crate::persona::PersonaImportResult, String> {
-    persona_process_reference(
-        &app,
-        &st,
+    let data_dir = st.data_dir();
+    let ctx = crate::persona::import_reference::ImportReferenceContext {
+        data_dir,
+        db: &st.db,
+        vault: &st.vault,
+        app: Some(&app),
+    };
+    crate::persona::import_reference::import_from_reference(
+        &ctx,
         persona_id.as_deref(),
         id.as_deref(),
         name.as_deref(),
         None,
         &text,
-        PersonaImportProgress::text(),
+        crate::persona::import_reference::ImportReferenceProgress::text(),
+        from_wiki.unwrap_or(false),
         false,
     )
     .await
 }
 
 #[tauri::command]
-pub async fn persona_import_wiki(
+pub async fn persona_import_blhx_local(
     app: tauri::AppHandle,
     st: State<'_, Arc<AppState>>,
-    url: String,
+    wiki_title: String,
     persona_id: Option<String>,
     id: Option<String>,
     name: Option<String>,
 ) -> Result<crate::persona::PersonaImportResult, String> {
-    crate::pet::wiki_scrape::validate_wiki_url(&url)?;
+    let blhx_path = crate::persona::import_reference::resolve_blhx_db_path()?;
+    let (display_name, text) =
+        crate::persona::import_reference::load_blhx_ship_reference(&blhx_path, wiki_title.trim())?;
+    let data_dir = st.data_dir();
+    let resolved_name = name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(display_name.as_str());
+    let new_id_owned = if persona_id.is_some() {
+        None
+    } else if id.as_deref().map(str::trim).is_some_and(|s| !s.is_empty()) {
+        id.as_deref().map(str::trim).map(str::to_string)
+    } else {
+        Some(crate::persona::suggest_persona_id(data_dir, resolved_name)?)
+    };
+
+    emit_persona_import_progress(
+        &app,
+        "parse",
+        "已从本地 BWIKI 库读取资料…",
+        1,
+        crate::persona::import_reference::wiki_step_total(),
+    );
+
+    let db = crate::db::lock_conn(&st.db)?;
+    drop(db);
+    let ctx = crate::persona::import_reference::ImportReferenceContext {
+        data_dir,
+        db: &st.db,
+        vault: &st.vault,
+        app: Some(&app),
+    };
+    crate::persona::import_reference::import_from_reference(
+        &ctx,
+        persona_id.as_deref(),
+        new_id_owned.as_deref(),
+        Some(resolved_name),
+        Some("碧蓝航线 BWIKI"),
+        &text,
+        crate::persona::import_reference::ImportReferenceProgress::wiki_pipeline(),
+        true,
+        false,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn persona_regenerate_profile(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    persona_id: String,
+) -> Result<crate::persona::PersonaImportResult, String> {
+    let data_dir = st.data_dir();
+    let ctx = crate::persona::import_reference::ImportReferenceContext {
+        data_dir,
+        db: &st.db,
+        vault: &st.vault,
+        app: Some(&app),
+    };
+    crate::persona::import_reference::regenerate_persona_profile(&ctx, persona_id.trim()).await
+}
+
+#[tauri::command]
+pub async fn persona_batch_regenerate_profiles(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    limit: Option<usize>,
+    only_missing: Option<bool>,
+) -> Result<crate::persona::import_reference::PersonaBatchRegenerateResult, String> {
+    let data_dir = st.data_dir();
+    let ctx = crate::persona::import_reference::ImportReferenceContext {
+        data_dir,
+        db: &st.db,
+        vault: &st.vault,
+        app: Some(&app),
+    };
+    crate::persona::import_reference::batch_regenerate_persona_profiles(
+        &ctx,
+        limit.unwrap_or(10),
+        only_missing.unwrap_or(true),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn agent_get_status(st: State<'_, Arc<AppState>>) -> Result<crate::agent_http::AgentStatus, String> {
+    Ok(crate::agent_http::status(st.inner().clone()))
+}
+
+#[tauri::command]
+pub async fn agent_set_enabled(
+    st: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<crate::agent_http::AgentStatus, String> {
+    crate::agent_http::set_enabled(st.inner().clone(), enabled)
+}
+
+#[tauri::command]
+pub async fn persona_import_wiki(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    url: Option<String>,
+    wiki_title: Option<String>,
+    persona_id: Option<String>,
+    id: Option<String>,
+    name: Option<String>,
+) -> Result<crate::persona::PersonaImportResult, String> {
+    let fetch_url =
+        crate::pet::wiki_scrape::resolve_wiki_fetch_url(url.as_deref(), wiki_title.as_deref())?;
 
     emit_persona_import_progress(
         &app,
@@ -767,7 +903,7 @@ pub async fn persona_import_wiki(
         1,
         PERSONA_WIKI_IMPORT_STEP_TOTAL,
     );
-    let html = crate::pet::wiki_scrape::fetch_wiki_page(&url).await?;
+    let html = crate::pet::wiki_scrape::fetch_wiki_page(&fetch_url).await?;
 
     emit_persona_import_progress(
         &app,
@@ -776,7 +912,7 @@ pub async fn persona_import_wiki(
         2,
         PERSONA_WIKI_IMPORT_STEP_TOTAL,
     );
-    let extract = crate::pet::wiki_scrape::extract_persona_reference(&html, &url)?;
+    let extract = crate::pet::wiki_scrape::extract_persona_reference(&html, &fetch_url)?;
 
     let data_dir = st.data_dir();
     let resolved_name = name
@@ -796,50 +932,148 @@ pub async fn persona_import_wiki(
         return Err("无法从 Wiki 识别角色名，请填写显示名称或人设 ID".into());
     };
 
-    persona_process_reference(
-        &app,
-        &st,
+    let db = crate::db::lock_conn(&st.db)?;
+    drop(db);
+    let ctx = crate::persona::import_reference::ImportReferenceContext {
+        data_dir,
+        db: &st.db,
+        vault: &st.vault,
+        app: Some(&app),
+    };
+    crate::persona::import_reference::import_from_reference(
+        &ctx,
         persona_id.as_deref(),
         new_id_owned.as_deref(),
         resolved_name,
         resolved_source,
         &extract.text,
-        PersonaImportProgress::wiki_pipeline(),
+        crate::persona::import_reference::ImportReferenceProgress::wiki_pipeline(),
         true,
+        false,
     )
     .await
 }
 
-const PERSONA_THINKING_MODEL_ERR: &str =
-    "请先在设置中配置思考模型（用于解析参考文本并生成 Skill）";
+const CHARACTER_WIKI_IMPORT_STEP_TOTAL: u32 = 6;
 
-const PERSONA_IMPORT_STEP_TOTAL: u32 = 3;
+#[tauri::command]
+pub async fn character_import_wiki(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+    wiki_title: Option<String>,
+    url: Option<String>,
+) -> Result<crate::character::CharacterWikiImportResult, String> {
+    let fetch_url =
+        crate::pet::wiki_scrape::resolve_wiki_fetch_url(url.as_deref(), wiki_title.as_deref())?;
+
+    emit_persona_import_progress(
+        &app,
+        "fetch",
+        "正在爬取 Wiki 页面…",
+        1,
+        CHARACTER_WIKI_IMPORT_STEP_TOTAL,
+    );
+    let html = crate::pet::wiki_scrape::fetch_wiki_page(&fetch_url).await?;
+
+    emit_persona_import_progress(
+        &app,
+        "parse",
+        "正在筛选性格、简介与台词资料…",
+        2,
+        CHARACTER_WIKI_IMPORT_STEP_TOTAL,
+    );
+    let extract = crate::pet::wiki_scrape::extract_persona_reference(&html, &fetch_url)?;
+
+    let data_dir = st.data_dir();
+    let (persona_id, model_id) = {
+        let db = crate::db::lock_conn(&st.db)?;
+        let meta = crate::character::find_character_meta(data_dir, &character_id)?;
+        let detail = crate::character::get_character_detail(data_dir, &db, &character_id)?;
+        (meta.persona_id, detail.active_model_id)
+    };
+
+    let resolved_name = wiki_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .or(extract.name_hint.as_deref());
+
+    let ctx = crate::persona::import_reference::ImportReferenceContext {
+        data_dir,
+        db: &st.db,
+        vault: &st.vault,
+        app: Some(&app),
+    };
+    let persona_result = crate::persona::import_reference::import_from_reference(
+        &ctx,
+        Some(&persona_id),
+        None,
+        resolved_name,
+        extract.source_hint.as_deref(),
+        &extract.text,
+        crate::persona::import_reference::ImportReferenceProgress::character_wiki_pipeline(),
+        true,
+        false,
+    )
+    .await?;
+
+    let mut lines_imported = 0u32;
+    if !model_id.trim().is_empty() {
+        emit_persona_import_progress(
+            &app,
+            "lines",
+            "正在提取并写入舰船台词…",
+            6,
+            CHARACTER_WIKI_IMPORT_STEP_TOTAL,
+        );
+        match crate::pet::wiki_scrape::extract_wiki_lines_from_html(
+            &app,
+            st.inner(),
+            &model_id,
+            &html,
+        )
+        .await
+        {
+            Ok(lines) if !lines.is_empty() => {
+                let db = crate::db::lock_conn(&st.db)?;
+                lines_imported = crate::pet::wiki_scrape::save_lines_to_model(
+                    data_dir,
+                    &db,
+                    &model_id,
+                    lines,
+                    false,
+                )? as u32;
+                let active = crate::pet::models::active_model_id(&db);
+                drop(db);
+                if active == model_id {
+                    crate::pet::nudge_pet_animations(&app);
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                // 台词导入失败不阻断性格资料更新
+            }
+        }
+    }
+
+    let message = if lines_imported > 0 {
+        format!(
+            "{}；已导入 {} 条台词到当前皮肤模型",
+            persona_result.message, lines_imported
+        )
+    } else {
+        persona_result.message.clone()
+    };
+
+    Ok(crate::character::CharacterWikiImportResult {
+        message,
+        lines_imported,
+        persona_id,
+    })
+}
+
 const PERSONA_WIKI_IMPORT_STEP_TOTAL: u32 = 4;
-
-struct PersonaImportProgress {
-    offset: u32,
-    total: u32,
-}
-
-impl PersonaImportProgress {
-    fn text() -> Self {
-        Self {
-            offset: 0,
-            total: PERSONA_IMPORT_STEP_TOTAL,
-        }
-    }
-
-    fn wiki_pipeline() -> Self {
-        Self {
-            offset: 2,
-            total: PERSONA_WIKI_IMPORT_STEP_TOTAL,
-        }
-    }
-
-    fn step(&self, n: u32) -> u32 {
-        self.offset + n
-    }
-}
 
 fn emit_persona_import_progress(
     app: &tauri::AppHandle,
@@ -857,249 +1091,6 @@ fn emit_persona_import_progress(
             step_total,
         },
     );
-}
-
-async fn run_thinking_prompt(
-    st: &State<'_, Arc<AppState>>,
-    prompt: String,
-    options: crate::ai::adapters::ChatOptions,
-) -> Result<String, String> {
-    let data_dir = st.data_dir();
-    let prep = {
-        let db = crate::db::lock_conn(&st.db)?;
-        let config = crate::ai::AiConfig::load(&db, data_dir);
-        let catalog = crate::ai::load_catalog(data_dir);
-        crate::ai::PreparedThinkingChat::prepare(
-            &config,
-            &catalog,
-            &st.vault,
-            &db,
-            data_dir,
-            prompt,
-        )?
-    };
-    let Some(prep) = prep else {
-        return Err(PERSONA_THINKING_MODEL_ERR.into());
-    };
-    prep.run_async_with_options(options).await
-}
-
-async fn preprocess_reference_text(
-    app: &tauri::AppHandle,
-    st: &State<'_, Arc<AppState>>,
-    data_dir: &Path,
-    name: &str,
-    source: &str,
-    text: &str,
-    from_wiki: bool,
-    progress: &PersonaImportProgress,
-) -> Result<crate::db::character_profiles::CharacterProfileData, String> {
-    if from_wiki {
-        if let Some(profile) =
-            crate::persona_builder::try_profile_from_wiki_reference(text, name, source)
-        {
-            emit_persona_import_progress(
-                app,
-                "preprocess",
-                "已本地解析 Wiki 资料，跳过 JSON 预处理…",
-                progress.step(1),
-                progress.total,
-            );
-            return Ok(profile);
-        }
-    }
-
-    let tiers = crate::persona_builder::preprocess_attempt_tiers(from_wiki, text.chars().count());
-    let mut last_err = String::new();
-
-    for (attempt, (mode, max_chars)) in tiers.iter().enumerate() {
-        emit_persona_import_progress(
-            app,
-            "preprocess",
-            &if attempt == 0 {
-                if from_wiki {
-                    "正在解析 Wiki 资料为结构化 JSON…".to_string()
-                } else {
-                    "正在解析参考文本为结构化资料…".to_string()
-                }
-            } else {
-                format!(
-                    "JSON 不完整，正在压缩重试（{}/{}）…",
-                    attempt + 1,
-                    tiers.len()
-                )
-            },
-            progress.step(1),
-            progress.total,
-        );
-
-        let preprocess_prompt = crate::persona_builder::build_preprocess_prompt_limited(
-            data_dir,
-            name,
-            source,
-            text,
-            *mode,
-            Some(*max_chars),
-        )?;
-
-        let raw_profile = run_thinking_prompt(
-            st,
-            preprocess_prompt,
-            crate::ai::adapters::ChatOptions::preprocess(),
-        )
-        .await?;
-
-        let is_last = attempt + 1 == tiers.len();
-        match crate::persona_builder::parse_profile_json_with_repair(&raw_profile, is_last) {
-            Ok(profile) => return Ok(profile),
-            Err(e) if !is_last && crate::persona_builder::is_truncated_profile_error(&e) => {
-                last_err = e;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-
-    Err(if last_err.is_empty() {
-        "AI 未能生成完整 JSON，请更换思考模型或缩短参考文本".into()
-    } else {
-        last_err
-    })
-}
-
-async fn persona_process_reference(
-    app: &tauri::AppHandle,
-    st: &State<'_, Arc<AppState>>,
-    persona_id: Option<&str>,
-    new_id: Option<&str>,
-    name: Option<&str>,
-    source: Option<&str>,
-    text: &str,
-    progress: PersonaImportProgress,
-    from_wiki: bool,
-) -> Result<crate::persona::PersonaImportResult, String> {
-    let text = text.trim();
-    if text.is_empty() {
-        return Err("参考文本不能为空".into());
-    }
-
-    let data_dir = st.data_dir();
-    let args = crate::persona::resolve_reference_import(
-        data_dir,
-        persona_id,
-        new_id,
-        name,
-        source,
-    )?;
-
-    let display_name = args
-        .name_hint
-        .as_deref()
-        .filter(|n| !n.is_empty())
-        .unwrap_or(&args.id);
-    let display_source = args.source_hint.as_deref().unwrap_or("");
-
-    let profile = if args.is_update {
-        if let Some(existing) = crate::persona::load_persona_profile(data_dir, &args.id) {
-            if crate::persona_builder::profile_has_content(&existing) {
-                let merge_prompt =
-                    crate::persona_builder::build_merge_prompt_from_profile(data_dir, &existing, text)?;
-                emit_persona_import_progress(
-                    app,
-                    "preprocess",
-                    "正在合并现有资料与新参考文本…",
-                    progress.step(1),
-                    progress.total,
-                );
-                let raw = run_thinking_prompt(
-                    st,
-                    merge_prompt,
-                    crate::ai::adapters::ChatOptions::preprocess(),
-                )
-                .await?;
-                crate::persona_builder::parse_profile_json_with_repair(&raw, true)?
-            } else {
-                preprocess_reference_text(
-                    app,
-                    st,
-                    data_dir,
-                    display_name,
-                    display_source,
-                    text,
-                    from_wiki,
-                    &progress,
-                )
-                .await?
-            }
-        } else {
-            preprocess_reference_text(
-                app,
-                st,
-                data_dir,
-                display_name,
-                display_source,
-                text,
-                from_wiki,
-                &progress,
-            )
-            .await?
-        }
-    } else {
-        preprocess_reference_text(
-            app,
-            st,
-            data_dir,
-            display_name,
-            display_source,
-            text,
-            from_wiki,
-            &progress,
-        )
-        .await?
-    };
-
-    emit_persona_import_progress(
-        app,
-        "skill",
-        "正在生成 Skill 文档…",
-        progress.step(2),
-        progress.total,
-    );
-
-    let skill_prompt =
-        crate::persona_builder::build_skill_prompt_from_profile(data_dir, &profile)?;
-    let raw_skill = run_thinking_prompt(
-        st,
-        skill_prompt,
-        crate::ai::adapters::ChatOptions::skill_generate(),
-    )
-    .await?;
-    let skill_md = crate::persona_builder::strip_md_fence(&raw_skill);
-
-    emit_persona_import_progress(
-        app,
-        "save",
-        "正在写入人设文件…",
-        progress.step(3),
-        progress.total,
-    );
-
-    let meta = crate::persona_builder::save_processed_persona(
-        data_dir,
-        &args.id,
-        &profile,
-        &skill_md,
-        args.name_hint.as_deref(),
-        args.source_hint.as_deref(),
-    )?;
-
-    Ok(crate::persona::PersonaImportResult {
-        imported_ids: vec![args.id.clone()],
-        message: if args.is_update {
-            format!("已解析参考文本并更新人设「{}」", meta.name)
-        } else {
-            format!("已解析参考文本并创建人设「{}」", meta.name)
-        },
-    })
 }
 
 #[tauri::command]
@@ -1180,7 +1171,207 @@ pub async fn ai_test_persona(
     }
 }
 
-// ── 人设工坊（角色资料 → Skill）──
+// ── 人物（性格 + 皮肤 → 模型）──
+
+#[tauri::command]
+pub async fn characters_list(
+    st: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::character::CharacterInfo>, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    Ok(crate::character::list_characters(st.data_dir(), &db))
+}
+
+#[tauri::command]
+pub async fn characters_list_brief(
+    st: State<'_, Arc<AppState>>,
+) -> Result<Vec<crate::character::CharacterBrief>, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    Ok(crate::character::list_characters_brief(st.data_dir(), &db))
+}
+
+#[tauri::command]
+pub async fn characters_list_page(
+    st: State<'_, Arc<AppState>>,
+    offset: usize,
+    limit: usize,
+    query: Option<String>,
+    favorites_only: Option<bool>,
+    favorite_ids: Option<Vec<String>>,
+) -> Result<crate::character::CharacterListPage, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    Ok(crate::character::list_characters_page(
+        st.data_dir(),
+        &db,
+        offset,
+        limit,
+        query.as_deref(),
+        favorites_only.unwrap_or(false),
+        favorite_ids.as_deref().unwrap_or(&[]),
+    ))
+}
+
+#[tauri::command]
+pub async fn characters_remove_skin(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+    skin_id: String,
+    delete_model_files: Option<bool>,
+) -> Result<(), String> {
+    let data_dir = st.data_dir();
+    let reload_model = {
+        let db = crate::db::lock_conn(&st.db)?;
+        crate::character::remove_character_skin(
+            data_dir,
+            &db,
+            &character_id,
+            &skin_id,
+            delete_model_files.unwrap_or(true),
+        )?
+    };
+    if let Some(model_id) = reload_model {
+        crate::pet::set_active_model(&app, st.inner().clone(), &model_id)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn characters_cache_avatar(
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+) -> Result<Option<String>, String> {
+    let data_dir = st.data_dir();
+    let meta = crate::character::find_character_meta(data_dir, &character_id)?;
+    crate::character::avatar::ensure_avatar_cached(data_dir, &character_id, &meta.name).await
+}
+
+#[tauri::command]
+pub async fn characters_cache_avatars_batch(
+    st: State<'_, Arc<AppState>>,
+    character_ids: Vec<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let data_dir = st.data_dir();
+    Ok(crate::character::avatar::ensure_avatars_cached_batch(data_dir, &character_ids).await)
+}
+
+#[tauri::command]
+pub fn characters_read_avatar(
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+) -> Result<Option<String>, String> {
+    crate::character::avatar::read_avatar_base64(st.data_dir(), &character_id)
+}
+
+#[tauri::command]
+pub async fn characters_skins_page(
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+    offset: usize,
+    limit: usize,
+) -> Result<crate::character::CharacterSkinsPage, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    crate::character::list_character_skins_page(st.data_dir(), &db, &character_id, offset, limit)
+}
+
+#[tauri::command]
+pub async fn characters_get_detail(
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+) -> Result<crate::character::CharacterDetail, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    crate::character::get_character_detail(st.data_dir(), &db, &character_id)
+}
+
+#[tauri::command]
+pub async fn characters_set_active(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+) -> Result<(), String> {
+    let data_dir = st.data_dir();
+    let model_id = {
+        let db = crate::db::lock_conn(&st.db)?;
+        let manifest = crate::persona::load_manifest(data_dir);
+        crate::character::set_active_character(data_dir, &db, &manifest, &character_id)?;
+        crate::pet::models::active_model_id(&db)
+    };
+    crate::pet::set_active_model(&app, st.inner().clone(), &model_id)
+}
+
+#[tauri::command]
+pub async fn characters_set_skin(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+    skin_id: String,
+) -> Result<(), String> {
+    let data_dir = st.data_dir();
+    let model_id = {
+        let db = crate::db::lock_conn(&st.db)?;
+        crate::character::select_character_skin(data_dir, &db, &character_id, &skin_id)?
+    };
+    crate::pet::set_active_model(&app, st.inner().clone(), &model_id)
+}
+
+#[tauri::command]
+pub async fn characters_import_avatars_batch(
+    st: State<'_, Arc<AppState>>,
+    limit: Option<usize>,
+    skip_existing: Option<bool>,
+    sync_tags: Option<bool>,
+) -> Result<crate::character::avatar::AvatarImportResult, String> {
+    let data_dir = st.data_dir().to_path_buf();
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    crate::character::avatar::run_avatar_import_default(
+        &data_dir,
+        limit,
+        skip_existing.unwrap_or(true),
+        sync_tags.unwrap_or(true),
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn characters_import_live2d(
+    st: State<'_, Arc<AppState>>,
+    character_id: String,
+    plan_path: Option<String>,
+) -> Result<crate::live2d_import::Live2dImportResult, String> {
+    let data_dir = st.data_dir();
+    let plan = crate::live2d_import::resolve_plan_path(
+        plan_path.as_deref().map(std::path::Path::new),
+    )?;
+    let live2d_root = crate::live2d_import::resolve_live2d_root();
+    crate::live2d_import::run_live2d_import_for_character(
+        data_dir,
+        &plan,
+        &live2d_root,
+        &character_id,
+    )
+}
+
+#[tauri::command]
+pub async fn live2d_import_batch(
+    st: State<'_, Arc<AppState>>,
+    limit: Option<usize>,
+    plan_path: Option<String>,
+) -> Result<crate::live2d_import::Live2dImportResult, String> {
+    let data_dir = st.data_dir().to_path_buf();
+    let plan = crate::live2d_import::resolve_plan_path(
+        plan_path.as_deref().map(std::path::Path::new),
+    )?;
+    let live2d_root = crate::live2d_import::resolve_live2d_root();
+    let limit = limit.unwrap_or(50).clamp(1, 200);
+    let db = crate::db::lock_conn(&st.db)?;
+    crate::live2d_import::run_live2d_import(
+        &data_dir,
+        &db,
+        &plan,
+        &live2d_root,
+        limit,
+        false,
+    )
+}
 
 #[tauri::command]
 pub async fn character_list(
@@ -1573,9 +1764,7 @@ pub fn pet_get_screen_bounds() -> crate::pet::PetScreenBounds {
 
 #[tauri::command]
 pub fn app_exit(app: tauri::AppHandle, st: State<'_, Arc<AppState>>) {
-    st.stop_flag
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-    let _ = crate::pet::destroy_pet_window(&app);
+    crate::prepare_app_exit(&app, st.inner());
     app.exit(0);
 }
 
@@ -1645,6 +1834,14 @@ pub async fn pet_set_bubble_enabled(
 }
 
 #[tauri::command]
+pub async fn pet_get_model_status(
+    st: State<'_, Arc<AppState>>,
+    model_id: String,
+) -> Result<crate::pet::PetStatusPayload, String> {
+    crate::pet::model_status(st.inner(), &model_id)
+}
+
+#[tauri::command]
 pub async fn pet_get_config(
     st: State<'_, Arc<AppState>>,
 ) -> Result<crate::pet::PetConfigPayload, String> {
@@ -1675,6 +1872,7 @@ pub async fn pet_save_model_settings(
     power_mode: Option<String>,
     scale: Option<f64>,
     remark_interval_sec: Option<i64>,
+    apply_live: Option<bool>,
 ) -> Result<(), String> {
     {
         let db = crate::db::lock_conn(&st.db)?;
@@ -1686,8 +1884,12 @@ pub async fn pet_save_model_settings(
             scale,
             remark_interval_sec,
         )?;
+        let active = crate::pet::models::active_model_id(&db);
+        if apply_live.unwrap_or(true) && active == model_id {
+            drop(db);
+            crate::pet::nudge_pet_animations(&app);
+        }
     }
-    crate::pet::nudge_pet(&app);
     Ok(())
 }
 
@@ -1760,10 +1962,17 @@ pub async fn pet_clear_import_staging(st: State<'_, Arc<AppState>>) -> Result<()
 pub async fn pet_commit_import(
     st: State<'_, Arc<AppState>>,
     name: String,
+    character_id: Option<String>,
 ) -> Result<crate::pet::models::PetModelInfo, String> {
     let info = crate::pet::models::commit_staged_import(st.data_dir(), &name)?;
     let db = crate::db::lock_conn(&st.db)?;
     crate::pet::models::apply_import_action_template(st.data_dir(), &db, &info.id)?;
+    let data_dir = st.data_dir();
+    let target_id = character_id
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| crate::character::active_character_id(&db, data_dir));
+    let set_active = crate::character::active_character_id(&db, data_dir) == target_id;
+    crate::character::attach_model_to_character(data_dir, &db, &target_id, &info, &name, set_active)?;
     Ok(info)
 }
 
@@ -1800,9 +2009,11 @@ pub async fn pet_delete_model(
     st: State<'_, Arc<AppState>>,
     model_id: String,
 ) -> Result<(), String> {
+    let data_dir = st.data_dir();
+    crate::character::purge_model_from_manifest(data_dir, &model_id)?;
     {
         let db = crate::db::lock_conn(&st.db)?;
-        crate::pet::models::delete_model(st.data_dir(), &db, &model_id)?;
+        crate::pet::models::delete_model(data_dir, &db, &model_id)?;
     }
     let active = {
         let db = crate::db::lock_conn(&st.db)?;
@@ -1816,11 +2027,15 @@ pub async fn pet_delete_model(
 
 #[tauri::command]
 pub async fn pet_sync_animations(
+    app: tauri::AppHandle,
     st: State<'_, Arc<AppState>>,
     payload: crate::pet::models::PetSyncAnimationsPayload,
 ) -> Result<crate::pet::models::PetAnimationMeta, String> {
+    let model_id = payload.model_id.clone();
     let db = crate::db::lock_conn(&st.db)?;
-    crate::pet::models::sync_animations(st.data_dir(), &db, &payload)
+    let meta = crate::pet::models::sync_animations(st.data_dir(), &db, &payload)?;
+    let _ = app.emit("pet-model-meta-updated", model_id);
+    Ok(meta)
 }
 
 #[tauri::command]

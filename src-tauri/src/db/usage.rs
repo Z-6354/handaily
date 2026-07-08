@@ -23,12 +23,7 @@ pub fn migrate_usage(db: &Connection) -> Result<(), rusqlite::Error> {
 
 pub fn recover_orphan_sessions(db: &Connection) -> Result<(), rusqlite::Error> {
     for table in ["app_usage_sessions", "companion_sessions"] {
-        db.execute(
-            &format!(
-                "UPDATE {table} SET ended_at = started_at, duration_ms = 0 WHERE ended_at IS NULL"
-            ),
-            [],
-        )?;
+        close_open_session(db, table)?;
     }
     Ok(())
 }
@@ -120,4 +115,39 @@ pub fn app_usage_ms_for_date(db: &Connection, date: NaiveDate) -> Result<u64, ru
 
 pub fn companion_ms_for_date(db: &Connection, date: NaiveDate) -> Result<u64, rusqlite::Error> {
     ms_for_date(db, "companion_sessions", date)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn test_db() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        migrate_usage(&db).unwrap();
+        db
+    }
+
+    #[test]
+    fn recover_orphan_preserves_companion_duration() {
+        let db = test_db();
+        let started = (Local::now() - chrono::Duration::hours(2)).to_rfc3339();
+        db.execute(
+            "INSERT INTO companion_sessions (started_at, ended_at, duration_ms) VALUES (?1, NULL, 0)",
+            [&started],
+        )
+        .unwrap();
+        recover_orphan_sessions(&db).unwrap();
+        let today = Local::now().date_naive();
+        let ms = companion_ms_for_date(&db, today).unwrap();
+        assert!(ms >= 3_600_000, "expected ~2h companion, got {ms}");
+        let open: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM companion_sessions WHERE ended_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open, 0);
+    }
 }

@@ -252,6 +252,8 @@ async fn wait_frontend_ready(max_secs: u64) {
 fn prepare_pet_webview(win: &tauri::WebviewWindow) -> Result<(), String> {
     let _ = win.set_background_color(Some(Color(0, 0, 0, 0)));
     let _ = win.set_always_on_top(true);
+    // 默认穿透，待前端按角色区域再关闭穿透（避免 WebView 就绪前透明窗挡桌面）
+    let _ = win.set_ignore_cursor_events(true);
     Ok(())
 }
 
@@ -263,11 +265,13 @@ pub fn pet_visible(app: &AppHandle) -> bool {
 
 /// 显示主窗口；桌宠 `always_on_top` 会挡住主窗口，需先让桌宠降层。
 pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), String> {
+    let _ = app.emit_to(PET_LABEL, "pet-main-opening", 1500u64);
     let win = app
         .get_webview_window("main")
         .ok_or_else(|| "主窗口不存在".to_string())?;
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         let _ = pet.set_always_on_top(false);
+        let _ = pet.set_ignore_cursor_events(true);
     }
     let _ = win.unminimize();
     win.show().map_err(|e| e.to_string())?;
@@ -281,11 +285,41 @@ pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), Strin
 
 /// 主窗口失焦/隐藏后恢复桌宠置顶（若仍可见）。
 pub fn restore_pet_topmost_if_visible(app: &AppHandle) {
+    let _ = app.emit_to(PET_LABEL, "pet-main-closed", ());
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         if pet.is_visible().unwrap_or(false) {
             let _ = pet.set_always_on_top(true);
+            let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
         }
     }
+}
+
+pub fn model_status(st: &AppState, model_id: &str) -> Result<PetStatusPayload, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    let anim_meta = models::read_animation_meta(st.data_dir(), &db, model_id);
+    let model_name = models::resolve_assets(st.data_dir(), model_id)
+        .map(|a| a.model_name)
+        .unwrap_or_else(|_| model_id.to_string());
+    Ok(PetStatusPayload {
+        enabled: is_enabled(&db),
+        visible: false,
+        power_mode: model_power_mode(&db, &anim_meta),
+        scale: model_scale(&db, &anim_meta),
+        remark_interval_sec: model_remark_interval_sec(&db, &anim_meta),
+        bubble_enabled: is_bubble_enabled(&db),
+        model_id: model_id.to_string(),
+        model_name,
+        animations: anim_meta.animations,
+        idle_animation: anim_meta.idle_animation,
+        click_animation: anim_meta.click_animation,
+        boot_animation: anim_meta.boot_animation,
+        return_idle_animation: anim_meta.return_idle_animation,
+        drag_animation: anim_meta.drag_animation,
+        random_animations: anim_meta.random_animations,
+        random_min_sec: anim_meta.random_min_sec,
+        random_max_sec: anim_meta.random_max_sec,
+        lines: anim_meta.lines,
+    })
 }
 
 pub fn status(app: &AppHandle, st: &AppState) -> Result<PetStatusPayload, String> {
@@ -554,14 +588,32 @@ pub fn destroy_pet_window(app: &AppHandle) -> Result<(), String> {
         win.close().map_err(|e| e.to_string())?;
         wait_pet_window_closed(app, Duration::from_millis(2000))?;
     }
+    reset_pet_runtime_state(app);
+    Ok(())
+}
+
+/// 应用退出：快速销毁桌宠窗，避免透明置顶窗残留导致桌面无法点击
+pub fn destroy_pet_window_for_exit(app: &AppHandle) {
+    if let Some(win) = app.get_webview_window(PET_LABEL) {
+        let _ = win.set_ignore_cursor_events(true);
+        let _ = win.destroy();
+        let _ = wait_pet_window_closed(app, Duration::from_millis(500));
+        if app.get_webview_window(PET_LABEL).is_some() {
+            crate::log::warn("桌宠窗口退出时未能及时销毁");
+        }
+    }
+    reset_pet_runtime_state(app);
+}
+
+fn reset_pet_runtime_state(app: &AppHandle) {
     if let Some(rt) = app.try_state::<PetRuntimeState>() {
         rt.position_guard_attached
             .store(false, Ordering::SeqCst);
         rt.page_load_finished.store(false, Ordering::Release);
         rt.page_load_count.store(0, Ordering::Release);
         rt.spine_ready.store(false, Ordering::Release);
+        rt.fullscreen_suppressed.store(false, Ordering::Relaxed);
     }
-    Ok(())
 }
 
 fn wait_pet_window_closed(app: &AppHandle, timeout: Duration) -> Result<(), String> {
@@ -612,6 +664,7 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     } else {
         schedule_pet_resume_after_show(app);
     }
+    let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
     Ok(())
 }
 
@@ -653,6 +706,7 @@ pub fn clear_spine_ready(app: &AppHandle) {
 
 pub fn resume_pet(app: &AppHandle) {
     let _ = app.emit_to(PET_LABEL, "pet-resume", ());
+    let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
 }
 
 fn schedule_pet_reload_after_show(app: &AppHandle) {
@@ -661,8 +715,8 @@ fn schedule_pet_reload_after_show(app: &AppHandle) {
         if !wait_pet_page_ready(&app, Duration::from_secs(20)).await {
             crate::log::info("桌宠: pet.html 加载超时，仍尝试初始化");
         }
-        // 可见后多等几帧，避免登录自启时 WebView 合成未就绪即组装 Spine
-        tokio::time::sleep(Duration::from_millis(180)).await;
+        // 可见后短暂等待 WebView 合成就绪，再初始化 Spine
+        tokio::time::sleep(Duration::from_millis(80)).await;
         if app
             .get_webview_window(PET_LABEL)
             .and_then(|w| w.is_visible().ok())
@@ -697,6 +751,7 @@ pub fn hide_pet(app: &AppHandle, destroy: bool) -> Result<(), String> {
     if destroy {
         destroy_pet_window(app)
     } else if let Some(win) = app.get_webview_window(PET_LABEL) {
+        let _ = win.set_ignore_cursor_events(true);
         win.hide().map_err(|e| e.to_string())
     } else {
         Ok(())
@@ -737,10 +792,10 @@ pub struct PetPreviewAnimationPayload {
     pub r#loop: bool,
 }
 
-/// 设置页点击动作名时，在桌宠窗口演示播放
+/// 设置页点击动作名时，在桌宠窗口演示播放（不强行 show，避免透明窗挡桌面）
 pub fn preview_animation(
     app: &AppHandle,
-    st: &AppState,
+    _st: &AppState,
     animation: &str,
     loop_anim: bool,
 ) -> Result<(), String> {
@@ -748,11 +803,8 @@ pub fn preview_animation(
     if name.is_empty() {
         return Err("动作名不能为空".into());
     }
-    ensure_pet_window(app, st)?;
-    if let Some(win) = app.get_webview_window(PET_LABEL) {
-        let _ = win.show();
-        let _ = win.unminimize();
-        let _ = win.set_focus();
+    if !pet_visible(app) {
+        return Ok(());
     }
     let _ = app.emit_to(
         PET_LABEL,
@@ -797,6 +849,7 @@ pub fn set_active_model(app: &AppHandle, st: Arc<AppState>, model_id: &str) -> R
     }
     let db = crate::db::lock_conn(&st.db)?;
     models::set_active_model_id(&db, &assets.model_id)?;
+    crate::character::sync_from_model(data_dir, &db, &assets.model_id);
     let enabled = is_enabled(&db);
     drop(db);
     if enabled {
@@ -843,9 +896,9 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
         wait_frontend_ready(45).await;
 
         let boot_delay = if crate::system::autostart::is_tray_launch() {
-            Duration::from_millis(1200)
+            Duration::from_millis(900)
         } else {
-            Duration::from_millis(400)
+            Duration::from_millis(250)
         };
         tokio::time::sleep(boot_delay).await;
         for attempt in 0..30 {
@@ -1078,12 +1131,14 @@ pub fn emit_remark(
     if !pet_visible(app) {
         if let Some(rt) = app.try_state::<PetRuntimeState>() {
             if rt.fullscreen_suppressed.load(Ordering::Relaxed) {
-                rt.fullscreen_suppressed.store(false, Ordering::Relaxed);
-                let _ = show_pet(app, st);
+                return;
             }
+            let _ = show_pet(app, st);
         }
     }
-    let _ = ensure_pet_window(app, st);
+    if !pet_visible(app) {
+        return;
+    }
 
     let _ = app.emit_to(
         PET_LABEL,

@@ -15,7 +15,7 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/xiaohan-daily/**"]
+        "scope": ["$APPDATA/xiaohan-daily/**/*"]
       }
     },
     "windows": [
@@ -26,7 +26,6 @@
         "height": 640,
         "minWidth": 720,
         "minHeight": 480,
-        "maximized": true,
         "visible": false,
         "resizable": true,
         "center": true

@@ -134,9 +134,7 @@ export function TimelineView({ active }: TimelineViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [pendingDescribe, setPendingDescribe] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<Filter>("today");
-  const [copied, setCopied] = useState(false);
   const [describeError, setDescribeError] = useState<string | null>(null);
-  const [logsPath, setLogsPath] = useState("");
   const [initialized, setInitialized] = useState(false);
   const [aiReady, setAiReady] = useState(false);
   const [aiHint, setAiHint] = useState("");
@@ -176,19 +174,6 @@ export function TimelineView({ active }: TimelineViewProps) {
     }
   };
 
-  const refreshLogsPath = async () => {
-    try {
-      setLogsPath(await xiaohan.getTimelineAiLogsPath());
-    } catch {
-      try {
-        const dbPath = await xiaohan.getDataPath();
-        setLogsPath(dbPath.replace(/[/\\]xiaohan\.sqlite$/i, "/timeline-ai").replace(/\\/g, "/"));
-      } catch {
-        setLogsPath("");
-      }
-    }
-  };
-
   const applyDescribeResult = useCallback(
     (entries: TimelineAiEntry[], gen: number, clearAll: boolean) => {
       if (entries.length > 0) {
@@ -211,10 +196,6 @@ export function TimelineView({ active }: TimelineViewProps) {
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
-
-  useEffect(() => {
-    refreshLogsPath();
-  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -283,7 +264,6 @@ export function TimelineView({ active }: TimelineViewProps) {
       setPendingDescribe(new Set(pending));
 
       if (pending.length === 0) {
-        await refreshLogsPath();
         return;
       }
 
@@ -292,7 +272,6 @@ export function TimelineView({ active }: TimelineViewProps) {
         applyDescribeResult(desc, gen, true);
         if (gen === loadGenRef.current) {
           setDescribeError(null);
-          await refreshLogsPath();
         }
       } catch (e) {
         if (gen === loadGenRef.current) {
@@ -359,20 +338,6 @@ export function TimelineView({ active }: TimelineViewProps) {
     [enriched],
   );
 
-  const copyLog = async () => {
-    const lines = enriched.map(
-      ({ seg, category, text }) =>
-        `- ${formatTimeRange(seg)}【${category}】${text}`,
-    );
-    try {
-      await navigator.clipboard.writeText(lines.join("\n"));
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* ignore */
-    }
-  };
-
   return (
     <div className="page-stack timeline-page">
       <div className="panel timeline-panel">
@@ -382,9 +347,6 @@ export function TimelineView({ active }: TimelineViewProps) {
             活动时间线
           </div>
           <div className="timeline-toolbar">
-            <button type="button" className="btn-link" onClick={copyLog}>
-              {copied ? "已复制" : "复制小记到剪切板"}
-            </button>
             <div className="timeline-filters">
               {(
                 [
@@ -422,11 +384,6 @@ export function TimelineView({ active }: TimelineViewProps) {
         )}
         {describeError && (
           <div className="error">简介生成：{describeError}</div>
-        )}
-        {logsPath && (
-          <p className="settings-field-hint" style={{ marginBottom: 12 }}>
-            AI 原数据与回复 JSON：<code>{logsPath}</code>
-          </p>
         )}
 
         {error && <div className="error">{error}</div>}

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "default_id": "cheshire",
+  "characters": [
+    {
+      "id": "cheshire",
+      "name": "柴郡",
+      "source": "碧蓝航线",
+      "description": "皇家阵营的重巡洋舰，不知为何穿着女仆装，有时会自顾自地打扫和泡厨房。性格阳光黏人，对指挥官（主人/亲爱的）抱有热烈的爱意",
+      "persona_id": "cheshire",
+      "skins": [
+        { "id": "default", "name": "默认", "model_id": "chaijun", "default": true }
+      ]
+    },
+    {
+      "id": "edu",
+      "name": "恶毒",
+      "source": "碧蓝航线 BWIKI",
+      "description": "恶毒之刃、白色萝莉 性格 干物妹 关键词 高梨米夏（声优人设）、恶毒的表情.jpg、biu~你死了 持有物 恶毒之刃T0 邪しき剣、魔剑 发色 白 瞳色 蓝灰",
+      "persona_id": "edu",
+      "skins": [
+        { "id": "default", "name": "默认", "model_id": "edu", "default": true }
+      ]
+    },
+    {
+      "id": "wushiling",
+      "name": "五十铃",
+      "source": "碧蓝航线 BWIKI",
+      "description": "和我搭档过的可都是些大人物呢~指挥官也要努力成为一名大人物哟~",
+      "persona_id": "wushiling",
+      "skins": [
+        { "id": "default", "name": "默认", "model_id": "wushiling", "default": true }
+      ]
+    },
+    {
+      "id": "qiye",
+      "name": "企业",
+      "source": "碧蓝航线 BWIKI",
+      "description": "传奇战神、2017年国服舰船人气投票冠军、西 川 贵 教 性格 坚强、进取 关键词 战斗、复读姬（动画） 持有物 弓 发色 银 瞳色 紫",
+      "persona_id": "qiye",
+      "skins": [
+        { "id": "default", "name": "默认", "model_id": "qiye", "default": true }
+      ]
+    },
+    {
+      "id": "tashigan",
+      "name": "塔什干",
+      "source": "碧蓝航线 BWIKI",
+      "description": "天蓝色的巡洋舰、Trashkent 性格 冷娇、高飞车 关键词 同志酱❤、Ура！、揍扁你！ 持有物 冰妖精的温柔T0 冰之妖精（召唤物） 发色 丁香紫 瞳色 冰蓝",
+      "persona_id": "tashigan",
+      "skins": [
+        { "id": "default", "name": "默认", "model_id": "tashigan", "default": true }
+      ]
+    }
+  ]
+}

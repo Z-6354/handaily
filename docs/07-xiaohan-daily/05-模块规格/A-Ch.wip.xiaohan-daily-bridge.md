@@ -52,6 +52,6 @@ ForegroundPoller (2s)
 
 ## 退出与崩溃兜底
 
-- 启动：`UPDATE ... SET ended_at = started_at WHERE ended_at IS NULL`
+- 启动：闭合孤儿 segment/会话并**保留已计时长**（`recover_orphan_*` + `close_open_session`）
 - 运行：60s checkpoint flush open segment
 - 退出：`stop_flag` → join 后台线程 → flush + WAL checkpoint

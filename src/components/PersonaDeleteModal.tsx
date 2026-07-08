@@ -56,9 +56,10 @@ export function PersonaDeleteModal({ open, target, deleting, onClose, onConfirm 
             {target.source ? `（${target.source}）` : ""} 吗？
           </p>
           <ul className="persona-delete-modal-list">
-            <li>Skill 文档与结构化资料将被永久删除</li>
+            <li>Skill 文档、结构化资料与关联皮肤将被永久删除</li>
+            <li>未被他处引用的 Live2D 模型文件将一并删除</li>
             <li>此操作不可恢复</li>
-            {target.active && <li>当前使用中，删除后将自动切回内置柴郡</li>}
+            {target.active && <li>当前使用中，删除后将自动切回默认人物</li>}
           </ul>
         </div>
 

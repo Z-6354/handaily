@@ -15,6 +15,13 @@
     "tauri:pack": "tauri build --debug",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "blhx:import": "cargo run --manifest-path src-tauri/Cargo.toml --bin blhx_import --",
+    "live2d:import": "cargo run --manifest-path src-tauri/Cargo.toml --bin live2d_import --",
+    "avatar:import": "cargo run --manifest-path src-tauri/Cargo.toml --bin avatar_import --",
+    "roster:check": "cargo run --manifest-path src-tauri/Cargo.toml --bin roster_check",
+    "clean": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/clean-project.ps1",
+    "clean:debug": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/clean-project.ps1 -Debug",
+    "clean:all": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/clean-project.ps1 -All",
     "tauri:build:debug": "tauri build --debug --no-bundle"
   },
   "dependencies": {
@@ -22,6 +29,7 @@
     "@pixi-spine/runtime-3.8": "^4.0.6",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-shell": "^2.0.0",
+    "pinyin-pro": "^3.28.1",
     "pixi.js": "^7.4.3",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

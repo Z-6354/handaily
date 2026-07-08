@@ -5,9 +5,12 @@ node_modules/
 dist/
 target/
 src-tauri/target/
+*.tsbuildinfo
+vite.config.d.ts
 
 # Logs & temp
 *.log
+live2d-import.log
 tmp-*
 *.tmp
 AzurLaneSD-master/
@@ -31,3 +34,6 @@ src-tauri/gen/schemas/
 
 # Local data (runtime, not source)
 *.local
+
+# Local Live2D/Spine model packs (import via app or live2d_import)
+live2d/

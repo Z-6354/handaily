@@ -8,7 +8,7 @@
 |------|------|
 | [../README.md](../README.md) | 安装、开发、打包命令 |
 | [questions/07-功能板块与代码结构总览-20260702.md](questions/07-功能板块与代码结构总览-20260702.md) | **架构总览**（模块表、线程、页面） |
-| [questions/121-src与src-tauri及release构建目录说明-20260706.md](questions/121-src与src-tauri及release构建目录说明-20260706.md) | `src` / `src-tauri` / 构建产物目录 |
+| [questions/121-src与src-tauri及release构建目录说明-20260706.md](questions/121-src与src-tauri及release构建目录说明-20260706.md) | `src` / `src-tauri` / `target/release` 目录 |
 | [questions/122-构建统一release-fast单配置-20260706.md](questions/122-构建统一release-fast单配置-20260706.md) | 打包与 release 配置 |
 | [01-项目总览/04-代码规范/03-模块索引.md](01-项目总览/04-代码规范/03-模块索引.md) | 模块 ID 与规格链接 |
 
@@ -28,7 +28,7 @@ HANDAILY/
 
 ## 问答归档
 
-`docs/questions/` 存放开发过程中的技术 Q&A（当前 **122** 条），完整索引见 [questions/README.md](questions/README.md)。
+`docs/questions/` 存放开发过程中的技术 Q&A（当前 **123** 条），完整索引见 [questions/README.md](questions/README.md)。
 
 按主题快速跳转：
 

@@ -22,11 +22,15 @@
 //! - `ipc` — `#[tauri::command]` 处理器
 //! - `state` — 跨线程共享的 `AppState`（DB + 聚合缓存 + 停机标志）
 
+pub mod agent_http;
+pub mod manifest_lock;
 pub mod analysis;
 pub mod ai;
 pub mod db;
 pub mod ipc;
+pub mod live2d_import;
 pub mod log;
+pub mod character;
 pub mod persona;
 pub mod persona_builder;
 pub mod pet;
@@ -45,6 +49,7 @@ use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Size, We
 
 /// 主窗口首次显示前在隐藏状态下铺满工作区，避免先露出 960×640 再播放最大化动画。
 fn prepare_main_window_for_first_show(win: &WebviewWindow) {
+    let _ = win.unmaximize();
     if let Ok(Some(monitor)) = win.current_monitor() {
         let area = monitor.work_area();
         let _ = win.set_position(Position::Physical(PhysicalPosition::new(
@@ -115,6 +120,11 @@ pub fn run() {
             // 5. 时间线 AI：后台自动补全今日未缓存简介（不依赖打开时间线页）
             crate::timeline::scheduler::spawn(app.handle().clone(), app_state.clone());
 
+            // 6. 人物头像：启动后后台分批下载到本地，人物页只读缓存
+            crate::character::avatar::spawn_sync_on_startup(app.handle().clone(), app_state.clone());
+
+            crate::agent_http::restore_on_startup(app_state.clone());
+
             // 手动启动显示主窗口；--tray 登录自启动仅托盘常驻
             if let Some(win) = app.get_webview_window("main") {
                 prepare_main_window_for_first_show(&win);
@@ -132,6 +142,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::commands::app_ping,
+            ipc::commands::app_memory_stats,
             ipc::commands::app_exit,
             ipc::commands::app_get_data_path,
             ipc::commands::app_get_prompts_path,
@@ -172,8 +183,28 @@ pub fn run() {
             ipc::commands::persona_import,
             ipc::commands::persona_import_text,
             ipc::commands::persona_import_wiki,
+            ipc::commands::persona_import_blhx_local,
+            ipc::commands::persona_regenerate_profile,
+            ipc::commands::persona_batch_regenerate_profiles,
+            ipc::commands::agent_get_status,
+            ipc::commands::agent_set_enabled,
             ipc::commands::persona_update,
             ipc::commands::persona_delete,
+            ipc::commands::characters_list,
+            ipc::commands::characters_list_brief,
+            ipc::commands::characters_list_page,
+            ipc::commands::characters_remove_skin,
+            ipc::commands::characters_import_avatars_batch,
+            ipc::commands::characters_cache_avatar,
+            ipc::commands::characters_cache_avatars_batch,
+            ipc::commands::characters_read_avatar,
+            ipc::commands::characters_skins_page,
+            ipc::commands::characters_import_live2d,
+            ipc::commands::live2d_import_batch,
+            ipc::commands::characters_get_detail,
+            ipc::commands::characters_set_active,
+            ipc::commands::characters_set_skin,
+            ipc::commands::character_import_wiki,
             ipc::commands::app_get_personas_path,
             ipc::commands::ai_test_persona,
             ipc::commands::character_list,
@@ -211,7 +242,8 @@ pub fn run() {
            ipc::commands::pet_clear_spine_ready,
            ipc::commands::pet_get_bubble_enabled,
            ipc::commands::pet_set_bubble_enabled,
-           ipc::commands::pet_get_config,
+            ipc::commands::pet_get_model_status,
+            ipc::commands::pet_get_config,
             ipc::commands::pet_list_models,
             ipc::commands::pet_set_model,
             ipc::commands::pet_save_model_settings,
@@ -269,6 +301,17 @@ pub mod tray;
 ///
 /// Tauri 不会 join 后台线程（detached），进程退出时 OS 直接终止它。
 /// 所以必须在 ExitRequested 时设 stop_flag，在 Exit 前 join + flush。
+pub(crate) fn prepare_app_exit(app: &tauri::AppHandle, st: &Arc<state::AppState>) {
+    st.stop_flag
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::agent_http::stop_on_exit();
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    crate::tracker::writer::flush_on_exit(st);
+    crate::pet::destroy_pet_window_for_exit(app);
+}
+
 fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
     use tauri::RunEvent;
     match event {
@@ -279,12 +322,12 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
                 return;
             }
             if let Some(st) = app.try_state::<Arc<state::AppState>>() {
-                st.stop_flag
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                prepare_app_exit(app, &st);
             }
         }
         RunEvent::Exit => {
             if let Some(st) = app.try_state::<Arc<state::AppState>>() {
+                // prepare_app_exit 已 flush；此处仅 join 后台线程
                 st.join_ai_workers();
             }
             // join 后台线程（后台线程在 stop_flag=true 时会跳出循环并 flush_on_exit）

@@ -85,10 +85,8 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             "quit" => {
                 if let Some(st) = app.try_state::<Arc<AppState>>() {
-                    st.stop_flag
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    crate::prepare_app_exit(app, &st);
                 }
-                let _ = crate::pet::destroy_pet_window(app);
                 app.exit(0);
             }
             _ => {}
