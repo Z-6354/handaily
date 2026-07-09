@@ -119,15 +119,15 @@ pub fn run() {
             }
 
             // 5. 时间线 AI：后台自动补全今日未缓存简介（不依赖打开时间线页）
-            crate::timeline::scheduler::spawn(app.handle().clone(), app_state.clone());
+            // [live2d-only] crate::timeline::scheduler::spawn(app.handle().clone(), app_state.clone());
 
             // 6. 人物头像：启动后后台分批下载到本地，人物页只读缓存
             crate::character::avatar::spawn_sync_on_startup(app.handle().clone(), app_state.clone());
 
-            crate::agent_http::restore_on_startup(app_state.clone());
+            // [live2d-only] crate::agent_http::restore_on_startup(app_state.clone());
 
-            let wechat_rt = crate::wechat::on_startup(app_state.clone());
-            app.manage(wechat_rt);
+            // [live2d-only] let wechat_rt = crate::wechat::on_startup(app_state.clone());
+            // [live2d-only] app.manage(wechat_rt);
 
             // 手动启动显示主窗口；--tray 登录自启动仅托盘常驻
             if let Some(win) = app.get_webview_window("main") {

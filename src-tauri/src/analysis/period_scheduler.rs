@@ -93,7 +93,8 @@ impl PeriodScheduler {
         session_end_iso: &str,
         duration_ms: u64,
     ) {
-        if duration_ms < LONG_SESSION_MS || prev_key.is_empty() || prev_key == "__idle__" {
+        // [live2d-only] 时段 AI 总结已停用
+        if true || duration_ms < LONG_SESSION_MS || prev_key.is_empty() || prev_key == "__idle__" {
             return;
         }
         let job = PeriodJob {

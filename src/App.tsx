@@ -13,28 +13,12 @@ import { TodayDashboard } from "./pages/TodayDashboard";
 import { HelpGuideGrid } from "./components/HelpGuideGrid";
 import { PageHeader } from "./components/PageHeader";
 import {
-  IconChart,
-  IconTimeline,
   IconSettings,
-  IconVault,
-  IconReport,
-  IconHeatmap,
-  IconApps,
-  IconHistory,
-  IconAgent,
   IconPersona,
   IconHelp,
   IconPerformance,
 } from "./components/Icons";
 
-function IconWechat() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
-      <path d="M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM16 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" />
-      <path d="M4 14c1.5 2.5 4 4 8 4 1.2 0 2.3-.2 3.3-.6L20 19l-1.2-3.8C20.5 13.6 21 12.3 21 11c0-4.4-3.6-8-9-8S3 6.6 3 11s3.6 8 9 8" />
-    </svg>
-  );
-}
 
 const TimelineView = lazy(() =>
   import("./pages/TimelineView").then((m) => ({ default: m.TimelineView })),
@@ -114,21 +98,13 @@ const PAGE_META: Record<Page, { title: string; subtitle?: string }> = {
   help: { title: "帮助", subtitle: "快速认识小寒日报" },
 };
 
+// [live2d-only] 纯桌宠分支：仅保留人物/模型相关导航
 const MAIN_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
-  { id: "today", label: "今日工作", icon: <IconChart /> },
-  { id: "report", label: "生成报告", icon: <IconReport /> },
-  { id: "timeline", label: "工作时间线", icon: <IconTimeline /> },
-  { id: "heatmap", label: "时段热力图", icon: <IconHeatmap /> },
-  { id: "apps", label: "应用记录", icon: <IconApps /> },
-  { id: "history", label: "历史报告", icon: <IconHistory /> },
-  { id: "agent", label: "接入 Agent", icon: <IconAgent /> },
   { id: "persona", label: "人物", icon: <IconPersona /> },
 ];
 
 const MORE_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
-  { id: "wechat", label: "微信绑定", icon: <IconWechat /> },
   { id: "performance", label: "性能检测", icon: <IconPerformance /> },
-  { id: "vault", label: "密码本", icon: <IconVault /> },
   { id: "settings", label: "设置", icon: <IconSettings /> },
   { id: "help", label: "帮助", icon: <IconHelp /> },
 ];
@@ -140,7 +116,7 @@ const LIGHT_INTERVAL_MS = 5000;
 const HEAVY_INTERVAL_MS = 30000;
 
 export default function App() {
-  const [page, setPage] = useState<Page>("today");
+  const [page, setPage] = useState<Page>("persona");
   const [overview, setOverview] = useState<OverviewPayload | null>(null);
   const [breakdown, setBreakdown] = useState<AppBreakdownItem[]>([]);
   const [heatmap, setHeatmap] = useState<HeatmapDay[]>([]);

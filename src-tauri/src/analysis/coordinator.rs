@@ -39,8 +39,11 @@ impl AnalysisCoordinator {
         }
     }
 
-    pub fn enqueue_segment(&self, segment: Segment) {
-        if segment.is_idle {
+    pub fn enqueue_segment(&self, _segment: Segment) {
+        // [live2d-only] 日报语义分析已停用
+        let _ = &self.tx;
+        let segment = _segment;
+        if true || segment.is_idle {
             return;
         }
         let job = AnalysisJob { segment };
