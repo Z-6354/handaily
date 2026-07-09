@@ -50,6 +50,10 @@ ForegroundPoller (2s)
 | `stats_hourly_activity` | 小时分布 |
 | `stats_timeline` | 时间线分页（唯一走 DB 的查询） |
 
+## 关联模块
+
+- **微信绑定与推送**：见 [`B-Ch.wip.xiaohan-daily-wechat.md`](B-Ch.wip.xiaohan-daily-wechat.md)（iLink ClawBot，入口：更多 → 微信绑定）
+
 ## 退出与崩溃兜底
 
 - 启动：闭合孤儿 segment/会话并**保留已计时长**（`recover_orphan_*` + `close_open_session`）

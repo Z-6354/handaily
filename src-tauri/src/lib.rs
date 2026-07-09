@@ -42,6 +42,7 @@ pub mod state;
 pub mod system;
 pub mod tracker;
 pub mod vault;
+pub mod wechat;
 pub mod work_type;
 
 use std::sync::Arc;
@@ -124,6 +125,9 @@ pub fn run() {
             crate::character::avatar::spawn_sync_on_startup(app.handle().clone(), app_state.clone());
 
             crate::agent_http::restore_on_startup(app_state.clone());
+
+            let wechat_rt = crate::wechat::on_startup(app_state.clone());
+            app.manage(wechat_rt);
 
             // 手动启动显示主窗口；--tray 登录自启动仅托盘常驻
             if let Some(win) = app.get_webview_window("main") {
@@ -270,6 +274,14 @@ pub fn run() {
             ipc::commands::pet_save_window_size,
             ipc::commands::pet_save_layout,
             ipc::commands::system_get_performance,
+            ipc::commands::wechat_get_status,
+            ipc::commands::wechat_start_qr,
+            ipc::commands::wechat_poll_qr,
+            ipc::commands::wechat_logout,
+            ipc::commands::wechat_prepare_rebind,
+            ipc::commands::wechat_set_push_enabled,
+            ipc::commands::wechat_test_send,
+            ipc::commands::wechat_import_hanagent,
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -326,6 +338,9 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             }
         }
         RunEvent::Exit => {
+            if let Some(rt) = app.try_state::<crate::wechat::WechatRuntime>() {
+                rt.join_all();
+            }
             if let Some(st) = app.try_state::<Arc<state::AppState>>() {
                 // prepare_app_exit 已 flush；此处仅 join 后台线程
                 st.join_ai_workers();

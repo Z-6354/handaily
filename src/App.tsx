@@ -27,6 +27,15 @@ import {
   IconPerformance,
 } from "./components/Icons";
 
+function IconWechat() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round">
+      <path d="M8 10a2 2 0 1 0 0-4 2 2 0 0 0 0 4zM16 11a2 2 0 1 0 0-4 2 2 0 0 0 0 4z" />
+      <path d="M4 14c1.5 2.5 4 4 8 4 1.2 0 2.3-.2 3.3-.6L20 19l-1.2-3.8C20.5 13.6 21 12.3 21 11c0-4.4-3.6-8-9-8S3 6.6 3 11s3.6 8 9 8" />
+    </svg>
+  );
+}
+
 const TimelineView = lazy(() =>
   import("./pages/TimelineView").then((m) => ({ default: m.TimelineView })),
 );
@@ -44,6 +53,9 @@ const HistoryReportsPage = lazy(() =>
 );
 const AgentConnectPage = lazy(() =>
   import("./pages/AgentConnectPage").then((m) => ({ default: m.AgentConnectPage })),
+);
+const WeChatBindPage = lazy(() =>
+  import("./pages/WeChatBindPage").then((m) => ({ default: m.WeChatBindPage })),
 );
 const PersonaPanel = lazy(() =>
   import("./pages/PersonaPanel").then((m) => ({ default: m.PersonaPanel })),
@@ -76,6 +88,7 @@ type Page =
   | "apps"
   | "history"
   | "agent"
+  | "wechat"
   | "persona"
   | "vault"
   | "settings"
@@ -90,6 +103,7 @@ const PAGE_META: Record<Page, { title: string; subtitle?: string }> = {
   apps: { title: "应用记录", subtitle: "时间都花在哪些软件上啦" },
   history: { title: "历史报告", subtitle: "以前写好的小记都在这里" },
   agent: { title: "接入 Agent", subtitle: "让别的助手也能读到你的工作记录" },
+  wechat: { title: "微信绑定", subtitle: "扫码绑定 ClawBot，接收启动提醒与日报推送" },
   persona: {
     title: "人物",
     subtitle: "性格、皮肤与桌宠模型统一管理",
@@ -112,6 +126,7 @@ const MAIN_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
 ];
 
 const MORE_NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
+  { id: "wechat", label: "微信绑定", icon: <IconWechat /> },
   { id: "performance", label: "性能检测", icon: <IconPerformance /> },
   { id: "vault", label: "密码本", icon: <IconVault /> },
   { id: "settings", label: "设置", icon: <IconSettings /> },
@@ -338,6 +353,11 @@ export default function App() {
         {page === "agent" && (
           <LazyPage>
             <AgentConnectPage />
+          </LazyPage>
+        )}
+        {page === "wechat" && (
+          <LazyPage>
+            <WeChatBindPage />
           </LazyPage>
         )}
         {page === "persona" && (

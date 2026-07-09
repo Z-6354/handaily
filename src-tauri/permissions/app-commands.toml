@@ -131,4 +131,12 @@ commands.allow = [
   "pet_get_bubble_enabled",
   "pet_set_bubble_enabled",
   "system_get_performance",
+  "wechat_get_status",
+  "wechat_start_qr",
+  "wechat_poll_qr",
+  "wechat_logout",
+  "wechat_prepare_rebind",
+  "wechat_set_push_enabled",
+  "wechat_test_send",
+  "wechat_import_hanagent",
 ]

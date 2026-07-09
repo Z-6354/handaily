@@ -2136,3 +2136,51 @@ pub async fn pet_save_layout(
     let db = crate::db::lock_conn(&st.db)?;
     crate::pet::save_layout(&db, width, height, scale, offset_x, offset_y)
 }
+
+// ── 微信绑定 ──
+
+#[tauri::command]
+pub fn wechat_get_status(st: State<'_, Arc<AppState>>) -> Result<crate::wechat::WechatStatus, String> {
+    crate::wechat::get_status(&st)
+}
+
+#[tauri::command]
+pub async fn wechat_start_qr(st: State<'_, Arc<AppState>>) -> Result<crate::wechat::WechatQrStart, String> {
+    crate::wechat::start_qr_login(&st).await
+}
+
+#[tauri::command]
+pub async fn wechat_poll_qr(
+    st: State<'_, Arc<AppState>>,
+    qrcode_id: String,
+) -> Result<crate::wechat::WechatQrPoll, String> {
+    crate::wechat::poll_qr_login(&st, &qrcode_id).await
+}
+
+#[tauri::command]
+pub fn wechat_logout(st: State<'_, Arc<AppState>>) -> Result<(), String> {
+    crate::wechat::logout(&st)
+}
+
+#[tauri::command]
+pub fn wechat_set_push_enabled(
+    st: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::wechat::set_push_enabled(&st, enabled)
+}
+
+#[tauri::command]
+pub async fn wechat_test_send(st: State<'_, Arc<AppState>>) -> Result<String, String> {
+    crate::wechat::test_send(&st).await
+}
+
+#[tauri::command]
+pub fn wechat_prepare_rebind(st: State<'_, Arc<AppState>>) -> Result<(), String> {
+    crate::wechat::prepare_rebind(&st)
+}
+
+#[tauri::command]
+pub fn wechat_import_hanagent(st: State<'_, Arc<AppState>>) -> Result<bool, String> {
+    crate::wechat::import_from_hanagent(&st)
+}

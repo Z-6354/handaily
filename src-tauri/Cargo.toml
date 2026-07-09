@@ -56,7 +56,8 @@ windows = { version = "0.61", features = [
     "Win32_System_Registry",
 ] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+qrcode = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 notify = "7"

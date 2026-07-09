@@ -75,6 +75,20 @@ export function parseApiError(raw: unknown, context = "操作"): SettingsFeedbac
   }
 
   if (
+    text.includes("ilinkai.weixin.qq.com") ||
+    text.includes("ilink/bot") ||
+    text.includes("轮询二维码") ||
+    text.includes("获取绑定二维码")
+  ) {
+    return {
+      tone: "error",
+      title: "无法连接微信 iLink 服务",
+      detail: stripNoise(apiMessage ?? text),
+      hint: "请确认本机可访问 https://ilinkai.weixin.qq.com，并检查系统代理/VPN。扫码后轮询约 1 分钟，网络波动会自动重试，请勿重复点击。",
+    };
+  }
+
+  if (
     text.includes("连接失败") ||
     text.includes("Ping 连接失败") ||
     text.includes("API 请求失败") ||

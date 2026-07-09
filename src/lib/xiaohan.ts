@@ -490,6 +490,29 @@ export interface AgentStatus {
   base_url: string;
 }
 
+export interface WechatStatus {
+  bound: boolean;
+  push_enabled: boolean;
+  account_id: string | null;
+  user_id: string | null;
+  session_ready: boolean;
+  pending_count: number;
+  needs_rebind: boolean;
+  bind_source: string | null;
+  hint: string;
+}
+
+export interface WechatQrStart {
+  qrcode_id: string;
+  qrcode_data_url: string;
+}
+
+export interface WechatQrPoll {
+  status: string;
+  bound: boolean;
+  retmsg?: string | null;
+}
+
 export interface PersonaImportProgressEvent {
   step: string;
   message: string;
@@ -625,6 +648,16 @@ export const xiaohan = {
   agentGetStatus: () => invoke<AgentStatus>("agent_get_status"),
   agentSetEnabled: (enabled: boolean) =>
     invoke<AgentStatus>("agent_set_enabled", { enabled }),
+  wechatGetStatus: () => invoke<WechatStatus>("wechat_get_status"),
+  wechatStartQr: () => invoke<WechatQrStart>("wechat_start_qr"),
+  wechatPollQr: (qrcodeId: string) =>
+    invoke<WechatQrPoll>("wechat_poll_qr", { qrcodeId }),
+  wechatLogout: () => invoke<void>("wechat_logout"),
+  wechatPrepareRebind: () => invoke<void>("wechat_prepare_rebind"),
+  wechatSetPushEnabled: (enabled: boolean) =>
+    invoke<void>("wechat_set_push_enabled", { enabled }),
+  wechatTestSend: () => invoke<string>("wechat_test_send"),
+  wechatImportHanagent: () => invoke<boolean>("wechat_import_hanagent"),
   personaUpdate: (personaId: string, input: PersonaUpdateInput) =>
     invoke<void>("persona_update", { personaId, input }),
   personaDelete: (personaId: string) => invoke<void>("persona_delete", { personaId }),
