@@ -186,6 +186,15 @@ fn worker_loop(state: Weak<AppState>, rx: Receiver<PeriodJob>) {
 
 fn run_period_job(state: &AppState, job: &PeriodJob) -> Result<(), String> {
     let data_dir = state.data_dir();
+
+    // 区间去重：相同 [start,end] 已有总结则跳过，避免重复 AI 调用
+    {
+        let db = crate::db::lock_conn(&state.db)?;
+        if periods::period_summary_exists(&db, &job.start_iso, &job.end_iso).unwrap_or(false) {
+            return Ok(());
+        }
+    }
+
     let segments = {
         let db = crate::db::lock_conn(&state.db)?;
         periods::query_segments_in_range(&db, &job.start_iso, &job.end_iso)
@@ -194,15 +203,24 @@ fn run_period_job(state: &AppState, job: &PeriodJob) -> Result<(), String> {
     let (work_types, prep) = {
         let db = crate::db::lock_conn(&state.db)?;
         let work_types = crate::work_type::WorkTypeConfig::load(&db);
-        let ai_config = crate::ai::AiConfig::load(&db, data_dir);
-        let prep = crate::analysis::period::prepare_period_chat(
-            &segments,
-            &work_types,
-            &ai_config,
-            &state.vault,
-            &db,
-            data_dir,
-        )?;
+        // 每日 AI 时段总结预算门：超出后仅本地规则归类（prep=None）
+        let ai_daily_budget = crate::db::get_setting(&db, "analysis_ai_period_daily_budget")
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(24);
+        let used_today = periods::count_period_summaries_today(&db).unwrap_or(0);
+        let prep = if ai_daily_budget > 0 && used_today >= ai_daily_budget {
+            None
+        } else {
+            let ai_config = crate::ai::AiConfig::load(&db, data_dir);
+            crate::analysis::period::prepare_period_chat(
+                &segments,
+                &work_types,
+                &ai_config,
+                &state.vault,
+                &db,
+                data_dir,
+            )?
+        };
         (work_types, prep)
     };
 

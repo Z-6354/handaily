@@ -132,6 +132,31 @@ pub fn list_period_summaries_today(
     rows.collect()
 }
 
+/// 区间去重：该 [start,end] 区间是否已有时段总结（避免重复调用 AI）
+pub fn period_summary_exists(
+    db: &Connection,
+    start_iso: &str,
+    end_iso: &str,
+) -> Result<bool, rusqlite::Error> {
+    let count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM period_summaries WHERE started_at = ?1 AND ended_at = ?2",
+        rusqlite::params![start_iso, end_iso],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+/// 今日已生成的时段总结数（用于每日 AI 预算门）
+pub fn count_period_summaries_today(db: &Connection) -> Result<u64, rusqlite::Error> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let count: i64 = db.query_row(
+        "SELECT COUNT(*) FROM period_summaries WHERE substr(started_at, 1, 10) = ?1",
+        rusqlite::params![today],
+        |row| row.get(0),
+    )?;
+    Ok(count as u64)
+}
+
 pub fn list_period_summaries_in_range(
     db: &Connection,
     date_from: &str,

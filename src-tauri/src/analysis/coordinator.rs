@@ -114,6 +114,24 @@ fn process_job(state: &AppState, guard: &SystemGuard, job: AnalysisJob) {
         return;
     }
 
+    // 每日截图/vision 预算门：超出后自动降级为纯文本，不再调用昂贵的 vision AI
+    if settings.screenshot_daily_budget > 0 {
+        let used_today = state
+            .lock_db()
+            .ok()
+            .and_then(|db| crate::db::insights::today_stats(&db).ok())
+            .map(|s| s.screenshot_count)
+            .unwrap_or(0);
+        if used_today >= settings.screenshot_daily_budget {
+            let skip_summary = format!(
+                "已达今日截图预算上限（{}），已跳过截图",
+                settings.screenshot_daily_budget
+            );
+            let _ = persist_insight(state, seg, "text", &text.category, &skip_summary, text.confidence, &now);
+            return;
+        }
+    }
+
     if let Err(reason) = guard.can_screenshot(&settings, &seg.exe_path, &seg.aggregation_key) {
         let skip_summary = format!("文本分析不足，已跳过截图：{reason}");
         let _ = persist_insight(state, seg, "text", &text.category, &skip_summary, text.confidence, &now);

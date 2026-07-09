@@ -23,6 +23,10 @@ pub struct AnalysisSettings {
     pub vision_enabled: bool,
     pub vision_vault_entry_id: Option<i64>,
     pub excluded_exes: Vec<String>,
+    /// 每日截图 + vision 分析预算上限（超出后仅走文本，自动降级）
+    pub screenshot_daily_budget: u64,
+    /// 触发 AI 时段总结的最小会话时长（毫秒），低于此不调用 AI
+    pub session_min_ms_for_ai: u64,
 }
 
 impl Default for AnalysisSettings {
@@ -41,6 +45,8 @@ impl Default for AnalysisSettings {
                 "1password".into(),
                 "bitwarden".into(),
             ],
+            screenshot_daily_budget: 40,
+            session_min_ms_for_ai: 10 * 60 * 1000,
         }
     }
 }
@@ -66,6 +72,8 @@ impl AnalysisSettings {
                 .filter(|x| !x.is_empty())
                 .collect();
         }
+        s.screenshot_daily_budget = get_u64(db, "analysis_screenshot_daily_budget", 40);
+        s.session_min_ms_for_ai = get_u64(db, "analysis_session_min_ms_for_ai", 10 * 60 * 1000);
         s
     }
 }
