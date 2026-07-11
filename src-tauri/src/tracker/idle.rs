@@ -11,8 +11,10 @@ pub const DEFAULT_IDLE_THRESHOLD_SECS: u64 = 90;
 /// 取距上次输入的毫秒数；失败返回 0（保守认为刚有输入）
 pub fn idle_ms() -> u64 {
     unsafe {
-        let mut info = LASTINPUTINFO::default();
-        info.cbSize = std::mem::size_of::<LASTINPUTINFO>() as u32;
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            ..Default::default()
+        };
         if GetLastInputInfo(&mut info).as_bool() {
             let now = windows::Win32::System::SystemInformation::GetTickCount64();
             // GetTickCount64 是 ms，info.dwTime 也是 ms（32位）

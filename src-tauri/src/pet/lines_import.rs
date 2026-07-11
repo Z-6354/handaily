@@ -1,15 +1,11 @@
-//! 台词智能导入：从混杂文本中提取台词，保留原文措辞
+//! [live2d-only] 台词本地解析导入
 
 use std::collections::HashSet;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
-use crate::pet::models::{self, PetRemarkLine};
-use crate::state::AppState;
-
-const STEP_TOTAL: u32 = 3;
-const CHUNK_MAX: usize = 6000;
+use crate::pet::models::PetRemarkLine;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PetLinesImportProgressEvent {
@@ -17,6 +13,29 @@ pub struct PetLinesImportProgressEvent {
     pub message: String,
     pub step_index: u32,
     pub step_total: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetWikiBulkImportStartResult {
+    pub started: bool,
+    pub already_running: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PetWikiBulkImportProgress {
+    pub phase: String,
+    pub index: u32,
+    pub total: u32,
+    pub model_id: String,
+    pub model_name: String,
+    pub message: String,
+    pub lines_imported: u32,
+    pub succeeded: u32,
+    pub failed: u32,
+    pub skipped: u32,
+    pub updated_at_ms: i64,
 }
 
 fn emit_progress(app: &AppHandle, step: &str, message: &str, step_index: u32, step_total: u32) {
@@ -41,250 +60,14 @@ pub(crate) fn emit_lines_progress(
     emit_progress(app, step, message, step_index, step_total);
 }
 
-pub async fn ai_import_lines(
-    app: &AppHandle,
-    st: &AppState,
-    model_id: &str,
-    raw_text: &str,
-) -> Result<Vec<PetRemarkLine>, String> {
-    let raw = raw_text.trim();
-    if raw.is_empty() {
-        return Err("请先粘贴要导入的文本".into());
-    }
-
-    emit_progress(app, "preprocess", "正在预处理文本…", 1, STEP_TOTAL);
-    let local = local_extract_lines(raw);
-
-    let data_dir = st.data_dir();
-    let anim_meta = {
-        let db = st.lock_db().map_err(|e| e.to_string())?;
-        models::read_animation_meta(data_dir, &db, model_id)
-    };
-
-    emit_progress(app, "extract", "正在清洗提取台词…", 2, STEP_TOTAL);
-
-    let ai_ready = {
-        let db = st.lock_db().map_err(|e| e.to_string())?;
-        let config = crate::ai::AiConfig::load(&db, data_dir);
-        let catalog = crate::ai::load_catalog(data_dir);
-        crate::ai::is_text_ai_ready(&config, &catalog, &st.vault, &db)
-    };
-
-    let mut extracted = if ai_ready {
-        match extract_with_ai(app, st, raw, &anim_meta, 2, STEP_TOTAL).await {
-            Ok(lines) if !lines.is_empty() => lines,
-            Ok(_) => {
-                if local.is_empty() {
-                    return Err("AI 未能从文本中提取到台词".into());
-                }
-                local.clone()
-            }
-            Err(e) => {
-                if local.is_empty() {
-                    return Err(e);
-                }
-                local.clone()
-            }
+pub fn emit_wiki_bulk_import_progress(app: &AppHandle, mut payload: PetWikiBulkImportProgress) {
+    payload.updated_at_ms = chrono::Utc::now().timestamp_millis();
+    if let Some(rt) = app.try_state::<crate::pet::PetRuntimeState>() {
+        if let Ok(mut guard) = rt.wiki_bulk_last_progress.lock() {
+            *guard = Some(payload.clone());
         }
-    } else if !local.is_empty() {
-        local.clone()
-    } else {
-        return Err(
-            "未配置 AI 且无法从文本中解析出台词；请配置 AI 后使用智能导入，或使用 JSON / 逐行格式"
-                .into(),
-        );
-    };
-
-    if ai_ready && !local.is_empty() {
-        extracted = merge_line_lists(extracted, local);
     }
-
-    extracted = dedupe_lines(extracted);
-    emit_progress(
-        app,
-        "validate",
-        &format!("正在校验台词完整性（共 {} 条）…", extracted.len()),
-        3,
-        STEP_TOTAL,
-    );
-
-    if extracted.is_empty() {
-        return Err("未能提取到有效台词".into());
-    }
-    Ok(extracted)
-}
-
-/// Wiki 爬取后的 AI 清洗：跳过「预处理」，使用自定义进度步骤。
-pub async fn ai_clean_import_text(
-    app: &AppHandle,
-    st: &AppState,
-    model_id: &str,
-    raw_text: &str,
-    extract_step: u32,
-    validate_step: u32,
-    step_total: u32,
-) -> Result<Vec<PetRemarkLine>, String> {
-    let raw = raw_text.trim();
-    if raw.is_empty() {
-        return Err("页面文本为空".into());
-    }
-
-    let local = local_extract_lines(raw);
-    let data_dir = st.data_dir();
-    let anim_meta = {
-        let db = st.lock_db().map_err(|e| e.to_string())?;
-        models::read_animation_meta(data_dir, &db, model_id)
-    };
-
-    let ai_ready = {
-        let db = st.lock_db().map_err(|e| e.to_string())?;
-        let config = crate::ai::AiConfig::load(&db, data_dir);
-        let catalog = crate::ai::load_catalog(data_dir);
-        crate::ai::is_text_ai_ready(&config, &catalog, &st.vault, &db)
-    };
-
-    let mut extracted = if ai_ready {
-        match extract_with_ai(app, st, raw, &anim_meta, extract_step, step_total).await {
-            Ok(lines) if !lines.is_empty() => lines,
-            Ok(_) => {
-                if local.is_empty() {
-                    return Err("AI 未能从页面文本中提取到台词".into());
-                }
-                local.clone()
-            }
-            Err(e) => {
-                if local.is_empty() {
-                    return Err(e);
-                }
-                local.clone()
-            }
-        }
-    } else if !local.is_empty() {
-        local.clone()
-    } else {
-        return Err("未配置 AI 且无法从页面文本中解析出台词".into());
-    };
-
-    if ai_ready && !local.is_empty() {
-        extracted = merge_line_lists(extracted, local);
-    }
-
-    extracted = dedupe_lines(extracted);
-    emit_progress(
-        app,
-        "validate",
-        &format!("正在校验台词完整性（共 {} 条）…", extracted.len()),
-        validate_step,
-        step_total,
-    );
-
-    if extracted.is_empty() {
-        return Err("未能提取到有效台词".into());
-    }
-    Ok(extracted)
-}
-
-async fn extract_with_ai(
-    app: &AppHandle,
-    st: &AppState,
-    raw: &str,
-    anim_meta: &models::PetAnimationMeta,
-    extract_step: u32,
-    step_total: u32,
-) -> Result<Vec<PetRemarkLine>, String> {
-    let data_dir = st.data_dir();
-    let animations = if anim_meta.animations.is_empty() {
-        "（暂无，animation 一律填 null）".to_string()
-    } else {
-        anim_meta.animations.join("、")
-    };
-
-    let chunks = split_text_chunks(raw);
-    let total = chunks.len();
-    let mut all = Vec::new();
-
-    for (idx, chunk) in chunks.iter().enumerate() {
-        if total > 1 {
-            emit_progress(
-                app,
-                "extract",
-                &format!("正在清洗提取台词（第 {}/{} 段）…", idx + 1, total),
-                extract_step,
-                step_total,
-            );
-        }
-
-        let prompt = crate::prompts::render(
-            data_dir,
-            "pet-lines-import",
-            &[
-                ("animations", &animations),
-                ("raw_chunk", chunk),
-            ],
-        );
-
-        let prep = {
-            let db = st.lock_db().map_err(|e| e.to_string())?;
-            let config = crate::ai::AiConfig::load(&db, data_dir);
-            let catalog = crate::ai::load_catalog(data_dir);
-            crate::ai::PreparedTextChat::prepare(
-                &config,
-                &catalog,
-                &st.vault,
-                &db,
-                data_dir,
-                prompt,
-            )
-            .map_err(|e| e.to_string())?
-        };
-
-        let prep = prep.ok_or_else(|| "未配置 AI 或密钥不可用".to_string())?;
-        let ai_raw = prep.run_async().await.map_err(|e| e.to_string())?;
-        let lines = parse_ai_lines(&ai_raw, &anim_meta.animations)?;
-        all.extend(lines);
-    }
-
-    Ok(all)
-}
-
-fn parse_ai_lines(raw: &str, known_animations: &[String]) -> Result<Vec<PetRemarkLine>, String> {
-    let json_str = crate::ai::json_util::extract_json_array(raw);
-    let parsed: serde_json::Value = serde_json::from_str(&json_str)
-        .or_else(|_| serde_json::from_str(raw))
-        .map_err(|e| format!("AI 返回的 JSON 无法解析：{e}"))?;
-    let arr = parsed
-        .as_array()
-        .cloned()
-        .or_else(|| parsed.get("lines").and_then(|v| v.as_array()).cloned())
-        .ok_or_else(|| "AI 返回格式无效，需要 JSON 数组".to_string())?;
-
-    let has = |name: &str| {
-        known_animations.is_empty() || known_animations.iter().any(|n| n == name)
-    };
-
-    let lines: Vec<PetRemarkLine> = arr
-        .iter()
-        .filter_map(|item| {
-            let text = item.get("text")?.as_str()?.trim();
-            if text.is_empty() || is_noise_line(text) {
-                return None;
-            }
-            let animation = item
-                .get("animation")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && has(s));
-            Some(PetRemarkLine {
-                text: text.to_string(),
-                animation,
-            })
-        })
-        .collect();
-
-    if lines.is_empty() {
-        return Err("AI 未返回可用台词".into());
-    }
-    Ok(lines)
+    let _ = app.emit("pet-wiki-bulk-import-progress", payload);
 }
 
 pub fn local_extract_lines(raw: &str) -> Vec<PetRemarkLine> {
@@ -432,8 +215,8 @@ fn strip_numeric_prefix(s: &str) -> &str {
         if rest.starts_with('.') || rest.starts_with('、') || rest.starts_with(')') {
             return rest[1..].trim_start();
         }
-        if rest.starts_with(". ") {
-            return rest[2..].trim_start();
+        if let Some(stripped) = rest.strip_prefix(". ") {
+            return stripped.trim_start();
         }
     }
     t
@@ -538,27 +321,6 @@ fn is_noise_line(s: &str) -> bool {
     false
 }
 
-fn split_text_chunks(raw: &str) -> Vec<String> {
-    if raw.len() <= CHUNK_MAX {
-        return vec![raw.to_string()];
-    }
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < raw.len() {
-        let mut end = (start + CHUNK_MAX).min(raw.len());
-        if end < raw.len() {
-            if let Some(rel) = raw[start..end].rfind("\n\n") {
-                end = start + rel + 2;
-            } else if let Some(rel) = raw[start..end].rfind('\n') {
-                end = start + rel + 1;
-            }
-        }
-        chunks.push(raw[start..end].to_string());
-        start = end;
-    }
-    chunks
-}
-
 pub(crate) fn dedupe_lines(lines: Vec<PetRemarkLine>) -> Vec<PetRemarkLine> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
@@ -566,17 +328,6 @@ pub(crate) fn dedupe_lines(lines: Vec<PetRemarkLine>) -> Vec<PetRemarkLine> {
         if line.text.trim().is_empty() {
             continue;
         }
-        if seen.insert(line.text.clone()) {
-            out.push(line);
-        }
-    }
-    out
-}
-
-fn merge_line_lists(primary: Vec<PetRemarkLine>, supplement: Vec<PetRemarkLine>) -> Vec<PetRemarkLine> {
-    let mut seen: HashSet<String> = primary.iter().map(|l| l.text.clone()).collect();
-    let mut out = primary;
-    for line in supplement {
         if seen.insert(line.text.clone()) {
             out.push(line);
         }

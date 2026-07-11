@@ -138,7 +138,7 @@ export function SkinImportModal({
     try {
       await xiaohan.petCommitImport(name, characterId);
       const status = await xiaohan.petGetStatus();
-      if (!status.enabled) await xiaohan.petSetEnabled(true);
+      if (!status.active) await xiaohan.petSetEnabled(true);
       setImportModelName("");
       setImportStaging(null);
       await onImported();

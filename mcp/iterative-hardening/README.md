@@ -14,6 +14,7 @@
 | `hardening_update_scenario` | 更新单场景状态 |
 | `hardening_can_finish` | 检查退出条件 |
 | `hardening_run_verify` | 运行 cargo check / tsc |
+| `hardening_pet_api` | 桌宠 debug HTTP 测试 API（AI 自动切换模型/读快照） |
 | `hardening_protocol` | 完整协议说明 |
 
 ## 状态文件

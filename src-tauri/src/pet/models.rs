@@ -92,6 +92,11 @@ fn resolve_builtin_id(id: &str) -> &str {
     legacy_builtin_slug(id).unwrap_or(id)
 }
 
+/// 统一模型 id 比较（内置 legacy slug → 规范 id）
+pub fn canonical_model_id(model_id: &str) -> String {
+    resolve_builtin_id(model_id).to_string()
+}
+
 fn is_legacy_or_builtin_id(id: &str) -> bool {
     is_builtin_id(id) || legacy_builtin_slug(id).is_some()
 }

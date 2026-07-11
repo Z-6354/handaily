@@ -183,6 +183,6 @@ pub fn today_stats(db: &Connection) -> Result<TodayAnalysisStats, rusqlite::Erro
         text_count: text_count as u64,
         screenshot_count: screenshot_count as u64,
         skipped_screenshot_count: skipped as u64,
-        system_cpu_percent: crate::analysis::guard::system_cpu_percent(),
+        system_cpu_percent: 0.0,
     })
 }

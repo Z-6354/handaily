@@ -18,6 +18,7 @@ const FE_INPUTS = [
   "src",
   "index.html",
   "pet.html",
+  "pet-menu.html",
   "vite.config.ts",
   "tsconfig.json",
   "package.json",
@@ -27,7 +28,7 @@ const FE_INPUTS = [
 
 const FE_INPUTS_FULL = ["tsconfig.app.json", "tsconfig.node.json"];
 
-const DIST_MARKERS = ["dist/index.html", "dist/pet.html"];
+const DIST_MARKERS = ["dist/index.html", "dist/pet.html", "dist/pet-menu.html"];
 
 const SKIP_DIR = new Set([
   "node_modules",

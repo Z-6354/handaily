@@ -269,7 +269,7 @@ pub fn collect_pending_avatars(data_dir: &Path, skip_existing: bool) -> Vec<(Str
     pending
 }
 
-const AVATAR_STARTUP_DELAY_SECS: u64 = 6;
+const AVATAR_STARTUP_DELAY_SECS: u64 = 1;
 const AVATAR_BATCH_SIZE: usize = 48;
 const AVATAR_BATCH_PAUSE_SECS: u64 = 2;
 

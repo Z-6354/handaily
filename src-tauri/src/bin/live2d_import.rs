@@ -73,8 +73,6 @@ fn run() -> Result<(), String> {
 
     let data_dir = handaily_data_dir()?;
     let _ = xiaohan_daily_lib::character::seed_user_characters(&data_dir);
-    let db = xiaohan_daily_lib::db::open_and_migrate(&data_dir.join("xiaohan.sqlite"))
-        .map_err(|e| e.to_string())?;
 
     let plan = resolve_plan_path(plan_path.as_deref())?;
     let root = live2d_root.unwrap_or_else(resolve_live2d_root);
@@ -98,14 +96,14 @@ fn run() -> Result<(), String> {
 
     if all {
         loop {
-            let result = run_live2d_import(&data_dir, &db, &plan, &root, batch_limit, dry_run)?;
+            let result = run_live2d_import(&data_dir, &plan, &root, batch_limit, dry_run)?;
             println!("{}", result.message);
             if result.remaining == 0 || result.processed == 0 {
                 break;
             }
         }
     } else {
-        let result = run_live2d_import(&data_dir, &db, &plan, &root, batch_limit, dry_run)?;
+        let result = run_live2d_import(&data_dir, &plan, &root, batch_limit, dry_run)?;
         println!("{}", result.message);
     }
     Ok(())

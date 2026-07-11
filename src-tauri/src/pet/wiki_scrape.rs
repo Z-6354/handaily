@@ -1,11 +1,13 @@
 //! Wiki 网页爬取与台词提取（碧蓝航线 BWIKI 等）
 
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::pet::lines_import;
+use crate::pet::lines_import::{self, PetWikiBulkImportProgress};
 use crate::pet::models::PetRemarkLine;
 use crate::state::AppState;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 const WIKI_STEP_TOTAL: u32 = 4;
 const SKIP_WORD_KEYS: &[&str] = &["extra", "drop_descrip"];
@@ -48,9 +50,9 @@ fn percent_encode_path_segment(s: &str) -> String {
 
 /// 从已抓取的 Wiki HTML 提取舰船台词（结构化优先，必要时走 AI 清洗）
 pub async fn extract_wiki_lines_from_html(
-    app: &AppHandle,
-    st: &AppState,
-    model_id: &str,
+    _app: &AppHandle,
+    _st: &AppState,
+    _model_id: &str,
     html: &str,
 ) -> Result<Vec<PetRemarkLine>, String> {
     let mut lines = extract_biligame_ship_words(html);
@@ -71,7 +73,153 @@ pub async fn extract_wiki_lines_from_html(
         .filter(|t| t.trim().len() > 80)
         .ok_or_else(|| "未能从页面中解析出台词".to_string())?;
 
-    lines_import::ai_clean_import_text(app, st, model_id, &fallback_text, 1, 1, 1).await
+    let lines = lines_import::local_extract_lines(&fallback_text);
+    if lines.is_empty() {
+        return Err("未能从页面中解析出台词".into());
+    }
+    Ok(lines_import::dedupe_lines(lines))
+}
+
+pub fn model_needs_wiki_lines(
+    data_dir: &std::path::Path,
+    db: &rusqlite::Connection,
+    model_id: &str,
+) -> bool {
+    crate::pet::models::model_needs_wiki_lines_import(data_dir, db, model_id)
+}
+
+pub async fn import_wiki_lines_if_needed(
+    app: &AppHandle,
+    st: &AppState,
+    model_id: &str,
+    html: &str,
+) -> Result<u32, String> {
+    let data_dir = st.data_dir();
+    {
+        let db = st.lock_db()?;
+        if !model_needs_wiki_lines(data_dir, &db, model_id) {
+            return Ok(0);
+        }
+    }
+    let lines = extract_wiki_lines_from_html(app, st, model_id, html).await?;
+    if lines.is_empty() {
+        let db = st.lock_db()?;
+        crate::pet::models::record_wiki_lines_import_failed(&db, model_id);
+        return Err("未能从页面中解析出台词".into());
+    }
+    let db = st.lock_db()?;
+    Ok(save_lines_to_model(data_dir, &db, model_id, lines, false, true)? as u32)
+}
+
+pub async fn import_wiki_lines_for_model_if_needed(
+    app: &AppHandle,
+    st: &AppState,
+    model_id: &str,
+    wiki_title: &str,
+) -> Result<u32, String> {
+    let result =
+        import_wiki_lines_for_character_if_needed(app, st, wiki_title, &[model_id.to_string()])
+            .await?;
+    Ok(result.lines_count.max(result.models_updated))
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CharacterWikiImportResult {
+    pub lines_count: u32,
+    pub models_updated: u32,
+    pub models_skipped: u32,
+}
+
+/// 按 BWIKI 角色词条爬取一次，将台词写入该角色下所有仍待导入的模型
+pub async fn import_wiki_lines_for_character_if_needed(
+    app: &AppHandle,
+    st: &AppState,
+    wiki_title: &str,
+    model_ids: &[String],
+) -> Result<CharacterWikiImportResult, String> {
+    if st.stop_flag.load(Ordering::Relaxed) {
+        return Ok(CharacterWikiImportResult::default());
+    }
+    let title = wiki_title.trim();
+    if title.is_empty() || model_ids.is_empty() {
+        return Ok(CharacterWikiImportResult::default());
+    }
+
+    let data_dir = st.data_dir();
+    let mut pending = Vec::new();
+    {
+        let db = st.lock_db()?;
+        for model_id in model_ids {
+            crate::pet::models::clear_wiki_lines_import_failed(&db, model_id);
+            if model_needs_wiki_lines(data_dir, &db, model_id) {
+                pending.push(model_id.clone());
+            }
+        }
+    }
+    if pending.is_empty() {
+        return Ok(CharacterWikiImportResult {
+            models_skipped: model_ids.len() as u32,
+            ..CharacterWikiImportResult::default()
+        });
+    }
+
+    let url = wiki_url_for_title(title);
+    let html = match fetch_wiki_page_with_retry(&url).await {
+        Ok(html) => html,
+        Err(e) => {
+            if let Ok(db) = st.lock_db() {
+                for model_id in &pending {
+                    crate::pet::models::record_wiki_lines_import_failed(&db, model_id);
+                }
+            }
+            return Err(e);
+        }
+    };
+
+    let lines = match extract_wiki_lines_from_html(app, st, &pending[0], &html).await {
+        Ok(lines) if !lines.is_empty() => lines,
+        Ok(_) | Err(_) => {
+            if let Ok(db) = st.lock_db() {
+                for model_id in &pending {
+                    crate::pet::models::record_wiki_lines_import_failed(&db, model_id);
+                }
+            }
+            return Err("未能从页面中解析出台词".into());
+        }
+    };
+    let lines_count = lines.len() as u32;
+
+    let mut models_updated = 0u32;
+    let mut models_skipped = 0u32;
+    for model_id in pending {
+        if st.stop_flag.load(Ordering::Relaxed) {
+            break;
+        }
+        let needs = {
+            let db = st.lock_db()?;
+            model_needs_wiki_lines(data_dir, &db, &model_id)
+        };
+        if !needs {
+            models_skipped += 1;
+            continue;
+        }
+        let saved = {
+            let db = st.lock_db()?;
+            save_lines_to_model(data_dir, &db, &model_id, lines.clone(), false, true).is_ok()
+        };
+        if saved {
+            models_updated += 1;
+            let _ = app.emit("pet-model-meta-updated", model_id.clone());
+        } else if let Ok(db) = st.lock_db() {
+            crate::pet::models::record_wiki_lines_import_failed(&db, &model_id);
+        }
+    }
+
+    Ok(CharacterWikiImportResult {
+        lines_count,
+        models_updated,
+        models_skipped,
+    })
 }
 
 pub fn save_lines_to_model(
@@ -80,6 +228,7 @@ pub fn save_lines_to_model(
     model_id: &str,
     lines: Vec<PetRemarkLine>,
     append: bool,
+    mark_wiki_imported: bool,
 ) -> Result<usize, String> {
     use crate::pet::models::PetImportLinesPayload;
     let count = lines.len();
@@ -92,7 +241,506 @@ pub fn save_lines_to_model(
         append,
     };
     crate::pet::models::import_lines(data_dir, db, &payload)?;
+    if !append && mark_wiki_imported {
+        let _ = crate::pet::models::mark_model_wiki_lines_imported(db, model_id);
+    }
     Ok(count)
+}
+
+#[derive(Debug, Clone)]
+pub struct WikiCharacterImportTarget {
+    pub wiki_title: String,
+    pub display_name: String,
+    pub model_ids: Vec<String>,
+}
+
+pub fn group_model_ids_by_wiki_title(
+    lookup: &crate::character::ModelWikiTitleLookup,
+    model_ids: &[String],
+) -> Vec<WikiCharacterImportTarget> {
+    use std::collections::HashMap;
+    let mut by_title: HashMap<String, WikiCharacterImportTarget> = HashMap::new();
+    for model_id in model_ids {
+        let Some(wiki_title) = lookup.wiki_title(model_id) else {
+            continue;
+        };
+        by_title
+            .entry(wiki_title.clone())
+            .or_insert_with(|| WikiCharacterImportTarget {
+                wiki_title: wiki_title.clone(),
+                display_name: wiki_title.clone(),
+                model_ids: Vec::new(),
+            })
+            .model_ids
+            .push(model_id.clone());
+    }
+    let mut out: Vec<_> = by_title.into_values().collect();
+    for target in &mut out {
+        target.model_ids.sort();
+        target.model_ids.dedup();
+    }
+    prioritize_character_targets(out)
+}
+
+fn is_weak_wiki_title(title: &str) -> bool {
+    let t = title.trim();
+    !t.is_empty() && t.chars().all(|c| c.is_ascii_digit())
+}
+
+/// 试跑时优先处理有较多皮肤的主流角色，纯数字词条（22、33）排后
+pub fn prioritize_character_targets(
+    mut targets: Vec<WikiCharacterImportTarget>,
+) -> Vec<WikiCharacterImportTarget> {
+    targets.sort_by(|a, b| {
+        is_weak_wiki_title(&a.wiki_title)
+            .cmp(&is_weak_wiki_title(&b.wiki_title))
+            .then_with(|| b.model_ids.len().cmp(&a.model_ids.len()))
+            .then_with(|| a.wiki_title.cmp(&b.wiki_title))
+    });
+    targets
+}
+
+pub fn collect_wiki_import_targets(
+    data_dir: &std::path::Path,
+    st: &AppState,
+) -> Result<Vec<WikiCharacterImportTarget>, String> {
+    collect_wiki_import_targets_with_progress(data_dir, st, None).map(|(targets, _)| targets)
+}
+
+fn collect_wiki_import_targets_with_progress(
+    data_dir: &std::path::Path,
+    st: &AppState,
+    on_scan_progress: Option<&dyn Fn(u32, u32)>,
+) -> Result<(Vec<WikiCharacterImportTarget>, u32), String> {
+    use crate::pet::models::{clear_wiki_lines_import_failed, list_model_id_set};
+    let lookup = crate::character::ModelWikiTitleLookup::build(data_dir);
+    let Ok(ids) = list_model_id_set(data_dir) else {
+        return Ok((Vec::new(), 0));
+    };
+    let mut all_model_ids: Vec<_> = ids.into_iter().collect();
+    all_model_ids.sort();
+    let mut all_characters = group_model_ids_by_wiki_title(&lookup, &all_model_ids);
+    let scan_total = all_characters.len() as u32;
+    let mut pending_characters = Vec::new();
+
+    for (i, mut character) in all_characters.drain(..).enumerate() {
+        if let Some(on_progress) = on_scan_progress {
+            let scanned = (i + 1) as u32;
+            if scanned == 1 || scanned == scan_total || scanned % 4 == 0 {
+                on_progress(scanned, scan_total);
+            }
+        }
+        character.model_ids.retain(|model_id| {
+            let Ok(db) = st.lock_db() else {
+                return false;
+            };
+            clear_wiki_lines_import_failed(&db, model_id);
+            model_needs_wiki_lines(data_dir, &db, model_id)
+        });
+        if !character.model_ids.is_empty() {
+            pending_characters.push(character);
+        }
+    }
+
+    if let Some(on_progress) = on_scan_progress {
+        if scan_total > 0 {
+            on_progress(scan_total, scan_total);
+        }
+    }
+    Ok((pending_characters, scan_total))
+}
+
+fn emit_bulk_progress(
+    app: &AppHandle,
+    phase: &str,
+    index: u32,
+    total: u32,
+    model_id: &str,
+    model_name: &str,
+    message: &str,
+    lines_imported: u32,
+    succeeded: u32,
+    failed: u32,
+    skipped: u32,
+) {
+    lines_import::emit_wiki_bulk_import_progress(
+        app,
+        PetWikiBulkImportProgress {
+            phase: phase.to_string(),
+            index,
+            total,
+            model_id: model_id.to_string(),
+            model_name: model_name.to_string(),
+            message: message.to_string(),
+            lines_imported,
+            succeeded,
+            failed,
+            skipped,
+            updated_at_ms: 0,
+        },
+    );
+}
+
+const BULK_IMPORT_CONCURRENCY: usize = 1;
+const WIKI_FETCH_MAX_RETRIES: u32 = 6;
+const WIKI_FETCH_RETRY_BASE_MS: u64 = 1500;
+const WIKI_FETCH_GAP_MS: u64 = 900;
+const WIKI_BULK_BATCH_SIZE_DEFAULT: usize = 100;
+const WIKI_BULK_BATCH_GAP_MS: u64 = 2000;
+pub const WIKI_BULK_BUG_MESSAGE: &str = "出 bug 了，请联系开发者。";
+
+/// 每批导入角色数，可通过 `HANDAILY_WIKI_IMPORT_BATCH` 覆盖
+pub fn wiki_bulk_batch_size() -> usize {
+    std::env::var("HANDAILY_WIKI_IMPORT_BATCH")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&n: &usize| n > 0)
+        .unwrap_or(WIKI_BULK_BATCH_SIZE_DEFAULT)
+}
+
+fn bulk_import_should_stop(app: &AppHandle, st: &AppState) -> bool {
+    st.stop_flag.load(Ordering::Relaxed) || crate::pet::wiki_bulk_stop_requested(app)
+}
+
+async fn bulk_import_pause_point(app: &AppHandle, st: &AppState) -> bool {
+    crate::pet::wiki_bulk_await_pause_or_stop(app, st).await
+}
+
+async fn scan_pending_import_targets(
+    app: &AppHandle,
+    st: &Arc<AppState>,
+) -> Result<(Vec<WikiCharacterImportTarget>, u32), String> {
+    let data_dir = st.data_dir().to_path_buf();
+    let st_collect = Arc::clone(st);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<(u32, u32)>();
+    let app_progress = app.clone();
+    let progress_task = tauri::async_runtime::spawn(async move {
+        while let Some((scanned, total)) = progress_rx.recv().await {
+            emit_bulk_progress(
+                &app_progress,
+                "scan",
+                scanned,
+                total,
+                "",
+                "",
+                &format!("正在扫描待导入角色 ({scanned}/{total})…"),
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+    });
+
+    let result = tokio::task::spawn_blocking(move || {
+        collect_wiki_import_targets_with_progress(&data_dir, st_collect.as_ref(), Some(&|scanned, total| {
+            let _ = progress_tx.send((scanned, total));
+        }))
+    })
+    .await
+    .map_err(|e| format!("扫描任务异常：{e}"))?;
+
+    progress_task.abort();
+    let _ = progress_task.await;
+    result
+}
+
+async fn run_character_import_batch(
+    app: &AppHandle,
+    st: &Arc<AppState>,
+    targets: Vec<WikiCharacterImportTarget>,
+    batch_no: u32,
+    batch_total: u32,
+    grand_models_ok: u32,
+) -> (u32, u32, u32) {
+    let total = targets.len() as u32;
+    if total == 0 {
+        return (0, 0, 0);
+    }
+
+    let total_models: u32 = targets.iter().map(|t| t.model_ids.len() as u32).sum();
+    emit_bulk_progress(
+        app,
+        "import",
+        0,
+        total,
+        "",
+        "",
+        &format!(
+            "第 {batch_no}/{batch_total} 批：导入 {total} 个角色（{total_models} 个模型），已累计 {grand_models_ok} 个模型"
+        ),
+        0,
+        0,
+        0,
+        0,
+    );
+
+    let mut succeeded = 0u32;
+    let mut skipped = 0u32;
+    let mut failed = 0u32;
+
+    for (i, target) in targets.into_iter().enumerate() {
+        if bulk_import_should_stop(app, st.as_ref()) {
+            break;
+        }
+        if bulk_import_pause_point(app, st.as_ref()).await {
+            break;
+        }
+        let index = (i + 1) as u32;
+        let model_count = target.model_ids.len();
+        emit_bulk_progress(
+            app,
+            "import",
+            index,
+            total,
+            target.model_ids.first().unwrap_or(&target.wiki_title),
+            &target.display_name,
+            &format!(
+                "第{batch_no}批 · 正在爬取「{}」（{model_count} 个模型）…",
+                target.wiki_title
+            ),
+            0,
+            succeeded,
+            failed,
+            skipped,
+        );
+
+        let result = import_wiki_lines_for_character_if_needed(
+            app,
+            st.as_ref(),
+            &target.wiki_title,
+            &target.model_ids,
+        )
+        .await;
+
+        match result {
+            Ok(stats) if stats.models_updated > 0 => {
+                succeeded += stats.models_updated;
+                emit_bulk_progress(
+                    app,
+                    "import",
+                    index,
+                    total,
+                    target.model_ids.first().unwrap_or(&target.wiki_title),
+                    &target.display_name,
+                    &format!(
+                        "第{batch_no}批 · 「{}」已导入 {} 条台词至 {} 个模型",
+                        target.wiki_title, stats.lines_count, stats.models_updated
+                    ),
+                    stats.lines_count,
+                    succeeded,
+                    failed,
+                    skipped,
+                );
+            }
+            Ok(_) => {
+                skipped += 1;
+                emit_bulk_progress(
+                    app,
+                    "import",
+                    index,
+                    total,
+                    target.model_ids.first().unwrap_or(&target.wiki_title),
+                    &target.display_name,
+                    &format!("第{batch_no}批 · 「{}」无新台词，已跳过", target.wiki_title),
+                    0,
+                    succeeded,
+                    failed,
+                    skipped,
+                );
+            }
+            Err(e) => {
+                failed += 1;
+                crate::log::warn(format!(
+                    "Wiki 批量台词导入失败 ({} / {} 个模型): {e}",
+                    target.wiki_title,
+                    target.model_ids.len()
+                ));
+                emit_bulk_progress(
+                    app,
+                    "import",
+                    index,
+                    total,
+                    target.model_ids.first().unwrap_or(&target.wiki_title),
+                    &target.display_name,
+                    &format!("第{batch_no}批 · 「{}」导入失败", target.wiki_title),
+                    0,
+                    succeeded,
+                    failed,
+                    skipped,
+                );
+            }
+        }
+
+        if index < total && !bulk_import_should_stop(app, st.as_ref()) {
+            tokio::time::sleep(Duration::from_millis(WIKI_FETCH_GAP_MS)).await;
+        }
+    }
+
+    (succeeded, skipped, failed)
+}
+
+pub async fn run_bulk_wiki_lines_import(app: &AppHandle, st: &Arc<AppState>) -> (u32, u32, u32) {
+    if bulk_import_should_stop(app, st.as_ref()) {
+        emit_bulk_progress(app, "done", 0, 0, "", "", "导入已取消", 0, 0, 0, 0);
+        return (0, 0, 0);
+    }
+
+    let batch_size = wiki_bulk_batch_size();
+    let mut grand_ok = 0u32;
+    let mut grand_skip = 0u32;
+    let mut grand_fail = 0u32;
+    let mut batch_no = 0u32;
+    let mut estimated_batches: Option<u32> = None;
+
+    loop {
+        if bulk_import_should_stop(app, st.as_ref()) {
+            emit_bulk_progress(
+                app,
+                "done",
+                batch_no,
+                estimated_batches.unwrap_or(batch_no).max(1),
+                "",
+                "",
+                &format!("导入已停止（成功 {grand_ok}，跳过 {grand_skip}，失败 {grand_fail}）"),
+                0,
+                grand_ok,
+                grand_fail,
+                grand_skip,
+            );
+            return (grand_ok, grand_skip, grand_fail);
+        }
+        if bulk_import_pause_point(app, st.as_ref()).await {
+            emit_bulk_progress(
+                app,
+                "done",
+                batch_no,
+                estimated_batches.unwrap_or(batch_no).max(1),
+                "",
+                "",
+                &format!("导入已停止（成功 {grand_ok}，跳过 {grand_skip}，失败 {grand_fail}）"),
+                0,
+                grand_ok,
+                grand_fail,
+                grand_skip,
+            );
+            return (grand_ok, grand_skip, grand_fail);
+        }
+
+        let (mut targets, _models_scanned) = match scan_pending_import_targets(app, st).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                emit_bulk_progress(app, "error", 0, 0, "", "", &format!("{WIKI_BULK_BUG_MESSAGE}（{e}）"), 0, grand_ok, 1, grand_skip);
+                return (grand_ok, grand_skip, grand_fail + 1);
+            }
+        };
+        targets = prioritize_character_targets(targets);
+
+        if targets.is_empty() {
+            let done_message = if grand_ok > 0 || grand_skip > 0 || grand_fail > 0 {
+                if grand_fail > 0 {
+                    format!(
+                        "导入结束：{grand_ok} 个模型已更新，{grand_skip} 个角色跳过，{grand_fail} 个角色失败"
+                    )
+                } else {
+                    format!("全部导入完成：{grand_ok} 个模型已更新，{grand_skip} 个角色跳过")
+                }
+            } else {
+                "暂无需要导入的角色台词".into()
+            };
+            let phase = if grand_fail > 0 { "error" } else { "done" };
+            emit_bulk_progress(
+                app,
+                phase,
+                batch_no.max(1),
+                batch_no.max(1),
+                "",
+                "",
+                &done_message,
+                0,
+                grand_ok,
+                grand_fail,
+                grand_skip,
+            );
+            return (grand_ok, grand_skip, grand_fail);
+        }
+
+        if estimated_batches.is_none() {
+            let pending = targets.len();
+            estimated_batches = Some(pending.div_ceil(batch_size).max(1) as u32);
+            let total_models: u32 = targets.iter().map(|t| t.model_ids.len() as u32).sum();
+            emit_bulk_progress(
+                app,
+                "scan",
+                0,
+                estimated_batches.unwrap_or(1),
+                "",
+                "",
+                &format!(
+                    "共 {pending} 个角色、{total_models} 个模型待导入，每批 {batch_size} 个角色"
+                ),
+                0,
+                0,
+                0,
+                0,
+            );
+        }
+
+        batch_no += 1;
+        let batch_total = estimated_batches.unwrap_or(1);
+        let batch: Vec<_> = targets.into_iter().take(batch_size).collect();
+        let batch_chars = batch.len();
+
+        let (ok, skip, fail) =
+            run_character_import_batch(app, st, batch, batch_no, batch_total, grand_ok).await;
+        grand_ok += ok;
+        grand_skip += skip;
+        grand_fail += fail;
+
+        if bulk_import_should_stop(app, st.as_ref()) {
+            emit_bulk_progress(
+                app,
+                "done",
+                batch_no,
+                batch_total,
+                "",
+                "",
+                &format!("导入已停止（成功 {grand_ok}，跳过 {grand_skip}，失败 {grand_fail}）"),
+                0,
+                grand_ok,
+                grand_fail,
+                grand_skip,
+            );
+            return (grand_ok, grand_skip, grand_fail);
+        }
+
+        if batch_chars < batch_size {
+            let done_message = if grand_fail > 0 {
+                format!(
+                    "导入结束：{grand_ok} 个模型已更新，{grand_skip} 个角色跳过，{grand_fail} 个角色失败"
+                )
+            } else {
+                format!("全部导入完成：{grand_ok} 个模型已更新，{grand_skip} 个角色跳过")
+            };
+            let phase = if grand_fail > 0 { "error" } else { "done" };
+            emit_bulk_progress(
+                app,
+                phase,
+                batch_no,
+                batch_total,
+                "",
+                "",
+                &done_message,
+                0,
+                grand_ok,
+                grand_fail,
+                grand_skip,
+            );
+            return (grand_ok, grand_skip, grand_fail);
+        }
+
+        tokio::time::sleep(Duration::from_millis(WIKI_BULK_BATCH_GAP_MS)).await;
+    }
 }
 
 pub async fn wiki_import_lines(
@@ -104,7 +752,7 @@ pub async fn wiki_import_lines(
     validate_wiki_url(url)?;
 
     lines_import::emit_lines_progress(app, "fetch", "正在爬取网页…", 1, WIKI_STEP_TOTAL);
-    let html = fetch_wiki_page(url).await?;
+    let html = fetch_wiki_page_with_retry(url).await?;
 
     lines_import::emit_lines_progress(app, "parse", "正在解析页面内容…", 2, WIKI_STEP_TOTAL);
 
@@ -140,15 +788,55 @@ pub fn validate_wiki_url(url: &str) -> Result<(), String> {
 }
 
 pub async fn fetch_wiki_page(url: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .user_agent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-             (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 XiaohanDaily/1.0",
-        )
-        .timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| e.to_string())?;
+    fetch_wiki_page_with_client(wiki_http_client(), url).await
+}
 
+pub async fn fetch_wiki_page_with_retry(url: &str) -> Result<String, String> {
+    let mut last_err = String::new();
+    for attempt in 0..WIKI_FETCH_MAX_RETRIES {
+        if attempt > 0 {
+            let exp = attempt.saturating_sub(1).min(5);
+            let delay = WIKI_FETCH_RETRY_BASE_MS.saturating_mul(1u64 << exp);
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
+        match fetch_wiki_page(url).await {
+            Ok(html) => return Ok(html),
+            Err(e)
+                if e.contains("514")
+                    || e.contains("567")
+                    || e.contains("429")
+                    || e.contains("503")
+                    || e.contains("502") =>
+            {
+                last_err = e;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(if last_err.is_empty() {
+        "爬取失败：重试次数已用尽".into()
+    } else {
+        last_err
+    })
+}
+
+fn wiki_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .user_agent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
+                 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 XiaohanDaily/1.0",
+            )
+            .pool_max_idle_per_host(BULK_IMPORT_CONCURRENCY)
+            .connect_timeout(Duration::from_secs(8))
+            .timeout(Duration::from_secs(20))
+            .build()
+            .expect("wiki http client")
+    })
+}
+
+async fn fetch_wiki_page_with_client(client: &reqwest::Client, url: &str) -> Result<String, String> {
     let resp = client
         .get(url.trim())
         .send()
@@ -776,7 +1464,8 @@ mod tests {
         let text = "身份 新晋猫女仆\n性格 娇俏、粘人\n关键词 蹭蹭摸摸\nCV 石上静香";
         let personality = extract_table_field_value(text, "性格").unwrap();
         assert!(personality.contains("娇俏"));
-        assert!(extract_table_field_value(text, "CV").is_none() || true);
+        let keywords = extract_table_field_value(text, "关键词").unwrap();
+        assert!(keywords.contains("蹭蹭摸摸"));
     }
 
     #[test]
@@ -806,6 +1495,56 @@ mod tests {
     fn resolve_wiki_fetch_url_builds_from_title() {
         let resolved = resolve_wiki_fetch_url(None, Some("柴郡")).unwrap();
         assert_eq!(resolved, wiki_url_for_title("柴郡"));
+    }
+
+    #[test]
+    fn group_models_by_wiki_title_merges_character_skins() {
+        use crate::character::ModelWikiTitleLookup;
+        let dir = tempfile::tempdir().unwrap();
+        for (id, name) in [
+            ("skin-a", "柴郡·皮肤2"),
+            ("skin-b", "柴郡·皮肤3"),
+            ("other", "爱宕·皮肤2"),
+        ] {
+            let model_dir = dir.path().join("pet-models").join(id);
+            std::fs::create_dir_all(&model_dir).unwrap();
+            std::fs::write(model_dir.join("display_name.txt"), name).unwrap();
+        }
+        let lookup = ModelWikiTitleLookup::build(dir.path());
+        let grouped = group_model_ids_by_wiki_title(
+            &lookup,
+            &[
+                "skin-a".into(),
+                "skin-b".into(),
+                "other".into(),
+                "no-title".into(),
+            ],
+        );
+        assert_eq!(grouped.len(), 2);
+        let chaijun = grouped
+            .iter()
+            .find(|t| t.wiki_title == "柴郡")
+            .expect("柴郡 grouped");
+        assert_eq!(chaijun.model_ids, vec!["skin-a", "skin-b"]);
+    }
+
+    #[test]
+    fn prioritize_puts_numeric_titles_last() {
+        let targets = vec![
+            WikiCharacterImportTarget {
+                wiki_title: "22".into(),
+                display_name: "22".into(),
+                model_ids: vec!["a".into()],
+            },
+            WikiCharacterImportTarget {
+                wiki_title: "柴郡".into(),
+                display_name: "柴郡".into(),
+                model_ids: vec!["b".into(), "c".into()],
+            },
+        ];
+        let sorted = prioritize_character_targets(targets);
+        assert_eq!(sorted[0].wiki_title, "柴郡");
+        assert_eq!(sorted[1].wiki_title, "22");
     }
 
     #[test]

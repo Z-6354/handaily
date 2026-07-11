@@ -671,7 +671,7 @@ export class SpinePet {
     this.onRandomAction?.(name);
   }
 
-  dispose() {
+  dispose(mode: "swap" | "teardown" = "swap") {
     this.clearRandomTimer();
     this.running = false;
     if (this.spine) {
@@ -679,7 +679,11 @@ export class SpinePet {
       this.spine.destroy({ children: true });
       this.spine = null;
     }
-    this.app?.destroy(false, { children: true, texture: true, baseTexture: true });
-    this.app = null;
+    if (this.app) {
+      this.app.ticker?.stop();
+      const removeView = mode === "teardown";
+      this.app.destroy(removeView, { children: true, texture: true, baseTexture: true });
+      this.app = null;
+    }
   }
 }

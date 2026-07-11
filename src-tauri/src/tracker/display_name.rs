@@ -55,10 +55,8 @@ pub fn friendly_name(exe_path: &str, app_name: &str, window_title: &str) -> Stri
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default()
-    } else if let Some(from_title) = title_parse::app_name_from_title(window_title) {
-        from_title
     } else {
-        String::new()
+        title_parse::app_name_from_title(window_title).unwrap_or_default()
     };
 
     if let Some(name) = known_name(&stem) {

@@ -19,7 +19,7 @@ use crate::tracker::Snapshot;
 /// 采样间隔（秒）
 const POLL_INTERVAL_SECS: u64 = 2;
 /// 采集暂停时的采样间隔（秒）——降低空转唤醒
-const POLL_IDLE_SECS: u64 = 5;
+const POLL_IDLE_SECS: u64 = 8;
 /// 定期 flush 间隔（秒）——仅 flush pending + WAL，不拆分 open segment
 const CHECKPOINT_SECS: u64 = 60;
 
@@ -38,7 +38,16 @@ pub fn spawn_poller(state: Arc<AppState>) -> JoinHandle<()> {
                 .tracking_enabled
                 .load(std::sync::atomic::Ordering::Relaxed)
             {
-                thread::sleep(Duration::from_secs(POLL_IDLE_SECS));
+                // [live2d-only] 采集关闭时仍更新 foreground/idle 供桌宠全屏检测
+                let threshold = read_idle_threshold(&state);
+                let idle = idle::is_idle(threshold);
+                if let Some(mut snap) = win32::get_foreground_snapshot() {
+                    snap.is_idle = idle;
+                    update_foreground_only(&state, &snap);
+                } else if idle {
+                    update_foreground_only(&state, &idle_placeholder_snapshot());
+                }
+                interruptible_sleep(&state, POLL_IDLE_SECS);
                 continue;
             }
 
@@ -62,11 +71,25 @@ pub fn spawn_poller(state: Arc<AppState>) -> JoinHandle<()> {
                 tick = 0;
             }
 
-            thread::sleep(Duration::from_secs(POLL_INTERVAL_SECS));
+            interruptible_sleep(&state, POLL_INTERVAL_SECS);
         }
         // 退出前 flush
         writer::flush_on_exit(&state);
     })
+}
+
+/// 可被 stop_flag 中断的睡眠：将长睡眠拆成小片，退出时最多等待一个片段。
+fn interruptible_sleep(state: &AppState, secs: u64) {
+    let mut remaining = Duration::from_secs(secs);
+    let step = Duration::from_millis(100);
+    while remaining > Duration::ZERO {
+        if state.stop_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let nap = remaining.min(step);
+        thread::sleep(nap);
+        remaining -= nap;
+    }
 }
 
 /// 空闲占位快照（无前台 HWND 时使用）
@@ -82,8 +105,13 @@ fn idle_placeholder_snapshot() -> Snapshot {
 }
 
 /// 处理一帧快照：决定延长当前 segment、闭合并开启新段、或 idle 切换
-fn process_snapshot(state: &AppState, snap: &Snapshot) {
+fn update_foreground_only(state: &AppState, snap: &Snapshot) {
     *state.foreground.lock().unwrap() = Some(snap.to_payload());
+}
+
+/// 处理一帧快照：决定延长当前 segment、闭合并开启新段、或 idle 切换
+fn process_snapshot(state: &AppState, snap: &Snapshot) {
+    update_foreground_only(state, snap);
 
     // 跨日检查：若 open segment 的日期与今天不同，先切分
     rollover_if_new_day(state);

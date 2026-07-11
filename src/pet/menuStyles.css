@@ -31,6 +31,20 @@ body {
   overflow: hidden;
 }
 
+.pet-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.pet-menu-countdown {
+  font-size: 11px;
+  font-weight: 500;
+  color: rgba(91, 108, 240, 0.65);
+  min-width: 2.5em;
+  text-align: right;
+}
+
 .pet-menu-view {
   display: flex;
   flex-direction: column;

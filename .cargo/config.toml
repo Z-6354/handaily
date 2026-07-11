@@ -4,5 +4,19 @@
 target-dir = "src-tauri/target"
 incremental = true
 
+# dev/test 尾段慢的主因之一是巨型 PDB；debug=1 保留行号断点，链接明显更快
+[profile.dev]
+debug = 1
+incremental = true
+
+[profile.test]
+inherits = "dev"
+debug = 1
+
+# Windows：用 LLD 替代 MSVC link.exe，全量/增量链接尾段通常快数倍
+# 一次性准备：rustup component add llvm-tools-preview
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+
 [profile.release]
 incremental = true

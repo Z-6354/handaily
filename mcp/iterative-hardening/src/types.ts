@@ -2,9 +2,17 @@ export type ScenarioStatus = "UNTESTED" | "FAIL" | "PASS" | "BLOCKED";
 
 export interface ScenarioRow {
   id: string;
+  /** 用户可执行的测试步骤 */
   steps: string;
+  /** 预期可观察结果 */
   expected: string;
   status: ScenarioStatus;
+  /** 涉及源码路径（模块/文件） */
+  involvedCode?: string[];
+  /** 首次登记时间 ISO */
+  createdAt?: string;
+  /** 最近状态更新时间 ISO */
+  updatedAt?: string;
   notes?: string;
 }
 

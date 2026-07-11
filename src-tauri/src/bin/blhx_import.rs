@@ -7,7 +7,7 @@ use xiaohan_daily_lib::persona::import_reference::{
     import_from_reference, import_persona_from_blhx_reference_fast, load_blhx_ship_reference,
     resolve_blhx_db_path, ImportReferenceContext, ImportReferenceProgress,
 };
-use xiaohan_daily_lib::vault::VaultState;
+use xiaohan_daily_lib::live2d::VaultState;
 
 fn handaily_data_dir() -> Result<PathBuf, String> {
     let appdata = std::env::var("APPDATA").map_err(|_| "无法读取 APPDATA".to_string())?;
@@ -121,7 +121,6 @@ async fn run() -> Result<(), String> {
     };
     let data_dir = handaily_data_dir()?;
     let _ = xiaohan_daily_lib::prompts::seed_user_prompts(&data_dir);
-    let _ = xiaohan_daily_lib::ai::seed_user_vendors(&data_dir);
     let _ = xiaohan_daily_lib::persona::seed_user_personas(&data_dir);
     let _ = xiaohan_daily_lib::character::seed_user_characters(&data_dir);
 

@@ -69,6 +69,7 @@ export default defineConfig(function () { return __awaiter(void 0, void 0, void 
                         input: {
                             main: resolve(__dirname, "index.html"),
                             pet: resolve(__dirname, "pet.html"),
+                            "pet-menu": resolve(__dirname, "pet-menu.html"),
                         },
                         output: {
                             manualChunks: function (id) {

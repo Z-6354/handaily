@@ -94,7 +94,7 @@ pub fn get_report(db: &Connection, id: i64) -> Result<Option<GeneratedReport>, r
             created_at: row.get(7)?,
         })
     })?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }
 
 pub fn delete_report(db: &Connection, id: i64) -> Result<bool, rusqlite::Error> {

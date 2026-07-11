@@ -83,6 +83,9 @@ export class HardeningStore {
       scenarioMatrix: scenarios.map((s) => ({
         ...s,
         status: s.status ?? "UNTESTED",
+        involvedCode: s.involvedCode ?? [],
+        createdAt: s.createdAt ?? now,
+        updatedAt: s.updatedAt ?? now,
       })),
       passReports: [],
     };
@@ -190,6 +193,7 @@ export class HardeningStore {
         continue;
       }
       row.status = status;
+      row.updatedAt = new Date().toISOString();
     }
 
     const auditAngle = AUDIT_ANGLES[session.auditAngleIndex % AUDIT_ANGLES.length];
@@ -247,9 +251,13 @@ export class HardeningStore {
     if (session.scenarioMatrix.some((r) => r.id === row.id)) {
       throw new Error(`Scenario ${row.id} already exists.`);
     }
+    const now = new Date().toISOString();
     session.scenarioMatrix.push({
       ...row,
       status: row.status ?? "UNTESTED",
+      involvedCode: row.involvedCode ?? [],
+      createdAt: now,
+      updatedAt: now,
     });
     if (session.status === "done") {
       session.status = "active";
@@ -262,8 +270,10 @@ export class HardeningStore {
     const session = this.requireSession();
     const row = session.scenarioMatrix.find((r) => r.id === id);
     if (!row) throw new Error(`Scenario ${id} not found.`);
+    const now = new Date().toISOString();
     row.status = status;
     if (notes !== undefined) row.notes = notes;
+    row.updatedAt = now;
     if (status === "FAIL" && session.status === "done") {
       session.status = "active";
     }
@@ -350,6 +360,34 @@ export class HardeningStore {
       reasons,
       checklist,
     };
+  }
+
+  formatUserTestChecklist(session?: HardeningSession | null): string {
+    const s = session ?? this.load();
+    if (!s) return "无活动测试清单。请先调用 hardening_init。";
+
+    const lines: string[] = [
+      "# 用户测试清单",
+      "",
+      `会话：${s.sessionId}`,
+      `报告：${s.userReport}`,
+      `更新：${s.updatedAt}`,
+      "",
+      "| ID | 状态 | 涉及代码 | 步骤 | 预期 | 更新时间 |",
+      "|----|------|----------|------|------|----------|",
+    ];
+
+    for (const row of s.scenarioMatrix) {
+      const code = (row.involvedCode ?? []).join(", ") || "—";
+      const steps = row.steps.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      const expected = row.expected.replace(/\|/g, "\\|").replace(/\n/g, " ");
+      lines.push(
+        `| ${row.id} | ${row.status} | ${code} | ${steps} | ${expected} | ${row.updatedAt ?? "—"} |`,
+      );
+    }
+
+    lines.push("", "## 请用户反馈", "将每行状态更新为 PASS / FAIL，FAIL 请附现象与控制台报错。");
+    return lines.join("\n");
   }
 
   getProtocolMarkdown(): string {

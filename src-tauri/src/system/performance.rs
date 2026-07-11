@@ -20,7 +20,7 @@ pub struct PerformanceSnapshot {
 pub fn capture_snapshot() -> PerformanceSnapshot {
     #[cfg(windows)]
     {
-        return capture_windows();
+        capture_windows()
     }
     #[cfg(not(windows))]
     {
@@ -71,8 +71,10 @@ fn capture_windows() -> PerformanceSnapshot {
     let (mut ws, mut private) = (0u64, 0u64);
     unsafe {
         let h = GetCurrentProcess();
-        let mut counters = PROCESS_MEMORY_COUNTERS::default();
-        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };
         if GetProcessMemoryInfo(h, &mut counters, counters.cb).is_ok() {
             ws = counters.WorkingSetSize as u64;
             private = counters.PagefileUsage as u64;

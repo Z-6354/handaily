@@ -14,10 +14,9 @@ use rusqlite::Connection;
 use tauri::{AppHandle, Manager};
 
 use crate::db::stats::TodayAggregator;
-use crate::analysis::{AnalysisCoordinator, PeriodScheduler};
+use crate::live2d::{AnalysisCoordinator, PeriodScheduler, VaultState};
 use crate::tracker::input_monitor::InputStatsShared;
 use crate::tracker::{ForegroundPayload, Segment};
-use crate::vault::VaultState;
 
 /// 核心共享状态——后台线程写、command 读
 pub struct AppState {
@@ -106,10 +105,9 @@ impl AppState {
 
         if let Some(ref data_dir) = data_dir {
             let _ = crate::prompts::seed_user_prompts(data_dir);
-            let _ = crate::ai::seed_user_vendors(data_dir);
+            // [live2d-only] 跳过 AI 供应商与时间线日志目录
             let _ = crate::persona::seed_user_personas(data_dir);
             let _ = crate::character::seed_user_characters(data_dir);
-            let _ = crate::timeline::json_log::ensure_logs_dir(data_dir);
         }
 
         // 启动兜底：闭合孤儿段与会话
@@ -122,21 +120,27 @@ impl AppState {
             let _ = crate::pet::models::migrate_legacy_builtin_models(&db);
             if let Some(ref data_dir) = data_dir {
                 let _ = crate::persona::migrate_legacy_personas(data_dir, &db);
-                let _ = crate::character::migrate_on_startup(data_dir, &db);
             }
         }
 
-        // 重建今日聚合缓存
+        // [live2d-only] 默认关闭行为采集（仍保留 foreground/idle 轮询）
+        let enabled = crate::db::get_setting(&db, "tracking_enabled")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        // 重建今日聚合缓存（采集关闭时跳过全表扫描）
         let today = chrono::Local::now().date_naive();
-        let aggregator = crate::db::stats::rebuild_aggregator(&db, today)?;
+        let aggregator = if enabled {
+            crate::db::stats::rebuild_aggregator(&db, today)?
+        } else {
+            crate::db::stats::TodayAggregator {
+                date: Some(today),
+                ..Default::default()
+            }
+        };
 
         let vault = VaultState::new();
         vault.load_config(&db)?;
-
-        // 读采集开关（默认开）
-        let enabled = crate::db::get_setting(&db, "tracking_enabled")
-            .map(|v| v == "1")
-            .unwrap_or(true);
 
         let idle_threshold = crate::db::get_setting(&db, "idle_threshold_secs")
             .and_then(|v| v.parse().ok())
@@ -182,7 +186,6 @@ impl AppState {
             .load(std::sync::atomic::Ordering::Relaxed);
         self.tracking_enabled
             .store(enabled, std::sync::atomic::Ordering::Relaxed);
-        crate::tracker::input_monitor::set_input_enabled(enabled);
         if was_enabled && !enabled {
             crate::tracker::writer::pause_tracking(self);
         }
@@ -225,10 +228,7 @@ impl AppState {
             let _ = db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
         }
         self.vault.lock();
-        let (mouse, keys, text, created, modified) = self.input_stats.take_flush_delta();
-        if let Ok(db) = self.lock_db() {
-            let _ = crate::db::metrics::upsert_delta(&db, mouse, keys, &text, created, modified);
-        }
+        // [live2d-only] 不落库键鼠指标
     }
 }
 

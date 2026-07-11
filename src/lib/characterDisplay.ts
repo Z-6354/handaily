@@ -17,16 +17,10 @@ export function characterInitial(name: string): string {
   return t ? t.charAt(0) : "?";
 }
 
-/** 卡片双标签：皮肤 + AI 性格摘要（每排两个） */
-export function characterCardTags(
-  c: Pick<CharacterBrief, "skin_count" | "active_skin_name" | "trait_summary">
-): [string, string] {
-  const skin =
-    c.skin_count > 1
-      ? `${c.skin_count} 套皮肤`
-      : c.active_skin_name && c.active_skin_name !== "默认"
-        ? c.active_skin_name
-        : "默认皮肤";
-  const trait = c.trait_summary.trim() || "性格待生成";
-  return [skin, trait];
+/** 卡片标签：仅显示皮肤数量 */
+export function characterSkinTag(
+  c: Pick<CharacterBrief, "skin_count">
+): string {
+  const n = Math.max(0, c.skin_count);
+  return n > 0 ? `${n} 套皮肤` : "暂无皮肤";
 }

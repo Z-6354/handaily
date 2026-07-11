@@ -359,13 +359,11 @@ fn split_wiki_reference_sections(text: &str) -> WikiReferenceSections {
             }
             continue;
         }
-        if current.is_some() {
-            if !t.is_empty() {
-                if !buf.is_empty() {
-                    buf.push('\n');
-                }
-                buf.push_str(t);
+        if current.is_some() && !t.is_empty() {
+            if !buf.is_empty() {
+                buf.push('\n');
             }
+            buf.push_str(t);
         }
     }
     flush(&mut current, &mut buf, &mut sections);
@@ -874,10 +872,8 @@ fn close_json_fragment(s: &str) -> String {
             '"' => in_string = !in_string,
             '{' if !in_string => stack.push('}'),
             '[' if !in_string => stack.push(']'),
-            '}' | ']' if !in_string => {
-                if stack.last() == Some(&ch) {
-                    stack.pop();
-                }
+            '}' | ']' if !in_string && stack.last() == Some(&ch) => {
+                stack.pop();
             }
             _ => {}
         }
@@ -921,8 +917,18 @@ fn trim_trailing_json_noise(s: &mut String) {
     }
 }
 
+fn extract_json_object(s: &str) -> String {
+    let s = s.trim();
+    if let (Some(start), Some(end)) = (s.find('{'), s.rfind('}')) {
+        if end > start {
+            return s[start..=end].to_string();
+        }
+    }
+    s.to_string()
+}
+
 fn extract_json_str(s: &str) -> String {
-    crate::ai::json_util::extract_json_object(s)
+    extract_json_object(s)
 }
 
 pub fn strip_md_fence(s: &str) -> String {

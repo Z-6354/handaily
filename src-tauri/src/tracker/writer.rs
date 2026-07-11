@@ -123,25 +123,15 @@ pub fn flush_on_exit(state: &Arc<AppState>) {
 }
 
 /// 键鼠/文件增量写入 daily_metrics
-pub fn flush_input_metrics(state: &AppState) {
-    let (mouse, keys, text, created, modified) = state.input_stats.take_flush_delta();
-    if let Ok(db) = state.lock_db() {
-        let _ = crate::db::metrics::upsert_delta(&db, mouse, keys, &text, created, modified);
-    }
+pub fn flush_input_metrics(_state: &AppState) {
+    // [live2d-only] 纯桌宠不落库行为统计
 }
 
-/// 暂停采集：闭合进行中的 foreground 段并落盘，避免恢复后把暂停时长算进 segment
+/// 暂停采集：闭合进行中的 foreground 段，避免恢复后把暂停时长算进 segment
 pub fn pause_tracking(state: &AppState) {
     flush_all_segments(state);
     *state.last_snapshot.lock().unwrap() = None;
     flush_input_metrics(state);
-}
-
-/// 增量更新聚合缓存
-fn apply_to_aggregator(state: &AppState, seg: &Segment) {
-    if let Ok(mut agg) = state.aggregator.write() {
-        agg.apply(seg);
-    }
 }
 
 /// 从 started_at 和 ended_at 计算 duration_ms
@@ -155,25 +145,8 @@ pub fn flush_audio_segment(state: &AppState, seg: &Segment) {
 }
 
 /// 写一行到 DB；成功后再更新聚合缓存并触发混合分析
-fn flush_segment(state: &AppState, seg: &Segment) {
-    let inserted = match state.lock_db() {
-        Ok(db) => crate::db::insert_segment(&db, seg).is_ok(),
-        Err(_) => false,
-    };
-    if !inserted {
-        crate::log::warn(format!(
-            "insert_segment failed ({}, {} ms)",
-            seg.started_at, seg.duration_ms
-        ));
-        return;
-    }
-    apply_to_aggregator(state, seg);
-    if state
-        .tracking_enabled
-        .load(std::sync::atomic::Ordering::Relaxed)
-    {
-        state.analysis.enqueue_segment(seg.clone());
-    }
+fn flush_segment(_state: &AppState, _seg: &Segment) {
+    // [live2d-only] 纯桌宠不落库 activity segment
 }
 
 /// 从 started_at 和 ended_at 计算 duration_ms

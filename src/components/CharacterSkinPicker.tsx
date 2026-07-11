@@ -30,7 +30,7 @@ interface Props {
 
 function SkinCard({
   skin,
-  active,
+  isCurrentSkin,
   switching,
   disabled,
   canDelete,
@@ -38,7 +38,8 @@ function SkinCard({
   onRequestDelete,
 }: {
   skin: { id: string; name: string; model_name: string; model_ready: boolean };
-  active: boolean;
+  /** 是否为当前装备皮肤（仅无障碍，不显示蓝框） */
+  isCurrentSkin: boolean;
   switching: boolean;
   disabled?: boolean;
   canDelete?: boolean;
@@ -60,13 +61,15 @@ function SkinCard({
     );
   }
 
+  const highlight = switching;
+  const equipped = isCurrentSkin && !switching;
   return (
-    <div className={`pet-model-card-wrap${active ? " is-active" : ""}`}>
+    <div className={`pet-model-card-wrap${highlight ? " is-active" : ""}${equipped ? " is-equipped" : ""}`}>
       <button
         type="button"
-        className={`pet-model-card${active ? " is-active" : ""}${switching ? " is-switching" : ""}`}
+        className={`pet-model-card${highlight ? " is-active" : ""}${equipped ? " is-equipped" : ""}${switching ? " is-switching" : ""}`}
         disabled={disabled || switching}
-        aria-pressed={active}
+        aria-pressed={isCurrentSkin}
         aria-busy={switching}
         onClick={onSelect}
       >
@@ -178,7 +181,7 @@ export function CharacterSkinPicker({
     const target = skins.find((s) => s.id === id);
     if (!target?.model_ready) return;
     if (switchingId || disabled) return;
-    if (characterActive && target.active) return;
+    if (characterActive && id === activeId) return;
     onSelect(id);
     setOpen(false);
   };
@@ -198,7 +201,7 @@ export function CharacterSkinPicker({
           <SkinCard
             key={s.id}
             skin={s}
-            active={s.active}
+            isCurrentSkin={s.id === activeId}
             switching={s.id === switchingId}
             disabled={disabled || Boolean(switchingId)}
             canDelete={allowDelete && !BUILTIN_MODEL_IDS.has(s.model_id)}
@@ -302,7 +305,7 @@ export function CharacterSkinPicker({
           {totalPages > 1 ? ` · 第 ${page}/${totalPages} 页` : ""}
         </span>
         {switchUpdatesPet && switchingId && (
-          <span className="pet-model-section-hint">正在加载，桌宠窗口将短暂刷新…</span>
+          <span className="pet-model-section-hint">正在切换模型…</span>
         )}
       </div>
       {cards}

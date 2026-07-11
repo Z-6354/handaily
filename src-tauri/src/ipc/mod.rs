@@ -1,2 +1,2 @@
 //! IPC 模块根
-pub mod commands;
+pub mod live2d_commands;

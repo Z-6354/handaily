@@ -25,7 +25,7 @@ import {
 } from "../hooks/useCharacterRoster";
 import { useSearchHistory } from "../hooks/useSearchHistory";
 import { Pagination } from "../components/Pagination";
-import { characterAccent, characterCardTags } from "../lib/characterDisplay";
+import { characterAccent, characterSkinTag } from "../lib/characterDisplay";
 
 function toPersonaDetail(c: CharacterDetail): PersonaDetail {
   return {
@@ -363,10 +363,6 @@ export function PersonaPanel() {
             if (characterDetail) requestDelete(characterDetail.persona_id);
           }}
           onBack={() => setDetailId(null)}
-          onUpdated={async () => {
-            await refresh();
-            if (detailId) await refreshDetail(detailId);
-          }}
           onSkinRefresh={async () => {
             await refresh();
             if (detailId) {
@@ -377,13 +373,9 @@ export function PersonaPanel() {
           setFeedback={setPersonaFeedback}
           avatarPath={characterDetail?.avatar_path}
           characterIdForAvatar={detailId}
-          displayTags={
+          skinTag={
             characterDetail
-              ? characterCardTags({
-                  skin_count: characterDetail.skin_count,
-                  active_skin_name: characterDetail.active_skin_name,
-                  trait_summary: characterDetail.trait_summary,
-                })
+              ? characterSkinTag({ skin_count: characterDetail.skin_count })
               : undefined
           }
         />
@@ -498,12 +490,12 @@ export function PersonaPanel() {
           >
             {characters.length === 0 && !loading && (
               <p className="persona-grid-empty">
-                {favoritesOnly ? "暂无收藏人物" : "没有匹配的人物"}
+                {favoritesOnly ? "当前没有收藏角色" : "没有匹配的人物"}
               </p>
             )}
             {characters.map((c) => {
               const accent = characterAccent(c.id);
-              const [skinTag, traitTag] = characterCardTags(c);
+              const skinTag = characterSkinTag(c);
               return (
                 <article
                   key={c.id}
@@ -542,7 +534,6 @@ export function PersonaPanel() {
                       <h3 className="persona-card-name">{c.name}</h3>
                       <div className="persona-card-tags">
                         <span className="persona-card-chip">{skinTag}</span>
-                        <span className="persona-card-chip persona-card-chip--trait">{traitTag}</span>
                       </div>
                     </div>
                   </button>

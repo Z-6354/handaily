@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { parseApiError, successFeedback, type SettingsFeedback } from "../lib/apiErrorMessage";
 import { isLikelyIdleName } from "../lib/petAnimationNames";
@@ -7,9 +7,9 @@ import { xiaohan, type PetLinesImportProgressEvent, type PetRemarkLine } from ".
 export interface PetActionLayout {
   idleAnimation: string;
   clickAnimation: string;
- bootAnimation: string;
- returnIdleAnimation: string;
- dragAnimation: string;
+  bootAnimation: string;
+  returnIdleAnimation: string;
+  dragAnimation: string;
  randomAnimations: string[];
   randomMinSec: number;
   randomMaxSec: number;
@@ -28,22 +28,18 @@ interface PetActionSettingsProps {
   onSaved: () => Promise<void>;
   setFeedback: (f: SettingsFeedback | null) => void;
   setBusy: (v: boolean) => void;
-  onPatchReady?: (patch: (partial: Partial<PetActionLayout>) => void) => void;
   onFocusImportTab?: () => void;
 }
 
-const LINE_IMPORT_STEPS = [
-  { id: "preprocess", label: "预处理文本" },
-  { id: "extract", label: "清洗提取台词" },
-  { id: "validate", label: "校验完整性" },
+const TEXT_IMPORT_STEPS = [
+  { id: "parse", label: "解析文本" },
   { id: "save", label: "写入台词库" },
 ] as const;
 
 const WIKI_IMPORT_STEPS = [
   { id: "fetch", label: "爬取网页" },
   { id: "parse", label: "解析页面" },
-  { id: "extract", label: "清洗提取" },
-  { id: "validate", label: "校验完整性" },
+  { id: "extract", label: "提取台词" },
   { id: "save", label: "写入台词库" },
 ] as const;
 
@@ -83,7 +79,6 @@ export function PetActionSettings({
   onSaved,
   setFeedback,
   setBusy,
-  onPatchReady,
   onFocusImportTab,
 }: PetActionSettingsProps) {
   const [importText, setImportText] = useState("");
@@ -98,6 +93,7 @@ export function PetActionSettings({
   const saveSerial = useRef(0);
   const modelIdRef = useRef(modelId);
   const importPanelRef = useRef<HTMLDivElement>(null);
+
   const importFeedbackTitleRef = useRef("台词导入中");
 
   useEffect(() => {
@@ -213,10 +209,6 @@ export function PetActionSettings({
     [onLayoutChange, scheduleAutoSave],
   );
 
-  useEffect(() => {
-    onPatchReady?.(update);
-  }, [onPatchReady, update]);
-
   const setSingle = useCallback(
     (field: "idleAnimation" | "clickAnimation" | "bootAnimation" | "returnIdleAnimation" | "dragAnimation", name: string) => {
       onLayoutChange((prev) => {
@@ -314,18 +306,21 @@ export function PetActionSettings({
       .map((text) => ({ text, animation: null }));
   };
 
-  const runAiImport = async (mode: "append" | "replace") => {
+  const runManualImport = async (mode: "append" | "replace") => {
     const raw = importText.trim();
     if (!raw) {
       setFeedback({ tone: "error", title: "导入失败", detail: "请先粘贴要导入的文本" });
       return;
     }
-    beginLineImport("paste", 1, "正在预处理文本…", "AI 台词导入中");
-    const unlisten = await attachImportProgressListener();
+    beginLineImport("paste", 1, "正在解析文本…", "文本台词导入中");
     await waitForProgressPaint();
     try {
-      const extracted = await xiaohan.petAiImportLines(modelId, raw);
-      setImportProgressStep(4);
+      const extracted = parseImportLines(raw);
+      if (extracted.length === 0) {
+        setFeedback({ tone: "error", title: "导入失败", detail: "未解析到有效台词" });
+        return;
+      }
+      setImportProgressStep(2);
       setImportProgressMessage("正在写入台词库…");
       setFeedback({
         tone: "loading",
@@ -341,11 +336,8 @@ export function PetActionSettings({
         update({ lines: extracted });
       }
       setImportText("");
-      setFeedback(successFeedback(`AI 已导入 ${extracted.length} 条台词（自动保存中）`));
-    } catch (e) {
-      setFeedback(parseApiError(e, "AI 导入台词"));
+      setFeedback(successFeedback(`已导入 ${extracted.length} 条台词（自动保存中）`));
     } finally {
-      unlisten();
       setLineImporting(false);
       setBusy(false);
     }
@@ -387,12 +379,22 @@ export function PetActionSettings({
     }
   };
 
-  const importSteps = importMode === "wiki" ? WIKI_IMPORT_STEPS : LINE_IMPORT_STEPS;
+  const updateLine = useCallback(
+    (idx: number, patch: Partial<PetRemarkLine>) => {
+      mergeLayout((prev) => ({
+        ...prev,
+        lines: prev.lines.map((line, i) => (i === idx ? { ...line, ...patch } : line)),
+      }));
+    },
+    [mergeLayout],
+  );
+
+  const importSteps = importMode === "wiki" ? WIKI_IMPORT_STEPS : TEXT_IMPORT_STEPS;
 
   const importProgressView = lineImporting ? (
     <div className="persona-import-progress pet-lines-import-progress" role="status" aria-live="polite">
       <p className="persona-import-progress-title">
-        {importMode === "wiki" ? "Wiki 导入处理中" : "AI 导入处理中"}
+        {importMode === "wiki" ? "Wiki 导入处理中" : "文本导入处理中"}
       </p>
       <ol className="persona-import-progress-steps">
         {importSteps.map((step, index) => {
@@ -416,41 +418,6 @@ export function PetActionSettings({
       )}
     </div>
   ) : null;
-
-  const lineRows = useMemo(
-    () =>
-      layout.lines.map((line, idx) => (
-        <li
-          key={`${line.text}-${idx}`}
-          className="pet-lines-note"
-          style={{ ["--note-rot" as string]: `${((idx % 5) - 2) * 0.6}deg` }}
-        >
-          <button
-            type="button"
-            className="pet-lines-note-remove"
-            disabled={busy}
-            aria-label="删除台词"
-            onClick={() =>
-              mergeLayout((prev) => ({
-                ...prev,
-                lines: prev.lines.filter((_, i) => i !== idx),
-              }))
-            }
-          >
-            ×
-          </button>
-          <span className="pet-lines-note-no">{idx + 1}</span>
-          <p className="pet-lines-note-text">{line.text}</p>
-          <span
-            className={`pet-lines-note-bind${line.animation ? "" : " is-general"}`}
-            title={line.animation ? `绑定：${line.animation}` : "通用台词"}
-          >
-            {line.animation ? `↳ ${line.animation}` : "通用"}
-          </span>
-        </li>
-      )),
-    [busy, layout.lines, mergeLayout],
-  );
 
   if (section === "actions" && animations.length === 0) {
     if (animationsLoading) {
@@ -551,17 +518,77 @@ export function PetActionSettings({
 
   if (section === "lines") {
     return (
-      <div className="pet-tab-section pet-tab-section--board">
-        <div className="pet-lines-board">
-          {lineRows.length > 0 ? (
-            <ul className="pet-lines-grid">{lineRows}</ul>
-          ) : (
-            <div className="pet-lines-empty">
-              <p className="pet-lines-empty-msg">还没有台词便签</p>
-              <p className="pet-lines-empty-hint">切换到「台词导入」写一句或批量导入</p>
-            </div>
-          )}
-        </div>
+      <div className="pet-tab-section">
+        <p className="hint-block pet-lines-table-hint">
+          未绑定动作时，该台词可在全部动作触发时随机出现。
+        </p>
+        {layout.lines.length === 0 ? (
+          <p className="hint-block">暂无台词，可到「台词导入」添加，或切换人物后从 Wiki 自动导入。</p>
+        ) : (
+          <div className="pet-action-table-wrap">
+            <table className="pet-action-table pet-lines-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>台词</th>
+                  <th>绑定动作</th>
+                  <th aria-label="操作" />
+                </tr>
+              </thead>
+              <tbody>
+                {layout.lines.map((line, idx) => (
+                  <tr key={`line-${idx}`}>
+                    <td className="pet-lines-table-no">{idx + 1}</td>
+                    <td>
+                      <input
+                        type="text"
+                        className="pet-lines-table-input"
+                        value={line.text}
+                        disabled={busy}
+                        aria-label={`台词 ${idx + 1}`}
+                        onChange={(e) => updateLine(idx, { text: e.target.value })}
+                      />
+                    </td>
+                    <td>
+                      <select
+                        className="pet-lines-table-select"
+                        value={line.animation ?? ""}
+                        disabled={busy}
+                        aria-label={`台词 ${idx + 1} 绑定动作`}
+                        onChange={(e) =>
+                          updateLine(idx, { animation: e.target.value || null })
+                        }
+                      >
+                        <option value="">全部动作</option>
+                        {animations.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn-link btn-sm pet-lines-table-remove"
+                        disabled={busy}
+                        aria-label={`删除台词 ${idx + 1}`}
+                        onClick={() =>
+                          mergeLayout((prev) => ({
+                            ...prev,
+                            lines: prev.lines.filter((_, i) => i !== idx),
+                          }))
+                        }
+                      >
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     );
   }
@@ -577,7 +604,7 @@ export function PetActionSettings({
               </span>
               <div>
                 <h4 className="pet-lines-import-block-title">写一句新台词</h4>
-                <p className="pet-lines-import-block-desc">快速贴一条到便签墙，可绑定动作</p>
+                <p className="pet-lines-import-block-desc">快速添加一条台词，可绑定特定动作</p>
               </div>
             </div>
             <div className="pet-lines-composer-row">
@@ -603,7 +630,7 @@ export function PetActionSettings({
                 title="绑定动作"
                 aria-label="绑定动作"
               >
-                <option value="">通用</option>
+                <option value="">全部动作</option>
                 {animations.map((n) => (
                   <option key={n} value={n}>
                     {n}
@@ -679,7 +706,7 @@ export function PetActionSettings({
               <div>
                 <h4 className="pet-lines-import-block-title">粘贴文本导入</h4>
                 <p className="pet-lines-import-block-desc">
-                  支持混杂文本、逐行、JSON；AI 会清洗提取并保留原文措辞
+                  支持逐行、JSON 数组；每行一条台词，或带 animation 字段的对象
                 </p>
               </div>
             </div>
@@ -687,8 +714,7 @@ export function PetActionSettings({
               <textarea
                 className="pet-lines-import"
                 placeholder={
-                  "每行一条台词，或 JSON：[{\"text\":\"…\",\"animation\":\"dance\"}]\n" +
-                  "也可粘贴含章节、说明的混杂文本，由 AI 逐条提取"
+                  "每行一条台词，或 JSON：[{\"text\":\"…\",\"animation\":\"dance\"}]"
                 }
                 value={importText}
                 disabled={busy || lineImporting}
@@ -697,102 +723,23 @@ export function PetActionSettings({
               />
               <aside className="pet-lines-import-side">
                 <div className="pet-lines-actions-group">
-                  <span className="pet-lines-actions-label">规则解析</span>
+                  <span className="pet-lines-actions-label">导入</span>
                   <div className="pet-lines-actions">
                     <button
                       type="button"
-                      className="btn-secondary btn-sm"
+                      className="btn-primary btn-sm"
                       disabled={busy || lineImporting || !importText.trim()}
-                      onClick={() => {
-                        const incoming = parseImportLines(importText);
-                        if (incoming.length === 0) {
-                          setFeedback({
-                            tone: "error",
-                            title: "导入失败",
-                            detail: "未解析到有效台词",
-                          });
-                          return;
-                        }
-                        mergeLayout((prev) => ({
-                          ...prev,
-                          lines: [...prev.lines, ...incoming],
-                        }));
-                        setImportText("");
-                        setFeedback(
-                          successFeedback(`已导入 ${incoming.length} 条台词（自动保存中）`),
-                        );
-                      }}
+                      onClick={() => void runManualImport("append")}
                     >
-                      追加
+                      {lineImporting && importMode === "paste" ? "导入中…" : "追加"}
                     </button>
                     <button
                       type="button"
                       className="btn-secondary btn-sm"
                       disabled={busy || lineImporting || !importText.trim()}
-                      onClick={() => {
-                        const incoming = parseImportLines(importText);
-                        if (incoming.length === 0) {
-                          setFeedback({
-                            tone: "error",
-                            title: "导入失败",
-                            detail: "未解析到有效台词",
-                          });
-                          return;
-                        }
-                        update({ lines: incoming });
-                        setImportText("");
-                        setFeedback(
-                          successFeedback(`已替换为 ${incoming.length} 条台词（自动保存中）`),
-                        );
-                      }}
+                      onClick={() => void runManualImport("replace")}
                     >
                       覆盖
-                    </button>
-                  </div>
-                </div>
-                <div className="pet-lines-actions-group">
-                  <span className="pet-lines-actions-label">AI 处理</span>
-                  <div className="pet-lines-actions">
-                    <button
-                      type="button"
-                      className="btn-secondary btn-sm"
-                      disabled={busy || lineImporting || !importText.trim()}
-                      onClick={() => void runAiImport("append")}
-                    >
-                      {lineImporting && importMode === "paste" ? "导入中…" : "智能追加"}
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary btn-sm"
-                      disabled={busy || lineImporting || !importText.trim()}
-                      onClick={() => void runAiImport("replace")}
-                    >
-                      智能覆盖
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-secondary btn-sm"
-                      disabled={busy || lineImporting}
-                      onClick={async () => {
-                        setBusy(true);
-                        setFeedback(null);
-                        try {
-                          const suggested = await xiaohan.petAiSuggestLines(modelId, 8);
-                          mergeLayout((prev) => ({
-                            ...prev,
-                            lines: [...prev.lines, ...suggested],
-                          }));
-                          setFeedback(
-                            successFeedback(`AI 已生成 ${suggested.length} 条台词（自动保存中）`),
-                          );
-                        } catch (e) {
-                          setFeedback(parseApiError(e, "AI 生成台词"));
-                        } finally {
-                          setBusy(false);
-                        }
-                      }}
-                    >
-                      一键生成
                     </button>
                   </div>
                 </div>

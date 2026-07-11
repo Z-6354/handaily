@@ -6,11 +6,8 @@
 //! - `writer` — 延迟 flush + 短片段合并 + 定期 WAL + 退出 flush
 
 pub mod activity_key;
-pub mod audio_classify;
-pub mod audio_monitor;
 pub mod context_enrich;
 pub mod display_name;
-pub mod file_watcher;
 pub mod icon;
 pub mod idle;
 pub mod input_monitor;

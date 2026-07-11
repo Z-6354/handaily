@@ -8,13 +8,21 @@ import { tauriInvoke as invoke, waitForTauriInternals } from "../lib/tauriInvoke
 
 import "./pet.css";
 
-import { SpinePet, type PetAssetConfig } from "./spinePet";
+import { SpinePet } from "./spinePet";
 import {
-  createPetAssetResolver,
-  preloadModelAssets,
-  warmModelBundleCache,
-  type PetAssetResolver,
-} from "./petAssetResolver";
+  createPetDisplayModule,
+  reloadCommand,
+  type PetAnimationMeta,
+  type PetConfigPayload,
+  type PetRemarkLine,
+  type PetDisplayModule,
+  type ReloadSource,
+} from "./display";
+import { releaseCanvasGlContext } from "./display/canvasHost";
+import {
+  cancelDeferredSkinPreload,
+  scheduleSiblingSkinPreload,
+} from "./display/assetPreloadScheduler";
 import {
   convertStageOffsetForOrigin,
   isCursorOutsideWindow,
@@ -24,6 +32,7 @@ import {
   petMovementLog,
   petMovementLogThrottled,
 } from "./petMovementLog";
+import { petLog, initPetLogSink } from "./log";
 
 const petWindow = getCurrentWindow();
 
@@ -55,26 +64,6 @@ function movementCursor(me: MouseEvent): Record<string, number> {
   };
 }
 
-interface PetRemarkLine {
-  text: string;
-  animation?: string | null;
-}
-
-interface PetAnimationMeta {
-  animations: string[];
-  idle_animation?: string | null;
-  click_animation?: string | null;
-  boot_animation?: string | null;
-  return_idle_animation?: string | null;
-  drag_animation?: string | null;
-  random_animations: string[];
-  random_min_sec: number;
-  random_max_sec: number;
-  lines: PetRemarkLine[];
-}
-
-
-
 interface PetRemarkPayload {
 
   text: string;
@@ -83,46 +72,6 @@ interface PetRemarkPayload {
 
   animation?: string | null;
 
-}
-
-
-
-interface PetConfigPayload {
-  model_id: string;
-  model_name: string;
-
-  asset_base: string;
-
-  config_file?: string | null;
-
-  skel_file: string;
-
-  atlas_file: string;
-
-  png_file: string;
-
-  use_file_src: boolean;
-
-  power_mode: string;
-
-  scale: number;
-
-  animations: string[];
-
-  idle_animation?: string | null;
-  click_animation?: string | null;
-  boot_animation?: string | null;
- return_idle_animation?: string | null;
- drag_animation?: string | null;
- random_animations: string[];
- random_min_sec: number;
- random_max_sec: number;
- lines: PetRemarkLine[];
- window_width: number;
-  window_height: number;
-  offset_x: number;
-  offset_y: number;
-  bubble_enabled: boolean;
 }
 
 
@@ -202,7 +151,7 @@ canvasWrap.className = "pet-canvas-wrap";
 
 
 
-const canvas = document.createElement("canvas");
+let canvas = document.createElement("canvas");
 
 canvas.className = "pet-canvas";
 
@@ -256,7 +205,16 @@ let pendingBubble: { text: string; animation?: string | null } | null = null;
 let bubbleEnabled = true;
 
 let pet: SpinePet | null = null;
-let petAssetResolver: PetAssetResolver | null = null;
+let petDisplay: PetDisplayModule;
+let petDisplayReady = false;
+let pendingPetReload = false;
+let pendingSwitchReload = false;
+let pendingReloadConfig: PetConfigPayload | null = null;
+interface PetSwitchPayload {
+  switch_id: number;
+  config: PetConfigPayload;
+}
+let pendingPetSwitch: PetSwitchPayload | null = null;
 let lastFallbackSrc = "/assets/pet/chaijun/chaijun.png";
 
 let pointerDown = false;
@@ -288,7 +246,11 @@ let editBoundsMode = false;
 let editBoundsEnterPending = false;
 
 function shouldDeferClickThrough(): boolean {
-  return editBoundsMode || editBoundsEnterPending;
+  return (
+    editBoundsMode ||
+    editBoundsEnterPending ||
+    (petDisplayReady && petDisplay.reloadInProgress)
+  );
 }
 
 function resetPointerGestureState() {
@@ -754,27 +716,6 @@ function isInsideEditArea(target: EventTarget | null): boolean {
   return editOverlay.contains(target) || stage.contains(target);
 }
 
-
-
-function modelAssetFilenames(cfg: PetConfigPayload): string[] {
-  const files = [cfg.skel_file, cfg.atlas_file];
-  if (cfg.config_file) files.push(cfg.config_file);
-  return files.filter(Boolean);
-}
-
-function assetConfigFromPayload(cfg: PetConfigPayload): PetAssetConfig {
-  const base = cfg.asset_base.endsWith("/") ? cfg.asset_base : `${cfg.asset_base}/`;
-  return {
-    pathPrefix: base,
-    configFile: cfg.config_file ?? null,
-    skelFile: cfg.skel_file,
-    atlasFile: cfg.atlas_file,
-    pngFile: cfg.png_file,
-  };
-}
-
-
-
 function positionBubble() {
   if (!root) return;
   if (editBoundsMode) {
@@ -817,7 +758,6 @@ function positionBubble() {
   bubble.style.left = `${left}px`;
 }
 
-let petLines: PetRemarkLine[] = [];
 let pendingPreview: { animation: string; loop: boolean } | null = null;
 
 function runPreviewAnimation(animation: string, loopAnim: boolean) {
@@ -889,9 +829,201 @@ async function loadBubbleEnabled() {
 }
 
 async function loadConfig(): Promise<PetConfigPayload> {
-
+  const cached = pendingReloadConfig;
+  if (cached) {
+    pendingReloadConfig = null;
+    petLog("debug", "reload", "using nudge config", { modelId: cached.model_id });
+    return cached;
+  }
   return invoke<PetConfigPayload>("pet_get_config");
+}
 
+function syncPetFromDisplay() {
+  pet = petDisplay.pet;
+}
+
+function initPetDisplayModule() {
+  petDisplay = createPetDisplayModule(
+    {
+      canvas,
+      canvasWrap,
+      fallback,
+      getDisplaySize: () => ({ w: canvasDisplayW, h: canvasDisplayH }),
+      setDisplaySize: (w, h) => {
+        canvasDisplayW = w;
+        canvasDisplayH = h;
+      },
+      getFallbackSrc: () => lastFallbackSrc,
+      setFallbackSrc: (url) => {
+        lastFallbackSrc = url;
+        fallback.src = url;
+      },
+      showBootHint,
+      hideBootHint,
+      clearLoadError: clearPetLoadError,
+      pickLine: pickLineForAnimation,
+      showBubble,
+      replaceCanvas: (next) => {
+        canvas = next;
+      },
+    },
+    {
+      loadConfig,
+      refreshScreenBounds,
+      resolveWindowSize: async (cfg, mode) => {
+        let nextW = Math.max(MIN_W, cfg.window_width || 240);
+        let nextH = Math.max(MIN_H, cfg.window_height || 320);
+        if (mode === "hot") {
+          nextW = Math.max(MIN_W, canvasDisplayW);
+          nextH = Math.max(MIN_H, canvasDisplayH);
+        } else {
+          try {
+            const frameBounds = await readWindowBounds();
+            if (Number.isFinite(frameBounds.w) && frameBounds.w >= MIN_W) {
+              nextW = Math.max(MIN_W, frameBounds.w);
+            }
+            if (Number.isFinite(frameBounds.h) && frameBounds.h >= MIN_H) {
+              nextH = Math.max(MIN_H, frameBounds.h);
+            }
+          } catch {
+            // DB 尺寸
+          }
+        }
+        return { w: nextW, h: nextH };
+      },
+      applyWindowSize: async (w, h) => applyWindowSize(w, h, false),
+      applyLayoutFromConfig: (cfg) => {
+        stageScale = cfg.scale || 0.8;
+        stageOffsetX = cfg.offset_x ?? 0;
+        stageOffsetY = cfg.offset_y ?? 0;
+        clampStageOffset();
+        applyBubbleEnabledFromConfig(cfg.bubble_enabled);
+      },
+      applyCanvasDisplaySize,
+      shouldExitEditBeforeReload: async () => {
+        if (editBoundsMode) await exitEditBounds();
+      },
+      isAppExiting: () => appExiting,
+      syncAnimations,
+      getPendingPreview: () => pendingPreview,
+      clearPendingPreview: () => {
+        pendingPreview = null;
+      },
+      runPreviewAnimation,
+    },
+    invoke,
+  );
+
+  petDisplay.on("reload-start", ({ isSwitch }) => {
+    cancelDeferredSkinPreload(isSwitch ? "switch" : "reload");
+    if (!isSwitch) showBootHint();
+  });
+
+  petDisplay.on("reload-success", ({ cfg, animationNames }) => {
+    syncPetFromDisplay();
+    pet?.setRenderPaused(false);
+    void applyStageScale(stageScale);
+    clampStageOffset();
+    applyStageTransform();
+    applyCanvasDisplaySize();
+    if (!petDisplay.reloadInProgress) startClickThrough();
+    petLog("info", "reload", "success", { modelId: cfg.model_id, animations: animationNames.length });
+    scheduleSiblingSkinPreload(cfg.model_id);
+  });
+
+  petDisplay.on("reload-failure", ({ err }) => showPetLoadError(err));
+
+  petDisplay.on("reload-finally", () => {
+    void restoreNormalInteraction();
+    if (!pendingSwitchReload) return;
+    pendingSwitchReload = false;
+    void (async () => {
+      const cached = pendingReloadConfig;
+      const current = petDisplay.currentModelId;
+      if (cached && current && cached.model_id === current) {
+        pendingReloadConfig = null;
+        petLog("info", "reload", "skip coalesced same model", { modelId: current });
+        return;
+      }
+      await reloadPet("rust");
+      while (pendingSwitchReload) {
+        pendingSwitchReload = false;
+        const again = pendingReloadConfig;
+        const loaded = petDisplay.currentModelId;
+        if (again && loaded && again.model_id === loaded) {
+          pendingReloadConfig = null;
+          petLog("info", "reload", "skip coalesced same model", { modelId: loaded });
+          continue;
+        }
+        await reloadPet("rust");
+      }
+    })();
+  });
+}
+
+function requestPetReload(source: ReloadSource = "rust") {
+  if (!petDisplayReady) {
+    pendingPetReload = true;
+    petLog("info", "boot", "reload queued (display not ready)", { source });
+    return;
+  }
+  if (petDisplay.reloadInProgress) {
+    pendingSwitchReload = true;
+    petLog("info", "reload", "coalesced (reload in progress)", { source });
+    return;
+  }
+  if (!bootReloadStarted) {
+    startBootReload(`nudge-${source}`);
+    return;
+  }
+  void reloadPet(source);
+}
+
+async function reloadPet(source: ReloadSource = "rust") {
+  if (!petDisplayReady) {
+    pendingPetReload = true;
+    return;
+  }
+  petLog("info", "reload", "request", { source });
+  await petDisplay.reload(reloadCommand("pet-reload", source));
+}
+
+async function executePetSwitch(payload: PetSwitchPayload) {
+  if (!petDisplayReady) {
+    pendingPetSwitch = payload;
+    return;
+  }
+  petLog("info", "switch", "menu switch request", {
+    switchId: payload.switch_id,
+    modelId: payload.config.model_id,
+  });
+  await petDisplay.switchModel(payload.config, payload.switch_id);
+}
+
+function flushPendingPetSwitch() {
+  if (!pendingPetSwitch || !petDisplayReady) return;
+  const payload = pendingPetSwitch;
+  pendingPetSwitch = null;
+  void executePetSwitch(payload);
+}
+
+let bootReloadStarted = false;
+
+function startBootReload(reason: string) {
+  if (bootReloadStarted || !petDisplayReady) return;
+  bootReloadStarted = true;
+  petLog("info", "boot", "start model load", { reason });
+  void petDisplay.reload(reloadCommand("nudge", "boot", reason));
+}
+
+function flushPendingPetReload() {
+  if (!pendingPetReload || !petDisplayReady) return;
+  pendingPetReload = false;
+  if (!bootReloadStarted) {
+    startBootReload("queued-nudge");
+  } else {
+    void reloadPet("rust");
+  }
 }
 
 
@@ -1307,23 +1439,13 @@ function ensureCanvasAttached() {
 
 }
 
-function releaseCanvasGlContext() {
-  try {
-    const gl =
-      canvas.getContext("webgl2") ??
-      canvas.getContext("webgl") ??
-      canvas.getContext("experimental-webgl");
-    if (gl && gl instanceof WebGLRenderingContext) {
-      gl.getExtension("WEBGL_lose_context")?.loseContext();
-    }
-  } catch {
-    // ignore
-  }
-}
-
 function disposePetForExit() {
   if (appExiting) return;
   appExiting = true;
+  root.style.visibility = "hidden";
+  root.style.pointerEvents = "none";
+  canvasWrap.style.visibility = "hidden";
+  fallback.style.display = "none";
   stopClickThroughPoll();
   stopEditBoundsPoll();
   cancelEditBoundsBlurExit();
@@ -1340,11 +1462,9 @@ function disposePetForExit() {
   pointerDown = false;
   windowDragStarted = false;
   windowDragAnchorReady = false;
-  pet?.dispose();
+  petDisplay?.disposeForExit();
   pet = null;
-  petAssetResolver?.dispose();
-  petAssetResolver = null;
-  releaseCanvasGlContext();
+  releaseCanvasGlContext(canvas);
   petEventUnlisten?.();
 }
 
@@ -1431,222 +1551,6 @@ function applyStageOffset(x: number, y: number) {
 
 
 
-async function initSpine(
-  cfg: PetConfigPayload,
-  opts?: { skipBoot?: boolean; skipVisibilityWait?: boolean; hotReload?: boolean; forceGlTeardown?: boolean },
-): Promise<boolean> {
-
-  const skipBoot = opts?.skipBoot ?? false;
-  const hotReload = opts?.hotReload ?? false;
-  const forceGlTeardown = opts?.forceGlTeardown ?? false;
-
-  stageScale = cfg.scale || 0.8;
-
-  stageOffsetX = cfg.offset_x ?? 0;
-
-  stageOffsetY = cfg.offset_y ?? 0;
-
-  clampStageOffset();
-
-  petAssetResolver?.dispose();
-  petAssetResolver = createPetAssetResolver(cfg);
-  const assets = assetConfigFromPayload(cfg);
-  const assetFiles = [...modelAssetFilenames(cfg), cfg.png_file].filter(Boolean);
-  const hadPet = pet !== null;
-  let fallbackUrl: string;
-  if (cfg.use_file_src) {
-    const warmPromise = warmModelBundleCache(cfg.model_id, assetFiles);
-    fallbackUrl = await Promise.all([
-      warmPromise,
-      petAssetResolver.urlFor(cfg.png_file),
-    ]).then(([, url]) => url);
-  } else {
-    void preloadModelAssets(cfg.model_id, assetFiles, false, cfg.asset_base);
-    fallbackUrl = await petAssetResolver.urlFor(cfg.png_file);
-  }
-  lastFallbackSrc = fallbackUrl;
-  fallback.src = fallbackUrl;
-
-  let nextW = Math.max(MIN_W, cfg.window_width || 240);
-  let nextH = Math.max(MIN_H, cfg.window_height || 320);
-  if (skipBoot && !hotReload) {
-    try {
-      const frameBounds = await readWindowBounds();
-      if (Number.isFinite(frameBounds.w) && frameBounds.w >= MIN_W) {
-        nextW = Math.max(MIN_W, frameBounds.w);
-      }
-      if (Number.isFinite(frameBounds.h) && frameBounds.h >= MIN_H) {
-        nextH = Math.max(MIN_H, frameBounds.h);
-      }
-    } catch {
-      // 使用 DB 尺寸
-    }
-  } else if (hotReload) {
-    nextW = Math.max(MIN_W, canvasDisplayW);
-    nextH = Math.max(MIN_H, canvasDisplayH);
-  }
-  const sizeChanged = nextW !== canvasDisplayW || nextH !== canvasDisplayH;
-  if (sizeChanged) {
-    await applyWindowSize(nextW, nextH);
-  }
-
-  if (hotReload) {
-    await awaitAnimationFrames(1);
-    ensureCanvasAttached();
-    if (canvas.width !== canvasDisplayW || canvas.height !== canvasDisplayH) {
-      canvas.width = canvasDisplayW;
-      canvas.height = canvasDisplayH;
-    }
-  } else if (!hadPet && !forceGlTeardown) {
-    if (!skipBoot) showBootHint();
-    canvasWrap.style.visibility = "hidden";
-    fallback.style.display = "none";
-    ensureCanvasAttached();
-    if (canvas.width !== canvasDisplayW || canvas.height !== canvasDisplayH) {
-      canvas.width = canvasDisplayW;
-      canvas.height = canvasDisplayH;
-    }
-  } else {
-    canvasWrap.style.visibility = "hidden";
-    fallback.style.display = "none";
-    showBootHint();
-    pet?.dispose();
-    pet = null;
-    releaseCanvasGlContext();
-    canvas.width = 0;
-    canvas.height = 0;
-    await awaitAnimationFrames(2);
-    ensureCanvasAttached();
-    canvas.width = canvasDisplayW;
-    canvas.height = canvasDisplayH;
-  }
-
-  if (!opts?.skipVisibilityWait) {
-    await waitUntilVisibleForLoad();
-  }
-
-  const animOptions = {
-    idleAnimation: cfg.idle_animation,
-    clickAnimation: cfg.click_animation,
-    bootAnimation: cfg.boot_animation,
-   returnIdleAnimation: cfg.return_idle_animation,
-   dragAnimation: cfg.drag_animation,
-   randomAnimations: cfg.random_animations ?? [],
-    randomMinSec: cfg.random_min_sec ?? 30,
-    randomMaxSec: cfg.random_max_sec ?? 120,
-    onRandomAction: (name: string) => {
-      const text = pickLineForAnimation(petLines, name);
-      if (text) showBubble(text, name);
-    },
-  };
-  petLines = cfg.lines ?? [];
-
-
-
-  try {
-    if (hotReload && pet) {
-      pet.dispose();
-      pet = null;
-    }
-
-    pet = new SpinePet(canvas, assets, {
-      resolveAssetUrl: petAssetResolver.urlFor,
-      readViaIpc: petAssetResolver.readViaIpc,
-      skipBootAnimation: true,
-      ...animOptions,
-      onTap: (animation) => {
-        if (!animation) return;
-        const text = pickLineForAnimation(petLines, animation);
-        if (text) showBubble(text, animation);
-      },
-    });
-
-    const names = await pet.start();
-
-    canvasWrap.style.display = "block";
-    fallback.style.display = "none";
-
-   pet.resizeCanvas(canvasDisplayW, canvasDisplayH, !hotReload);
-
-    pet.configureAnimations({
-      idleAnimation: cfg.idle_animation,
-      clickAnimation: cfg.click_animation,
-      bootAnimation: cfg.boot_animation,
-     returnIdleAnimation: cfg.return_idle_animation,
-     dragAnimation: cfg.drag_animation,
-     randomAnimations: cfg.random_animations ?? [],
-     randomMinSec: cfg.random_min_sec ?? 30,
-     randomMaxSec: cfg.random_max_sec ?? 120,
-  }, { soft: true });
-
-    await applyStageScale(stageScale);
-
-    clampStageOffset();
-
-    applyStageTransform();
-
-    applyCanvasDisplaySize();
-
-    if (pendingPreview) {
-      const p = pendingPreview;
-      pendingPreview = null;
-      runPreviewAnimation(p.animation, p.loop);
-    }
-
-    canvasWrap.style.visibility = "visible";
-    hideBootHint();
-    clearPetLoadError();
-    if (!hotReload) {
-      startClickThrough();
-    }
-
-    if (names.length > 0) {
-      void syncAnimations(cfg.model_id, names, cfg.idle_animation).then((meta) => {
-        if (!pet) return;
-        if (!meta) return;
-        pet.configureAnimations({
-          idleAnimation: meta.idle_animation ?? cfg.idle_animation,
-          clickAnimation: meta.click_animation ?? cfg.click_animation,
-          bootAnimation: meta.boot_animation ?? cfg.boot_animation,
-         returnIdleAnimation: meta.return_idle_animation ?? cfg.return_idle_animation,
-         dragAnimation: meta.drag_animation ?? cfg.drag_animation,
-         randomAnimations: meta.random_animations ?? cfg.random_animations ?? [],
-         randomMinSec: meta.random_min_sec ?? cfg.random_min_sec ?? 30,
-         randomMaxSec: meta.random_max_sec ?? cfg.random_max_sec ?? 120,
-        }, { soft: true });
-        petLines = meta.lines ?? cfg.lines ?? petLines;
-      });
-    }
-    return true;
-
-  } catch (err) {
-    console.error("Spine 初始化失败", err);
-    pet?.dispose();
-    pet = null;
-    if (hotReload) {
-      hideBootHint();
-      return false;
-    }
-    releaseCanvasGlContext();
-    canvasWrap.style.visibility = "visible";
-    canvasWrap.style.display = "none";
-
-    fallback.style.display = "block";
-    hideBootHint();
-
-    applyStageTransform();
-    startClickThrough();
-    return false;
-
-  }
-
-}
-
-
-
-let reloadSerial: Promise<void> = Promise.resolve();
-let reloadInProgress = false;
-let reloadEverStarted = false;
 let resumeInFlight = false;
 let lastResumeAt = 0;
 const RESUME_DEBOUNCE_MS = 250;
@@ -1683,10 +1587,9 @@ function showPetLoadError(err: unknown) {
 async function resumePetFromHidden() {
   if (mainWindowCovering) return;
   if (Date.now() < suppressVisibilityUntil) return;
-  if (reloadInProgress) {
-    void reloadSerial.then(() => {
-      if (!document.hidden && !mainWindowCovering) void resumePetFromHidden();
-    });
+  if (petDisplay.reloadInProgress) {
+    await petDisplay.whenIdle();
+    if (!document.hidden && !mainWindowCovering) void resumePetFromHidden();
     return;
   }
   const now = Date.now();
@@ -1696,7 +1599,7 @@ async function resumePetFromHidden() {
   try {
     await waitUntilVisibleForLoad();
     if (!pet) {
-      void reloadPet();
+      void reloadPet("visibility");
       return;
     }
     pet.setRenderPaused(false);
@@ -1705,71 +1608,6 @@ async function resumePetFromHidden() {
   } finally {
     resumeInFlight = false;
   }
-}
-
-async function reloadPet() {
-
-  if (appExiting) return;
-
-  if (editBoundsMode) {
-    await exitEditBounds();
-  }
-
-  reloadSerial = reloadSerial.then(async () => {
-    reloadInProgress = true;
-    reloadEverStarted = true;
-    const skipBoot = pet !== null;
-    if (!skipBoot) showBootHint();
-    try {
-      const [, cfg] = await Promise.all([
-        refreshScreenBounds(),
-        loadConfig(),
-      ]);
-      applyBubbleEnabledFromConfig(cfg.bubble_enabled);
-
-      let ok = false;
-      if (skipBoot) {
-        ok = await initSpine(cfg, { skipBoot: true, skipVisibilityWait: true, hotReload: true });
-      }
-      if (!ok) {
-        await awaitAnimationFrames(1);
-        ok = await initSpine(cfg, {
-          skipBoot: true,
-          skipVisibilityWait: true,
-          hotReload: false,
-          forceGlTeardown: skipBoot,
-        });
-      }
-
-      if (ok && pet) {
-        await invoke("pet_mark_spine_ready");
-        clearPetLoadError();
-      } else if (!ok) {
-        showPetLoadError(new Error("Spine 模型加载失败，已显示静态图"));
-      }
-    } catch (e) {
-
-      console.error("桌宠配置加载失败", e);
-
-      fallback.src = lastFallbackSrc;
-
-      canvasWrap.style.display = "none";
-
-      fallback.style.display = "block";
-
-      applyStageTransform();
-
-      showPetLoadError(e);
-    } finally {
-      hideBootHint();
-      reloadInProgress = false;
-      void restoreNormalInteraction();
-    }
-
-  });
-
-  await reloadSerial;
-
 }
 
 // 尽早注册，避免 Rust on_page_load 发出的 pet-reload 在监听器就绪前丢失
@@ -1816,8 +1654,17 @@ void tauriReady.then(() => {
 });
 
 const petReloadUnlistenPromise = tauriReady.then(() =>
-  listen("pet-reload", () => {
-    void reloadPet();
+  listen<PetConfigPayload | null>("pet-reload", (ev) => {
+    if (ev.payload) {
+      pendingReloadConfig = ev.payload;
+    }
+    requestPetReload("rust");
+  }),
+);
+
+const petSwitchUnlistenPromise = tauriReady.then(() =>
+  listen<PetSwitchPayload>("pet-switch", (ev) => {
+    void executePetSwitch(ev.payload);
   }),
 );
 
@@ -1842,7 +1689,7 @@ async function refreshPetAnimations() {
      randomMinSec: cfg.random_min_sec ?? 30,
      randomMaxSec: cfg.random_max_sec ?? 120,
  }, { soft: true });
-   petLines = cfg.lines ?? [];
+   petDisplay.setPetLines(cfg.lines ?? []);
  } catch {
    // 刷新失败时保留当前配置
   }
@@ -2005,7 +1852,11 @@ async function waitForExitEditIdle(maxMs = 4000): Promise<boolean> {
 }
 
 async function enterEditBounds() {
-  if (editBoundsMode || editBoundsEnterPending || reloadInProgress) return;
+  if (editBoundsMode || editBoundsEnterPending) return;
+  if (petDisplayReady && petDisplay.reloadInProgress) {
+    petLog("info", "edit", "waiting for model reload before enter");
+    await petDisplay.whenIdle();
+  }
   if (exitEditBoundsInFlight) {
     petMovementLog("enter-blocked", { detail: "exit-in-flight", ...movementLogFlags() });
     const idle = await waitForExitEditIdle();
@@ -2519,20 +2370,27 @@ stage.addEventListener("mousedown", (e) => {
 stage.addEventListener("contextmenu", (e) => {
   if (!hitInteractive(e.clientX, e.clientY)) return;
   e.preventDefault();
-  void applyClickThrough(false, true).then(() => openPetMenu());
+  stopClickThroughPoll();
+  void openPetMenu();
+  void applyClickThrough(false, true);
 });
 
 root.addEventListener("contextmenu", (e) => {
   if (e.target === stage || stage.contains(e.target as Node)) return;
   if (!hitInteractive(e.clientX, e.clientY)) return;
   e.preventDefault();
-  void applyClickThrough(false, true).then(() => openPetMenu());
+  stopClickThroughPoll();
+  void openPetMenu();
+  void applyClickThrough(false, true);
 });
 
 async function openPetMenu() {
   if (rightClickMenuLock) return;
   rightClickMenuLock = true;
   try {
+    if (petDisplayReady && petDisplay.reloadInProgress) {
+      petLog("info", "menu", "open during reload");
+    }
     await invoke<boolean>("pet_menu_toggle_at_cursor");
   } catch (err) {
     console.error("打开桌宠菜单失败", err);
@@ -2540,7 +2398,7 @@ async function openPetMenu() {
   } finally {
     window.setTimeout(() => {
       rightClickMenuLock = false;
-    }, 250);
+    }, 120);
   }
 }
 
@@ -2640,6 +2498,7 @@ async function setupPetEvents() {
   if (petEventUnlisten) return;
 
   const unlistenReload = await petReloadUnlistenPromise;
+  const unlistenSwitch = await petSwitchUnlistenPromise;
   const unlistenResume = await petResumeUnlistenPromise;
 
   const unlistenRemark = await listen<PetRemarkPayload>("pet-remark", (ev) => {
@@ -2703,6 +2562,7 @@ async function setupPetEvents() {
   petEventUnlisten = () => {
     unlistenRemark();
     unlistenReload();
+    unlistenSwitch();
     unlistenResume();
     unlistenAnimations();
     unlistenPreview();
@@ -2720,37 +2580,52 @@ async function setupPetEvents() {
       petEventUnlisten?.();
       stopClickThroughPoll();
       stopEditBoundsPoll();
-      pet?.dispose();
+      petDisplay?.disposeForExit();
       pet = null;
-      petAssetResolver?.dispose();
-      petAssetResolver = null;
-      releaseCanvasGlContext();
+      releaseCanvasGlContext(canvas);
     });
   }
 }
 
 async function bootPetWindow() {
+  petLog("info", "boot", "pet window script start");
   await waitForTauriInternals();
+  initPetDisplayModule();
+  petLog("info", "boot", "display module ready");
+
   try {
     const dbPath = await invoke<string>("app_get_data_path");
     const dataDir = dbPath.replace(/[\\/][^\\/]+$/, "");
+    initPetLogSink(
+      (lines) => invoke("pet_append_display_logs", { lines }),
+      dataDir,
+    );
     initPetMovementLog(
       (lines) => invoke("pet_append_movement_logs", { lines }),
       dataDir,
     );
   } catch (err) {
-    console.error("pet movement log init failed", err);
+    console.error("pet log init failed", err);
     initPetMovementLog(async () => {});
   }
-  void refreshScreenBounds();
+
   await setupPetEvents();
   await loadBubbleEnabled();
-  // 首启仅依赖 Rust nudge；短兜底防监听器就绪前 nudge 丢失（勿立即 reload，避免与 nudge 双重重载）
+  petDisplayReady = true;
+  flushPendingPetReload();
+  flushPendingPetSwitch();
+  void refreshScreenBounds();
+
+  if (!bootReloadStarted) {
+    startBootReload("boot-initial");
+  }
+
   window.setTimeout(() => {
-    if (!pet && !reloadInProgress && !reloadEverStarted) {
-      void reloadPet();
+    if (!pet && !bootReloadStarted) {
+      petLog("warn", "boot", "fallback reload (no load started)");
+      startBootReload("boot-fallback");
     }
-  }, 600);
+  }, 1200);
 }
 
 void bootPetWindow();

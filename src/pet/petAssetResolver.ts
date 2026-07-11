@@ -1,4 +1,5 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { tauriInvoke as invoke } from "../lib/tauriInvoke";
+import { petLog } from "./log/petDebugLog";
 
 export type ResolveAssetUrl = (filename: string) => Promise<string>;
 
@@ -9,8 +10,8 @@ export interface PetAssetResolver {
   dispose: () => void;
 }
 
-/** 最多保留约 2 套模型的 blob URL，切换模型时释放旧资源 */
-const MAX_BLOB_ENTRIES = 8;
+/** 最多保留约 4 套模型的 blob URL（切换 + 后台预热） */
+const MAX_BLOB_ENTRIES = 32;
 
 const GLOBAL_BLOB_CACHE = new Map<string, string>();
 
@@ -50,10 +51,25 @@ export function petBlobCacheSize(): number {
   return GLOBAL_BLOB_CACHE.size;
 }
 
+export function isModelBundleCached(modelId: string, filenames: string[]): boolean {
+  const files = filenames.filter(Boolean);
+  if (files.length === 0) return false;
+  return files.every((f) => GLOBAL_BLOB_CACHE.has(cacheKey(modelId, f)));
+}
+
+async function readModelAssetViaIpc(modelId: string, filename: string): Promise<string> {
+  const key = cacheKey(modelId, filename);
+  const cached = GLOBAL_BLOB_CACHE.get(key);
+  if (cached) return cached;
+  const b64 = await invoke<string>("pet_read_model_asset", { modelId, filename });
+  return blobUrlFromBase64(modelId, filename, b64);
+}
+
 /** 批量 IPC 预热用户模型 blob 缓存（doc 82 换肤快路径） */
 export async function warmModelBundleCache(modelId: string, filenames: string[]): Promise<void> {
   const files = filenames.filter(Boolean);
   if (files.length === 0) return;
+
   try {
     const bundle = await invoke<{ files: Record<string, string> }>("pet_read_model_bundle", {
       modelId,
@@ -62,8 +78,26 @@ export async function warmModelBundleCache(modelId: string, filenames: string[])
     for (const [filename, b64] of Object.entries(bundle.files ?? {})) {
       blobUrlFromBase64(modelId, filename, b64);
     }
-  } catch {
-    // 批量失败时回退逐文件 readViaIpc
+    petLog("debug", "asset", "warmModelBundleCache ok", {
+      modelId,
+      count: Object.keys(bundle.files ?? {}).length,
+    });
+  } catch (err) {
+    petLog("warn", "asset", "warmModelBundleCache batch failed, per-file fallback", {
+      modelId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    for (const filename of files) {
+      try {
+        await readModelAssetViaIpc(modelId, filename);
+      } catch (fileErr) {
+        petLog("error", "asset", "warm file failed", {
+          modelId,
+          file: filename,
+          err: fileErr instanceof Error ? fileErr.message : String(fileErr),
+        });
+      }
+    }
   }
 }
 
@@ -92,19 +126,6 @@ export async function preloadModelAssets(
   );
 }
 
-function joinAssetPath(base: string, filename: string): string {
-  const trimmed = base.replace(/[/\\]+$/, "");
-  return `${trimmed}/${filename}`;
-}
-
-async function readModelAssetViaIpc(modelId: string, filename: string): Promise<string> {
-  const key = cacheKey(modelId, filename);
-  const cached = GLOBAL_BLOB_CACHE.get(key);
-  if (cached) return cached;
-  const b64 = await invoke<string>("pet_read_model_asset", { modelId, filename });
-  return blobUrlFromBase64(modelId, filename, b64);
-}
-
 export function createPetAssetResolver(cfg: {
   asset_base: string;
   use_file_src: boolean;
@@ -124,9 +145,10 @@ export function createPetAssetResolver(cfg: {
       const key = cacheKey(cfg.model_id, filename);
       const cached = GLOBAL_BLOB_CACHE.get(key);
       if (cached) return cached;
-      return convertFileSrc(joinAssetPath(cfg.asset_base, filename));
+      return readModelAssetViaIpc(cfg.model_id, filename);
     },
     readViaIpc: async (filename) => readModelAssetViaIpc(cfg.model_id, filename),
     dispose: () => {},
   };
 }
+

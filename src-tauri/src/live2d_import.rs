@@ -3,11 +3,24 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
 
 use crate::character;
 use crate::pet::models;
+
+#[derive(Debug)]
+enum BatchImportItemResult {
+    Skipped,
+    Failed,
+    Imported {
+        character_id: String,
+        model: models::PetModelInfo,
+        skin_name: String,
+    },
+}
 
 #[derive(Debug, Deserialize)]
 struct Live2dPlanFile {
@@ -23,6 +36,8 @@ pub struct Live2dPlanItem {
     pub skin_name: String,
     pub model_name: String,
     pub display_name: String,
+    #[serde(default)]
+    pub wiki_title: String,
     #[serde(default)]
     pub character_id: Option<String>,
     pub action: String,
@@ -127,7 +142,6 @@ fn existing_model_names(data_dir: &Path) -> HashSet<String> {
 
 pub fn run_live2d_import(
     data_dir: &Path,
-    _db: &rusqlite::Connection,
     plan_path: &Path,
     live2d_root: &Path,
     limit: usize,
@@ -137,7 +151,7 @@ pub fn run_live2d_import(
     let file: Live2dPlanFile =
         serde_json::from_str(&raw).map_err(|e| format!("解析计划 JSON 失败: {e}"))?;
 
-    let mut known_names = existing_model_names(data_dir);
+    let known_names = existing_model_names(data_dir);
     let pending: Vec<_> = file
         .plan
         .into_iter()
@@ -147,6 +161,17 @@ pub fn run_live2d_import(
 
     let remaining_total = pending.len();
     let batch: Vec<_> = pending.into_iter().take(limit.max(1)).collect();
+
+    if batch.is_empty() {
+        return Ok(Live2dImportResult {
+            ok: 0,
+            skipped: 0,
+            failed: 0,
+            processed: 0,
+            remaining: 0,
+            message: "没有待导入的 Live2D 模型".into(),
+        });
+    }
 
     let mut ok = 0usize;
     let mut skipped = 0usize;
@@ -158,43 +183,85 @@ pub fn run_live2d_import(
         Some(character::load_manifest(data_dir))
     };
 
-    for item in &batch {
-        let folder = resolve_folder_path(item, live2d_root);
-        let character_id = match resolve_character_id(data_dir, item) {
-            Some(id) => id,
-            None => {
+    let data_dir_owned = data_dir.to_path_buf();
+    let live2d_root_owned = live2d_root.to_path_buf();
+    let batch_owned = batch.clone();
+
+    if dry_run {
+        for item in &batch {
+            if resolve_character_id(data_dir, item).is_some() {
+                ok += 1;
+            } else {
                 skipped += 1;
-                continue;
             }
-        };
-
-        if dry_run {
-            ok += 1;
-            continue;
         }
-
-        match models::import_from_folder(data_dir, &item.model_name, &folder) {
-            Ok(model) => {
-                known_names.insert(model.name.clone());
-                if let Some(manifest) = manifest.as_mut() {
-                    match character::attach_model_in_manifest(
-                        data_dir,
-                        manifest,
-                        &character_id,
-                        &model,
-                        &item.skin_name,
-                    ) {
-                        Ok(()) => {
-                            manifest_dirty = true;
-                            ok += 1;
+    } else {
+        let item_results: Vec<BatchImportItemResult> = std::thread::scope(|scope| {
+            batch_owned
+                .iter()
+                .map(|item| {
+                    let item = item.clone();
+                    let data_dir = data_dir_owned.clone();
+                    let live2d_root = live2d_root_owned.clone();
+                    scope.spawn(move || {
+                        let character_id = match resolve_character_id(&data_dir, &item) {
+                            Some(id) => id,
+                            None => return BatchImportItemResult::Skipped,
+                        };
+                        let folder = resolve_folder_path(&item, &live2d_root);
+                        let wiki_title = item
+                            .wiki_title
+                            .trim()
+                            .is_empty()
+                            .then(|| item.display_name.trim())
+                            .or(Some(item.wiki_title.trim()));
+                        match models::import_from_folder(
+                            &data_dir,
+                            &item.model_name,
+                            &folder,
+                            wiki_title,
+                        ) {
+                            Ok(model) => BatchImportItemResult::Imported {
+                                character_id,
+                                model,
+                                skin_name: item.skin_name.clone(),
+                            },
+                            Err(_) => BatchImportItemResult::Failed,
                         }
-                        Err(_) => failed += 1,
+                    })
+                })
+                .map(|handle| handle.join().unwrap_or(BatchImportItemResult::Failed))
+                .collect()
+        });
+
+        for result in item_results {
+            match result {
+                BatchImportItemResult::Skipped => skipped += 1,
+                BatchImportItemResult::Failed => failed += 1,
+                BatchImportItemResult::Imported {
+                    character_id,
+                    model,
+                    skin_name,
+                } => {
+                    if let Some(manifest) = manifest.as_mut() {
+                        match character::attach_model_in_manifest(
+                            data_dir,
+                            manifest,
+                            &character_id,
+                            &model,
+                            &skin_name,
+                        ) {
+                            Ok(()) => {
+                                manifest_dirty = true;
+                                ok += 1;
+                            }
+                            Err(_) => failed += 1,
+                        }
+                    } else {
+                        ok += 1;
                     }
-                } else {
-                    ok += 1;
                 }
             }
-            Err(_) => failed += 1,
         }
     }
 
@@ -267,7 +334,18 @@ pub fn run_live2d_import_for_character(
 
     for item in &pending {
         let folder = resolve_folder_path(item, live2d_root);
-        match models::import_from_folder(data_dir, &item.model_name, &folder) {
+        let wiki_title = item
+            .wiki_title
+            .trim()
+            .is_empty()
+            .then(|| item.display_name.trim())
+            .or(Some(item.wiki_title.trim()));
+        match models::import_from_folder(
+            data_dir,
+            &item.model_name,
+            &folder,
+            wiki_title,
+        ) {
             Ok(model) => {
                 known_names.insert(model.name.clone());
                 match character::attach_model_in_manifest(
@@ -304,4 +382,65 @@ pub fn run_live2d_import_for_character(
         remaining: 0,
         message,
     })
+}
+
+const LIVE2D_STARTUP_DELAY_SECS: u64 = 45;
+const LIVE2D_BATCH_SIZE: usize = 8;
+const LIVE2D_BATCH_PAUSE_SECS: u64 = 1;
+
+/// 启动后后台按 plan.json 批量导入缺失的 Live2D 模型（直至剩余为 0）
+pub fn spawn_batch_on_startup(st: std::sync::Arc<crate::state::AppState>) {
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(LIVE2D_STARTUP_DELAY_SECS)).await;
+
+        let plan_path = match resolve_plan_path(None) {
+            Ok(p) => p,
+            Err(e) => {
+                crate::log::warn(format!("live2d batch skipped: {e}"));
+                return;
+            }
+        };
+        let live2d_root = resolve_live2d_root();
+        if !live2d_root.is_dir() {
+            crate::log::warn(format!(
+                "live2d batch skipped: folder not found ({})",
+                live2d_root.display()
+            ));
+            return;
+        }
+
+        loop {
+            if st.stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let data_dir = st.data_dir().to_path_buf();
+            // 并行导入耗时长，不可持有 DB 锁，否则会阻塞 pet_get_config 等桌宠 IPC
+            let import_result = run_live2d_import(
+                &data_dir,
+                &plan_path,
+                &live2d_root,
+                LIVE2D_BATCH_SIZE,
+                false,
+            );
+
+            match import_result {
+                Ok(result) => {
+                    if result.processed > 0 && result.ok > 0 {
+                        crate::log::info(format!("live2d batch: {}", result.message));
+                        let _ = st.app.emit("live2d-import-progress", &result);
+                    }
+                    if result.remaining == 0 {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    crate::log::warn(format!("live2d batch failed: {e}"));
+                    break;
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(LIVE2D_BATCH_PAUSE_SECS)).await;
+        }
+    });
 }

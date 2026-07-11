@@ -6,19 +6,6 @@ interface Props {
   onPatch: (patch: { randomMinSec?: number; randomMaxSec?: number }) => void;
 }
 
-function formatSecLabel(sec: number): string {
-  if (sec >= 60 && sec % 60 === 0) return `${sec / 60} 分钟`;
-  if (sec >= 60) return `${(sec / 60).toFixed(1).replace(/\.0$/, "")} 分钟`;
-  return `${sec} 秒`;
-}
-
-function formatFrequencyHint(minSec: number, maxSec: number): string {
-  const min = Math.max(5, minSec);
-  const max = Math.max(min, maxSec);
-  if (min === max) return `约每 ${formatSecLabel(min)} 播放一次`;
-  return `约 ${formatSecLabel(min)} ~ ${formatSecLabel(max)} 之间随机播放`;
-}
-
 const FREQUENCY_PRESETS = [
   { label: "频繁", min: 15, max: 45 },
   { label: "默认", min: 30, max: 120 },
@@ -35,14 +22,7 @@ export function PetActionFrequency({
   return (
     <div className="pet-action-frequency pet-action-frequency--inline">
       <div className="pet-action-frequency-head">
-        <div>
-          <div className="pet-action-frequency-label">随机动作频率</div>
-          <p className="pet-action-frequency-hint">
-            {randomAnimations.length === 0
-              ? "请在「动作分配」中勾选随机动作"
-              : formatFrequencyHint(randomMinSec, randomMaxSec)}
-          </p>
-        </div>
+        <div className="pet-action-frequency-label">随机动作频率</div>
         <div className="pet-action-frequency-presets" role="group" aria-label="频率预设">
           {FREQUENCY_PRESETS.map((preset) => {
             const active = randomMinSec === preset.min && randomMaxSec === preset.max;

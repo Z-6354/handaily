@@ -1,6 +1,6 @@
 //! Windows 开机自启动（当前用户 Run 注册表项）
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use tauri::AppHandle;
 
@@ -44,7 +44,7 @@ fn exe_path(_app: &AppHandle) -> Result<PathBuf, String> {
     std::env::current_exe().map_err(|e| e.to_string())
 }
 
-fn registry_command_value(exe: &PathBuf) -> String {
+fn registry_command_value(exe: &Path) -> String {
     let exe_str = exe.to_string_lossy().replace('/', "\\");
     format!("\"{exe_str}\" {TRAY_LAUNCH_ARG}")
 }

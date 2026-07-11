@@ -125,7 +125,7 @@ fn extract_icon_png(exe_path: &str) -> Option<Vec<u8>> {
         let mut rgba = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(SIZE as u32, SIZE as u32);
         for y in 0..SIZE as u32 {
             for x in 0..SIZE as u32 {
-                let i = (y as usize * stride + x as usize * 4) as usize;
+                let i = y as usize * stride + x as usize * 4;
                 let b = pixels[i];
                 let g = pixels[i + 1];
                 let r = pixels[i + 2];

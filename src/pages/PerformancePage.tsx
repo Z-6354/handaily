@@ -48,7 +48,7 @@ function PerfMeter({ label, value, detail, tone = "system" }: MeterProps) {
   );
 }
 
-export function PerformancePage() {
+export function PerformancePage({ active = true }: { active?: boolean }) {
   const [snapshot, setSnapshot] = useState<PerformanceSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -69,10 +69,13 @@ export function PerformancePage() {
   }, []);
 
   useEffect(() => {
+    if (!active) return;
     void refresh();
-    const id = setInterval(() => void refresh(), 2500);
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 2500);
     return () => clearInterval(id);
-  }, [refresh]);
+  }, [refresh, active]);
 
   if (loading && !snapshot) {
     return (

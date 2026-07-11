@@ -80,6 +80,15 @@ pub struct CharacterInfo {
     pub is_builtin: bool,
 }
 
+/// 桌宠右键「切换模型」：当前桌宠模型所属角色的可切换皮肤（与收藏无关）
+#[derive(Debug, Clone, Serialize)]
+pub struct PetMenuSkinsPayload {
+    pub character_id: String,
+    pub character_name: String,
+    pub model_id: String,
+    pub skins: Vec<CharacterSkinInfo>,
+}
+
 /// 人物列表轻量项（不含皮肤详情，用于分页/懒加载）
 #[derive(Debug, Clone, Serialize)]
 pub struct CharacterBrief {
@@ -372,7 +381,7 @@ fn build_skin_info(
     CharacterSkinInfo {
         id: s.id.clone(),
         name: s.name.clone(),
-        model_id: s.model_id.clone(),
+        model_id: models::canonical_model_id(&s.model_id),
         model_name: if let Some(cache) = model_cache {
             model_name_cached(&s.model_id, cache)
         } else {
@@ -403,7 +412,7 @@ fn skin_infos_with_cache(
     active_skin_id: &str,
     model_cache: Option<&std::collections::HashMap<String, String>>,
 ) -> Vec<CharacterSkinInfo> {
-    meta.skins
+    normalize_character_skins(data_dir, &meta.skins)
         .iter()
         .map(|s| build_skin_info(data_dir, s, active_skin_id, model_cache))
         .collect()
@@ -859,6 +868,300 @@ fn find_by_model<'a>(all: &'a [CharacterMeta], model_id: &str) -> Option<(&'a Ch
     None
 }
 
+/// 根据模型 ID 反查人物显示名（用于 BWIKI 台词爬取）
+pub fn character_name_for_model(data_dir: &Path, model_id: &str) -> Option<String> {
+    let all = resolve_all_characters(data_dir);
+    find_by_model(&all, model_id)
+        .map(|(meta, _)| meta.name.trim().to_string())
+        .filter(|name| !name.is_empty())
+}
+
+fn strip_numeric_suffix_from_model_id(model_id: &str) -> Option<String> {
+    for sep in ['-', '_'] {
+        if let Some((base, tail)) = model_id.rsplit_once(sep) {
+            if !base.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+                return Some(base.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// unique_id 碰撞产生的纯数字 id（如 `2`、`2-125`）不能用于皮肤前缀继承
+fn is_weak_model_id_base(base: &str) -> bool {
+    let base = base.trim();
+    base.is_empty()
+        || base.chars().all(|c| c.is_ascii_digit())
+        || base.len() < 3
+}
+
+fn model_id_has_unreliable_inheritance(model_id: &str) -> bool {
+    if model_id.chars().all(|c| c.is_ascii_digit() || c == '-' || c == '_') {
+        if let Some(base) = strip_numeric_suffix_from_model_id(model_id) {
+            return is_weak_model_id_base(&base);
+        }
+        if model_id.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanWikiRow {
+    #[serde(rename = "modelName")]
+    model_name: String,
+    #[serde(rename = "wikiTitle")]
+    wiki_title: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PlanWikiFile {
+    plan: Vec<PlanWikiRow>,
+}
+
+fn load_plan_display_wiki_map(data_dir: &Path) -> HashMap<String, String> {
+    let path = data_dir.join("live2d-plan.json");
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return HashMap::new();
+    };
+    let Ok(file) = serde_json::from_str::<PlanWikiFile>(&raw) else {
+        return HashMap::new();
+    };
+    let mut map = HashMap::new();
+    for row in file.plan {
+        let model = row.model_name.trim();
+        let wiki = row.wiki_title.trim();
+        if !model.is_empty() && !wiki.is_empty() {
+            map.entry(model.to_string()).or_insert_with(|| wiki.to_string());
+        }
+    }
+    map
+}
+
+fn is_skin_suffix_label(label: &str) -> bool {
+    let label = label.trim();
+    label.starts_with("皮肤")
+        || label.starts_with("换装")
+        || label.starts_with("变体")
+        || matches!(
+            label,
+            "泳装" | "便服" | "幼女" | "立绘" | "偶像" | "誓约" | "礼服" | "校园" | "赛车"
+        )
+}
+
+fn strip_one_skin_suffix_from_display_name(name: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() {
+        return String::new();
+    }
+    for sep in ['·', '・', '•', '．'] {
+        if let Some((base, suffix)) = name.rsplit_once(sep) {
+            let base = base.trim();
+            let suffix = suffix.trim();
+            if !base.is_empty() && is_skin_suffix_label(suffix) {
+                return base.to_string();
+            }
+        }
+    }
+    name.to_string()
+}
+
+/// 从模型显示名剥离皮肤/换装后缀，得到 BWIKI 角色词条名候选
+pub fn strip_skin_suffix_from_display_name(name: &str) -> String {
+    let mut current = name.trim().to_string();
+    loop {
+        let next = strip_one_skin_suffix_from_display_name(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current.trim().to_string()
+}
+
+fn match_roster_wiki_title(candidate: &str, roster: &[String]) -> Option<String> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    for name in roster {
+        if candidate == name.as_str() {
+            return Some(name.clone());
+        }
+    }
+    for name in roster {
+        if candidate.starts_with(name.as_str()) {
+            let rest = candidate[name.len()..].trim();
+            if rest.is_empty() || is_skin_suffix_label(rest.trim_start_matches(['·', '・', '•', '．'])) {
+                return Some(name.clone());
+            }
+        }
+    }
+    None
+}
+
+fn display_name_looks_like_skin_model(name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+    for sep in ['·', '・', '•', '．'] {
+        if let Some((_, suffix)) = name.rsplit_once(sep) {
+            if is_skin_suffix_label(suffix.trim()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 批量 Wiki 扫描用：一次性构建 model_id → 显示名 / BWIKI 词条索引
+pub struct ModelWikiTitleLookup {
+    character_names: HashMap<String, String>,
+    display_names: HashMap<String, String>,
+    wiki_titles: HashMap<String, String>,
+    plan_display_wiki: HashMap<String, String>,
+    roster_names: Vec<String>,
+}
+
+impl ModelWikiTitleLookup {
+    pub fn build(data_dir: &Path) -> Self {
+        let display_names = models::model_names_map(data_dir);
+        let wiki_titles = models::model_wiki_titles_map(data_dir);
+        let plan_display_wiki = load_plan_display_wiki_map(data_dir);
+        let mut character_names = HashMap::new();
+        let mut roster_names = Vec::new();
+        for c in resolve_all_characters(data_dir) {
+            let name = c.name.trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            roster_names.push(name.clone());
+            for skin in &c.skins {
+                character_names.insert(skin.model_id.clone(), name.clone());
+            }
+            for skin in &c.skins {
+                let base = skin.model_id.as_str();
+                if is_weak_model_id_base(base) {
+                    continue;
+                }
+                for model_id in display_names.keys() {
+                    if model_id == base {
+                        continue;
+                    }
+                    if model_id.starts_with(&format!("{base}-"))
+                        || model_id.starts_with(&format!("{base}_"))
+                    {
+                        character_names
+                            .entry(model_id.clone())
+                            .or_insert_with(|| name.clone());
+                    }
+                }
+            }
+        }
+        for title in wiki_titles.values() {
+            let title = title.trim();
+            if !title.is_empty() && !roster_names.iter().any(|n| n == title) {
+                roster_names.push(title.to_string());
+            }
+        }
+        roster_names.sort_by_key(|name| std::cmp::Reverse(name.chars().count()));
+
+        for model_id in display_names.keys() {
+            if character_names.contains_key(model_id) {
+                continue;
+            }
+            if let Some(base) = strip_numeric_suffix_from_model_id(model_id) {
+                if is_weak_model_id_base(&base) {
+                    continue;
+                }
+                if let Some(name) = character_names.get(&base).cloned() {
+                    character_names.insert(model_id.clone(), name);
+                }
+            }
+        }
+
+        Self {
+            character_names,
+            display_names,
+            wiki_titles,
+            plan_display_wiki,
+            roster_names,
+        }
+    }
+
+    pub fn display_name(&self, model_id: &str) -> String {
+        self.display_names
+            .get(model_id)
+            .cloned()
+            .unwrap_or_else(|| model_id.to_string())
+    }
+
+    /// BWIKI 词条名：台词属于角色，不属于皮肤；优先人物名，否则剥离皮肤后缀后的显示名
+    pub fn wiki_title(&self, model_id: &str) -> Option<String> {
+        if let Some(title) = self.wiki_titles.get(model_id) {
+            let n = title.trim();
+            if !n.is_empty() {
+                return Some(n.to_string());
+            }
+        }
+        if let Some(display) = self.display_names.get(model_id) {
+            let display = display.trim();
+            if let Some(title) = self.plan_display_wiki.get(display) {
+                let n = title.trim();
+                if !n.is_empty() {
+                    return Some(n.to_string());
+                }
+            }
+        }
+        if let Some(name) = self.character_names.get(model_id) {
+            if !model_id_has_unreliable_inheritance(model_id) {
+                let n = name.trim();
+                if !n.is_empty() {
+                    return Some(n.to_string());
+                }
+            }
+        }
+        if let Some(base) = strip_numeric_suffix_from_model_id(model_id) {
+            if !is_weak_model_id_base(&base) {
+                if let Some(name) = self.character_names.get(&base) {
+                    let n = name.trim();
+                    if !n.is_empty() {
+                        return Some(n.to_string());
+                    }
+                }
+                if let Some(title) = self.wiki_titles.get(&base) {
+                    let n = title.trim();
+                    if !n.is_empty() {
+                        return Some(n.to_string());
+                    }
+                }
+            }
+        }
+        let raw = self.display_names.get(model_id)?.trim().to_string();
+        if raw.is_empty() || raw == model_id {
+            return None;
+        }
+        if display_name_looks_like_skin_model(&raw) {
+            let stripped = strip_skin_suffix_from_display_name(&raw);
+            if let Some(matched) = match_roster_wiki_title(&stripped, &self.roster_names) {
+                return Some(matched);
+            }
+            if !stripped.is_empty() && stripped != raw {
+                return Some(stripped);
+            }
+            return None;
+        }
+        match_roster_wiki_title(&raw, &self.roster_names).or(Some(raw))
+    }
+}
+
+/// BWIKI 词条名：优先人物名，否则剥离皮肤后缀后的模型显示名
+pub fn wiki_title_for_model(data_dir: &Path, model_id: &str) -> Option<String> {
+    ModelWikiTitleLookup::build(data_dir).wiki_title(model_id)
+}
+
 pub fn active_character_id(db: &rusqlite::Connection, data_dir: &Path) -> String {
     let manifest = load_manifest(data_dir);
     let all = resolve_all_characters(data_dir);
@@ -916,6 +1219,95 @@ pub fn list_characters(data_dir: &Path, db: &rusqlite::Connection) -> Vec<Charac
         .collect()
 }
 
+/// 按当前选用人物返回可切换皮肤（与收藏无关）
+pub fn list_pet_menu_skins(
+    data_dir: &Path,
+    db: &rusqlite::Connection,
+) -> Result<PetMenuSkinsPayload, String> {
+    let model_id = models::active_model_id(db);
+    let character_id = active_character_id(db, data_dir);
+    build_pet_menu_skins_payload(data_dir, &character_id, &model_id)
+}
+
+/// 按指定人物返回可切换皮肤（桌宠菜单从收藏人物进入皮肤页）
+pub fn list_pet_menu_skins_for_character(
+    data_dir: &Path,
+    db: &rusqlite::Connection,
+    character_id: &str,
+) -> Result<PetMenuSkinsPayload, String> {
+    let current_char = active_character_id(db, data_dir);
+    let active_model_id = if current_char == character_id {
+        models::active_model_id(db)
+    } else {
+        String::new()
+    };
+    build_pet_menu_skins_payload(data_dir, character_id, &active_model_id)
+}
+
+const FAVORITES_SETTING_KEY: &str = "character_favorites";
+
+/// 读取收藏人物 id 列表（顺序保留）
+pub fn favorite_character_ids(db: &rusqlite::Connection) -> Vec<String> {
+    let Some(raw) = crate::db::get_setting(db, FAVORITES_SETTING_KEY) else {
+        return Vec::new();
+    };
+    let Ok(parsed) = serde_json::from_str::<Vec<serde_json::Value>>(&raw) else {
+        return Vec::new();
+    };
+    parsed
+        .into_iter()
+        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// 桌宠菜单：仅收藏人物（无收藏时返回空列表）
+pub fn list_pet_menu_favorite_characters(
+    data_dir: &Path,
+    db: &rusqlite::Connection,
+) -> Vec<CharacterBrief> {
+    let fav_ids = favorite_character_ids(db);
+    if fav_ids.is_empty() {
+        return Vec::new();
+    }
+    let active_id = active_character_id(db, data_dir);
+    let all = resolve_all_characters(data_dir);
+    let mut out = Vec::new();
+    for fav_id in &fav_ids {
+        let Some(meta) = all.iter().find(|c| &c.id == fav_id) else {
+            continue;
+        };
+        out.push(meta_to_brief(data_dir, meta, &active_id, db, true, None));
+    }
+    out
+}
+
+pub(crate) fn build_pet_menu_skins_payload(
+    data_dir: &Path,
+    character_id: &str,
+    active_model_id: &str,
+) -> Result<PetMenuSkinsPayload, String> {
+    let meta = find_character_meta(data_dir, character_id)?;
+    let normalized = normalize_character_skins(data_dir, &meta.skins);
+    let model_ids: Vec<String> = normalized.iter().map(|s| s.model_id.clone()).collect();
+    let model_cache = models::model_names_for_ids(data_dir, &model_ids);
+    let skins: Vec<CharacterSkinInfo> = normalized
+        .iter()
+        .map(|s| {
+            let mut info = build_skin_info(data_dir, s, "", Some(&model_cache));
+            info.active = models::canonical_model_id(&s.model_id)
+                == models::canonical_model_id(active_model_id);
+            info
+        })
+        .collect();
+    Ok(PetMenuSkinsPayload {
+        character_id: meta.id.clone(),
+        character_name: meta.name.clone(),
+        model_id: active_model_id.to_string(),
+        skins,
+    })
+}
+
 pub fn list_characters_brief(data_dir: &Path, db: &rusqlite::Connection) -> Vec<CharacterBrief> {
     let all = resolve_all_characters(data_dir);
     let active_id = active_character_id(db, data_dir);
@@ -937,7 +1329,7 @@ pub fn list_characters_page(
     let active_id = active_character_id(db, data_dir);
     let indices = roster_filter_indices(&all, query, favorites_only, favorite_ids);
     let total = indices.len();
-    let limit = limit.max(1).min(200);
+    let limit = limit.clamp(1, 200);
     let avatar_index = avatar::build_avatar_path_index(data_dir);
     let items = indices
         .iter()
@@ -968,7 +1360,7 @@ pub fn get_character_detail(
         .or_else(|| default_skin(&meta));
     let (active_skin_name, active_model_id, active_model_name) =
         if let Some(s) = active_skin {
-            let names = models::model_names_for_ids(data_dir, &[s.model_id.clone()]);
+            let names = models::model_names_for_ids(data_dir, std::slice::from_ref(&s.model_id));
             (
                 s.name.clone(),
                 s.model_id.clone(),
@@ -985,7 +1377,7 @@ pub fn get_character_detail(
             )
         };
     let persona_detail = persona::get_persona_detail(data_dir, db, &meta.persona_id)?;
-    let has_profile = persona_detail.profile_json.name.trim().len() > 0
+    let has_profile = !persona_detail.profile_json.name.trim().is_empty()
         || !persona_detail.profile_json.introduction.is_empty();
     let (faction, ship_type, rarity) = (
         meta.faction.clone(),
@@ -1033,7 +1425,7 @@ pub fn list_character_skins_page(
     let normalized = normalize_character_skins(data_dir, &meta.skins);
     let active_skin_id = resolve_display_skin_id(data_dir, &meta, db, &active_id);
     let total = normalized.len();
-    let limit = limit.max(1).min(100);
+    let limit = limit.clamp(1, 100);
     let slice: Vec<_> = normalized.iter().skip(offset).take(limit).collect();
     let model_ids: Vec<String> = slice.iter().map(|s| s.model_id.clone()).collect();
     let model_cache = models::model_names_for_ids(data_dir, &model_ids);
@@ -1083,8 +1475,8 @@ pub fn select_character_skin(
     skin_id: &str,
 ) -> Result<String, String> {
     let meta = find_character_meta(data_dir, character_id)?;
-    let skin = meta
-        .skins
+    let normalized = normalize_character_skins(data_dir, &meta.skins);
+    let skin = normalized
         .iter()
         .find(|s| s.id == skin_id)
         .ok_or_else(|| format!("未知皮肤: {skin_id}"))?;
@@ -1337,8 +1729,6 @@ pub fn attach_model_to_character(
 }
 
 pub fn migrate_on_startup(data_dir: &Path, db: &rusqlite::Connection) -> Result<(), String> {
-    seed_user_characters(data_dir).map_err(|e| e.to_string())?;
-
     let embedded = embedded_manifest();
     mutate_character_manifest(data_dir, |manifest| {
         let mut changed = false;
@@ -1453,6 +1843,79 @@ mod tests {
         assert_eq!(
             crate::db::get_setting(&db, ACTIVE_CHARACTER_KEY).as_deref(),
             Some("cheshire")
+        );
+    }
+
+    #[test]
+    fn model_wiki_title_lookup_builtin_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let lookup = ModelWikiTitleLookup::build(dir.path());
+        assert_eq!(lookup.wiki_title("chaijun"), Some("柴郡".to_string()));
+        assert_eq!(lookup.display_name("chaijun"), "柴郡");
+    }
+
+    #[test]
+    fn strip_skin_suffix_from_display_name_variants() {
+        assert_eq!(
+            strip_skin_suffix_from_display_name("柴郡·皮肤2"),
+            "柴郡"
+        );
+        assert_eq!(
+            strip_skin_suffix_from_display_name("阿尔弗雷多·奥里亚尼·皮肤2"),
+            "阿尔弗雷多·奥里亚尼"
+        );
+        assert_eq!(strip_skin_suffix_from_display_name("爱宕·便服"), "爱宕");
+        assert_eq!(strip_skin_suffix_from_display_name("柴郡"), "柴郡");
+    }
+
+    #[test]
+    fn model_wiki_title_lookup_skin_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let model_dir = dir.path().join("pet-models").join("skin-test");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("display_name.txt"), "柴郡·皮肤2").unwrap();
+        let lookup = ModelWikiTitleLookup::build(dir.path());
+        assert_eq!(lookup.wiki_title("skin-test"), Some("柴郡".to_string()));
+    }
+
+    #[test]
+    fn model_wiki_title_lookup_persisted_wiki_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let model_dir = dir.path().join("pet-models").join("skin-test");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(model_dir.join("display_name.txt"), "柴郡·皮肤2").unwrap();
+        fs::write(model_dir.join("wiki_title.txt"), "柴郡").unwrap();
+        let lookup = ModelWikiTitleLookup::build(dir.path());
+        assert_eq!(lookup.wiki_title("skin-test"), Some("柴郡".to_string()));
+    }
+
+    #[test]
+    fn model_wiki_title_avoids_numeric_id_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let model_dir = dir.path().join("pet-models").join("2-125");
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(model_dir.join("display_name.txt"), "胡德·皮肤2").unwrap();
+        let base_dir = dir.path().join("pet-models").join("2");
+        std::fs::create_dir_all(&base_dir).unwrap();
+        std::fs::write(base_dir.join("display_name.txt"), "阿贝克隆比·皮肤2").unwrap();
+        let lookup = ModelWikiTitleLookup::build(dir.path());
+        assert_eq!(lookup.wiki_title("2-125"), Some("胡德".to_string()));
+    }
+
+    #[test]
+    fn model_wiki_title_lookup_complex_character_skin() {
+        let dir = tempfile::tempdir().unwrap();
+        let model_dir = dir.path().join("pet-models").join("alfredo-skin");
+        fs::create_dir_all(&model_dir).unwrap();
+        fs::write(
+            model_dir.join("display_name.txt"),
+            "阿尔弗雷多·奥里亚尼·皮肤2",
+        )
+        .unwrap();
+        let lookup = ModelWikiTitleLookup::build(dir.path());
+        assert_eq!(
+            lookup.wiki_title("alfredo-skin"),
+            Some("阿尔弗雷多·奥里亚尼".to_string())
         );
     }
 }

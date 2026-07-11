@@ -12,11 +12,10 @@ interface CharacterSkinInfo {
   model_ready: boolean;
 }
 
-interface CharacterInfo {
+interface CharacterBrief {
   id: string;
   name: string;
   active: boolean;
-  skins: CharacterSkinInfo[];
 }
 
 interface PetMenuSkinsPayload {
@@ -35,7 +34,7 @@ const root: HTMLElement = rootMaybe;
 
 root.innerHTML = `
   <div class="pet-menu-view" data-menu-view="main">
-    <div class="pet-menu-head">桌宠菜单</div>
+    <div class="pet-menu-head">桌宠菜单<span class="pet-menu-countdown" data-menu-countdown></span></div>
     <div class="pet-menu-body">
       <button type="button" class="pet-menu-item" data-action="main">
         <span class="pet-menu-icon" aria-hidden="true">
@@ -134,10 +133,16 @@ const menuCharactersViewEl = root.querySelector('[data-menu-view="characters"]')
 const menuSkinsViewEl = root.querySelector('[data-menu-view="skins"]');
 const menuSkinsTitleEl = root.querySelector("[data-menu-skins-title]");
 const menuBubbleSwitchEl = root.querySelector<HTMLButtonElement>('[data-action="toggle-bubble"]');
+const menuCountdownEl = root.querySelector<HTMLElement>("[data-menu-countdown]");
 
 let menuAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
+let menuCountdownTimer: ReturnType<typeof setInterval> | null = null;
+let menuAutoCloseDeadline = 0;
 let menuSwitchBusy = false;
+let menuSwitchBusyTimer: ReturnType<typeof setTimeout> | null = null;
 let menuSkinCharacterId: string | null = null;
+/** 从「切换人物」进入皮肤页时浏览的角色；null 表示当前桌宠角色 */
+let menuBrowsingCharacterId: string | null = null;
 let menuSuppressBlurUntil = 0;
 let bubbleEnabled = true;
 let menuPickerRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -213,12 +218,13 @@ async function openMenuView(view: "characters" | "skins") {
 }
 
 function resetMenuView() {
+  menuBrowsingCharacterId = null;
   setMenuView("main");
 }
 
 function renderMenuSublist(
   container: Element | null,
-  items: { id: string; label: string; active: boolean; disabled?: boolean }[],
+  items: { id: string; label: string; active: boolean; disabled?: boolean; modelId?: string }[],
   kind: "character" | "skin",
 ) {
   if (!container) return;
@@ -227,7 +233,9 @@ function renderMenuSublist(
     const empty = document.createElement("div");
     empty.className = "pet-menu-subempty";
     empty.textContent =
-      kind === "character" ? "当前没有可选人物" : "当前角色暂无可切换模型";
+      kind === "character"
+        ? "当前没有收藏角色，请先在人物页收藏"
+        : "当前角色暂无可切换模型";
     container.appendChild(empty);
     return;
   }
@@ -235,23 +243,61 @@ function renderMenuSublist(
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = `pet-menu-subitem${item.active ? " is-active" : ""}`;
-    btn.dataset.action = kind === "skin" ? "switch-skin" : "switch-character";
+    btn.dataset.action = kind === "skin" ? "switch-skin" : "pick-character";
     btn.dataset.id = item.id;
+    if (item.modelId) btn.dataset.modelId = item.modelId;
     btn.textContent = item.label;
-    btn.disabled = item.active || item.disabled === true || menuSwitchBusy;
+    if (kind === "skin") {
+      btn.disabled = item.active || item.disabled === true || menuSwitchBusy;
+    } else {
+      btn.disabled = item.disabled === true || menuSwitchBusy;
+    }
     container.appendChild(btn);
   }
 }
 
+async function loadSkinsForCharacter(characterId: string) {
+  const skinMenu = await invoke<PetMenuSkinsPayload>("characters_pet_menu_skins_for", {
+    characterId,
+  });
+  menuSkinCharacterId = skinMenu.character_id;
+  menuBrowsingCharacterId = skinMenu.character_id;
+  if (menuSkinsTitleEl) {
+    menuSkinsTitleEl.textContent = `选择模型 · ${skinMenu.character_name}`;
+  }
+  renderMenuSublist(
+    menuSkinsEl,
+    skinMenu.skins.map((s) => ({
+      id: s.id,
+      label: s.model_name || s.name,
+      active: s.active,
+      disabled: !s.model_ready,
+      modelId: s.model_id,
+    })),
+    "skin",
+  );
+}
+
 async function refreshPetMenuPickers() {
   try {
-    const [characters, favoritesRaw, skinMenu] = await Promise.all([
-      invoke<CharacterInfo[]>("characters_list"),
+    const [favorites, favoritesRaw, skinMenu] = await Promise.all([
+      invoke<CharacterBrief[]>("characters_pet_menu_favorites").catch(() => [] as CharacterBrief[]),
       invoke<string | null>("settings_get", { key: FAVORITES_SETTING_KEY }),
-      invoke<PetMenuSkinsPayload>("characters_pet_menu_skins"),
+      (async () => {
+        const characterId = menuBrowsingCharacterId;
+        if (characterId) {
+          return invoke<PetMenuSkinsPayload>("characters_pet_menu_skins_for", {
+            characterId,
+          });
+        }
+        return invoke<PetMenuSkinsPayload>("characters_pet_menu_skins");
+      })(),
     ]);
     await loadBubbleEnabled();
     menuSkinCharacterId = skinMenu.character_id;
+    if (!menuBrowsingCharacterId) {
+      menuSkinCharacterId = skinMenu.character_id;
+    }
     if (menuSkinsTitleEl) {
       menuSkinsTitleEl.textContent = `选择模型 · ${skinMenu.character_name}`;
     }
@@ -262,22 +308,22 @@ async function refreshPetMenuPickers() {
         label: s.model_name || s.name,
         active: s.active,
         disabled: !s.model_ready,
+        modelId: s.model_id,
       })),
       "skin",
     );
     const favoriteIds = new Set(parseFavoriteIds(favoritesRaw));
-    const characterItems = [...characters].sort((a, b) => {
-      const af = favoriteIds.has(a.id) ? 0 : 1;
-      const bf = favoriteIds.has(b.id) ? 0 : 1;
-      if (af !== bf) return af - bf;
-      if (a.active !== b.active) return a.active ? -1 : 1;
-      return a.name.localeCompare(b.name, "zh-CN");
-    });
+    const characterItems = favorites
+      .filter((c) => favoriteIds.has(c.id))
+      .sort((a, b) => {
+        if (a.active !== b.active) return a.active ? -1 : 1;
+        return a.name.localeCompare(b.name, "zh-CN");
+      });
     renderMenuSublist(
       menuCharactersEl,
       characterItems.map((c) => ({
         id: c.id,
-        label: favoriteIds.has(c.id) ? `★ ${c.name}` : c.name,
+        label: `★ ${c.name}`,
         active: c.active,
       })),
       "character",
@@ -290,10 +336,35 @@ async function refreshPetMenuPickers() {
   }
 }
 
+function updateMenuCountdown() {
+  if (!menuCountdownEl) return;
+  const leftMs = menuAutoCloseDeadline - Date.now();
+  if (leftMs <= 0) {
+    menuCountdownEl.textContent = "";
+    return;
+  }
+  const sec = Math.ceil(leftMs / 1000);
+  menuCountdownEl.textContent = ` ${sec}s`;
+}
+
+function clearMenuCountdown() {
+  if (menuCountdownTimer) {
+    clearInterval(menuCountdownTimer);
+    menuCountdownTimer = null;
+  }
+  menuAutoCloseDeadline = 0;
+  if (menuCountdownEl) menuCountdownEl.textContent = "";
+}
+
 function scheduleAutoClose() {
   if (menuAutoCloseTimer) clearTimeout(menuAutoCloseTimer);
+  clearMenuCountdown();
+  menuAutoCloseDeadline = Date.now() + MENU_AUTO_CLOSE_MS;
+  updateMenuCountdown();
+  menuCountdownTimer = setInterval(updateMenuCountdown, 500);
   menuAutoCloseTimer = setTimeout(() => {
     menuAutoCloseTimer = null;
+    clearMenuCountdown();
     void invoke("pet_menu_hide");
   }, MENU_AUTO_CLOSE_MS);
 }
@@ -302,6 +373,22 @@ function cancelAutoClose() {
   if (menuAutoCloseTimer) {
     clearTimeout(menuAutoCloseTimer);
     menuAutoCloseTimer = null;
+  }
+  clearMenuCountdown();
+}
+
+function setMenuSwitchBusy(busy: boolean) {
+  menuSwitchBusy = busy;
+  if (menuSwitchBusyTimer) {
+    clearTimeout(menuSwitchBusyTimer);
+    menuSwitchBusyTimer = null;
+  }
+  if (busy) {
+    menuSwitchBusyTimer = setTimeout(() => {
+      menuSwitchBusy = false;
+      menuSwitchBusyTimer = null;
+      void refreshPetMenuPickers();
+    }, 15000);
   }
 }
 
@@ -327,41 +414,63 @@ root.addEventListener("click", async (e) => {
     return;
   }
   if (action === "open-skins-menu") {
+    menuBrowsingCharacterId = null;
     void openMenuView("skins");
     return;
   }
   if (action === "menu-back") {
+    if (menuSkinsViewEl && !menuSkinsViewEl.hasAttribute("hidden") && menuBrowsingCharacterId) {
+      menuBrowsingCharacterId = null;
+      setMenuView("characters");
+      void refreshPetMenuPickers();
+      return;
+    }
+    menuBrowsingCharacterId = null;
     setMenuView("main");
     return;
   }
-  if (action === "switch-skin" || action === "switch-character") {
+  if (action === "pick-character") {
+    const id = btn.getAttribute("data-id");
+    if (!id || menuSwitchBusy) return;
+    try {
+      await loadSkinsForCharacter(id);
+      setMenuView("skins");
+    } catch (err) {
+      console.error("加载角色皮肤失败", err);
+      showMenuError(err);
+    }
+    return;
+  }
+  if (action === "switch-skin") {
     const id = btn.getAttribute("data-id");
     if (!id || menuSwitchBusy || btn.disabled) return;
-    menuSwitchBusy = true;
+    setMenuSwitchBusy(true);
     const prevLabel = btn.textContent;
     btn.textContent = "切换中…";
     try {
-      if (action === "switch-character") {
-        await invoke("characters_set_active", { characterId: id });
-      } else {
-        const characterId = menuSkinCharacterId;
-        if (!characterId) throw new Error("当前没有可切换模型的角色");
-        await invoke("characters_set_skin", { characterId, skinId: id });
-      }
+      const characterId = menuSkinCharacterId ?? menuBrowsingCharacterId;
+      if (!characterId) throw new Error("当前没有可切换模型的角色");
+      await invoke("pet_menu_switch_skin", {
+        characterId,
+        skinId: id,
+        timeoutMs: 30000,
+      });
+      menuBrowsingCharacterId = null;
       await hideMenu();
+      window.setTimeout(() => void refreshPetMenuPickers(), 1200);
     } catch (err) {
       console.error("桌宠菜单切换失败", err);
       showMenuError(err);
       if (prevLabel) btn.textContent = prevLabel;
     } finally {
-      menuSwitchBusy = false;
+      setMenuSwitchBusy(false);
     }
     return;
   }
   if (action === "edit-bounds") {
     cancelAutoClose();
-    await hideMenu();
-    await invoke("pet_enter_edit_bounds");
+    void hideMenu();
+    void invoke("pet_enter_edit_bounds");
     return;
   }
   if (action === "quit") {
@@ -414,6 +523,10 @@ void waitForTauriInternals().then(async () => {
     window.setTimeout(() => {
       void invoke("pet_menu_sync_z_order");
     }, 50);
+  });
+
+  void listen("pet-menu-refresh-pickers", () => {
+    void refreshPetMenuPickers();
   });
 
   void listen("pet-app-exiting", () => {

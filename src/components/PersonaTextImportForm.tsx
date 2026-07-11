@@ -12,7 +12,7 @@ import {
 type Props = {
   mode: "create" | "update";
   personaId?: string;
-  /** 人物详情页：一并更新性格资料与当前皮肤台词 */
+  /** 人物详情页：一并更新资料与当前皮肤台词 */
   characterId?: string;
   /** Wiki 导入默认舰娘名（通常为角色显示名） */
   defaultWikiTitle?: string;
@@ -23,25 +23,22 @@ type Props = {
 type ImportMode = "paste" | "wiki" | "blhx_local";
 
 const TEXT_IMPORT_STEPS = [
-  { id: "preprocess", label: "解析参考文本" },
-  { id: "skill", label: "生成 Skill 文档" },
+  { id: "preprocess", label: "解析文本" },
   { id: "save", label: "写入人设" },
 ] as const;
 
 const WIKI_IMPORT_STEPS = [
   { id: "fetch", label: "爬取 Wiki" },
-  { id: "parse", label: "清洗资料" },
-  { id: "preprocess", label: "解析参考文本" },
-  { id: "skill", label: "生成 Skill 文档" },
+  { id: "parse", label: "解析页面" },
+  { id: "preprocess", label: "提取资料" },
   { id: "save", label: "写入人设" },
 ] as const;
 
 const CHARACTER_WIKI_IMPORT_STEPS = [
   { id: "fetch", label: "爬取 Wiki" },
-  { id: "parse", label: "筛选资料" },
-  { id: "preprocess", label: "解析参考文本" },
-  { id: "skill", label: "生成 Skill 文档" },
-  { id: "save", label: "写入性格资料" },
+  { id: "parse", label: "解析页面" },
+  { id: "preprocess", label: "提取资料" },
+  { id: "save", label: "写入资料" },
   { id: "lines", label: "导入台词" },
 ] as const;
 
@@ -49,8 +46,7 @@ const BLHX_WIKI_BASE = "https://wiki.biligame.com/blhx";
 
 const BLHX_LOCAL_STEPS = [
   { id: "parse", label: "读取本地库" },
-  { id: "preprocess", label: "解析参考文本" },
-  { id: "skill", label: "生成 Skill 文档" },
+  { id: "preprocess", label: "解析文本" },
   { id: "save", label: "写入人设" },
 ] as const;
 
@@ -129,11 +125,11 @@ export function PersonaTextImportForm({
     setProgressTotal(
       importMode === "wiki"
         ? characterId
-          ? 6
-          : 5
+          ? 5
+          : 4
         : importMode === "blhx_local"
-          ? 4
-          : 3
+          ? 3
+          : 2
     );
     setProgressMessage("");
   };
@@ -382,8 +378,8 @@ export function PersonaTextImportForm({
             rows={compact ? 5 : 8}
             placeholder={
               mode === "create"
-                ? "粘贴 Wiki、设定集、聊天记录等参考文本，AI 将解析为结构化资料并生成 Skill"
-                : "粘贴新的参考文本，AI 将与现有资料合并后重新生成 Skill"
+                ? "粘贴 Wiki、设定集、聊天记录等参考文本，将本地解析为结构化资料"
+                : "粘贴新的参考文本，将与现有资料合并后重新整理"
             }
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -395,7 +391,7 @@ export function PersonaTextImportForm({
       {importing && (
         <div className="persona-import-progress" role="status" aria-live="polite">
           <p className="persona-import-progress-title">
-            AI 处理中（步骤 {progressStep}/{progressTotal || importSteps.length}，约 1～3 分钟）
+            导入中（步骤 {progressStep}/{progressTotal || importSteps.length}）
           </p>
           <ol className="persona-import-progress-steps">
             {importSteps.map((step, index) => {
@@ -452,8 +448,8 @@ export function PersonaTextImportForm({
               {importing
                 ? "处理中…"
                 : mode === "create"
-                  ? "AI 处理并创建"
-                  : "AI 处理并更新"}
+                  ? "解析并创建"
+                  : "解析并更新"}
             </button>
             {mode === "create" && (
               <button
@@ -481,11 +477,11 @@ export function PersonaTextImportForm({
         <p className="persona-text-import-hint">
           {importMode === "wiki"
             ? characterId
-              ? `从 ${BLHX_WIKI_BASE} 按名称抓取页面，筛选性格/简介/台词后由 AI 生成结构化资料并写入；同时导入台词到当前皮肤模型。`
-              : "支持 BWIKI：输入舰娘名称或完整链接，自动提取角色设定与台词（过滤配装/战斗数据），本地结构化后由思考模型生成 Skill。"
+              ? `从 ${BLHX_WIKI_BASE} 抓取页面并导入台词到当前皮肤模型。`
+              : "支持 BWIKI：输入舰娘名称或完整链接，创建人物并导入台词。"
             : importMode === "blhx_local"
-              ? "从 mcp/blhx-wiki 本地 SQLite 读取已缓存的 BWIKI 资料，流程与 Wiki 导入相同（本地解析 + AI 生成 Skill），无需联网爬取。"
-              : "支持 .txt / .md 参考文本；需配置思考模型。AI 将解析文本 → 结构化 JSON → 生成 Skill 文档。"}
+              ? "从 mcp/blhx-wiki 本地 SQLite 读取已缓存的 BWIKI 资料，无需联网爬取。"
+              : "支持 .txt / .md 参考文本；本地解析并写入人物资料。"}
         </p>
       )}
 

@@ -98,7 +98,7 @@ pub fn get_profile(db: &Connection, id: i64) -> Result<Option<CharacterProfileRo
     ))?;
     let mut rows = stmt.query([id])?;
     if let Some(row) = rows.next()? {
-        Ok(Some(row_from_query(&row)?))
+        Ok(Some(row_from_query(row)?))
     } else {
         Ok(None)
     }
@@ -198,7 +198,7 @@ pub fn find_by_persona_id(
     ))?;
     let mut rows = stmt.query([persona_id])?;
     if let Some(row) = rows.next()? {
-        Ok(Some(row_from_query(&row)?))
+        Ok(Some(row_from_query(row)?))
     } else {
         Ok(None)
     }

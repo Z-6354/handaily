@@ -56,7 +56,7 @@ pub fn background_ms_for_date(db: &Connection, date: NaiveDate) -> Result<u64, r
         } else if let Ok(s) = chrono::DateTime::parse_from_rfc3339(&started) {
             let start = s.with_timezone(&Local);
             if start.date_naive() == date {
-                total += (Local::now() - start).num_milliseconds().max(0) as i64;
+                total += (Local::now() - start).num_milliseconds().max(0);
             }
         }
     }

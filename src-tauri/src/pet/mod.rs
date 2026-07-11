@@ -4,7 +4,8 @@ pub mod lines_import;
 pub mod models;
 pub mod wiki_scrape;
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -47,6 +48,15 @@ pub struct PetRuntimeState {
     pub page_load_count: AtomicU32,
     /// 前端 Spine 已成功初始化；隐藏后再显示时走 resume 而非全量 reload
     pub spine_ready: AtomicBool,
+    /// 与 spine_ready 对应、已通过前端校验的 model_id
+    pub spine_ready_model_id: Mutex<String>,
+    /// 菜单切换模型：等待桌宠前端 mark_spine_ready 的一次性确认（std mpsc，避免 block_on 饿死 runtime）
+    pub switch_confirm_tx: Mutex<Option<mpsc::SyncSender<String>>>,
+    /// 菜单切换模型：目标 model_id（规范 id）
+    pub switch_target_model_id: Mutex<Option<String>>,
+    /// 菜单切换模型：当前等待的 request id
+    pub switch_request_id: Mutex<Option<u64>>,
+    pub switch_seq: AtomicU64,
     /// 正在后台爬取 Wiki 台词的 model_id，避免重复请求
     pub wiki_lines_import_inflight: Mutex<HashSet<String>>,
     /// 启动批量 Wiki 台词导入是否进行中
@@ -155,6 +165,12 @@ pub struct PetConfigPayload {
     pub offset_x: f64,
     pub offset_y: f64,
     pub bubble_enabled: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PetSwitchPayload {
+    pub switch_id: u64,
+    pub config: PetConfigPayload,
 }
 
 pub fn is_enabled(db: &rusqlite::Connection) -> bool {
@@ -1033,13 +1049,91 @@ pub fn status(app: &AppHandle, st: &AppState) -> Result<PetStatusPayload, String
     })
 }
 
+/// Debug / 自动化测试：桌宠运行时快照（含 spine 与菜单切换等待状态）
+#[derive(Clone, Serialize)]
+pub struct PetTestSnapshot {
+    pub status: PetStatusPayload,
+    pub spine_ready: bool,
+    pub spine_ready_model_id: String,
+    pub switch_wait_target: Option<String>,
+    pub switch_request_id: Option<u64>,
+}
+
+pub fn test_snapshot(app: &AppHandle, st: &AppState) -> Result<PetTestSnapshot, String> {
+    let status = status(app, st)?;
+    test_snapshot_from_status(app, status)
+}
+
+/// 轻量快照：不访问 DB / 台词，供测试 API 切换后快速返回。
+pub fn test_snapshot_light(app: &AppHandle, model_id: &str) -> Result<PetTestSnapshot, String> {
+    let status = PetStatusPayload {
+        enabled: true,
+        visible: pet_visible(app),
+        active: true,
+        power_mode: "balanced".into(),
+        scale: 0.55,
+        remark_interval_sec: 300,
+        bubble_enabled: false,
+        model_id: model_id.to_string(),
+        model_name: model_id.to_string(),
+        animations: vec![],
+        idle_animation: Some("normal".into()),
+        click_animation: Some("touch".into()),
+        boot_animation: Some("normal".into()),
+        return_idle_animation: Some("normal".into()),
+        drag_animation: Some("tuozhuai".into()),
+        random_animations: vec![],
+        random_min_sec: 30,
+        random_max_sec: 120,
+        lines: vec![],
+    };
+    test_snapshot_from_status(app, status)
+}
+
+fn test_snapshot_from_status(app: &AppHandle, status: PetStatusPayload) -> Result<PetTestSnapshot, String> {
+    let (spine_ready, spine_ready_model_id, switch_wait_target, switch_request_id) = app
+        .try_state::<PetRuntimeState>()
+        .map(|rt| {
+            (
+                rt.spine_ready.load(Ordering::Acquire),
+                rt.spine_ready_model_id
+                    .lock()
+                    .ok()
+                    .map(|g| g.clone())
+                    .unwrap_or_default(),
+                rt.switch_target_model_id
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone()),
+                rt.switch_request_id.lock().ok().and_then(|g| *g),
+            )
+        })
+        .unwrap_or((false, String::new(), None, None));
+    Ok(PetTestSnapshot {
+        status,
+        spine_ready,
+        spine_ready_model_id,
+        switch_wait_target,
+        switch_request_id,
+    })
+}
+
 pub fn get_config(st: &AppState) -> Result<PetConfigPayload, String> {
     let db = crate::db::lock_conn(&st.db)?;
     let model_id = models::active_model_id(&db);
-    let assets = models::resolve_assets(st.data_dir(), &model_id)?;
-   let anim_meta = models::read_animation_meta(st.data_dir(), &db, &model_id);
-   let (window_width, window_height) = get_window_size(&db);
-    let (offset_x, offset_y) = get_model_offset(&db);
+    get_config_for_model(st.data_dir(), &db, &model_id)
+}
+
+/// 解析任意模型的资源信息（供空闲预加载，不读台词元数据）
+pub fn get_config_for_model(
+    data_dir: &std::path::Path,
+    db: &rusqlite::Connection,
+    model_id: &str,
+) -> Result<PetConfigPayload, String> {
+    let assets = models::resolve_assets(data_dir, model_id)?;
+    let anim_meta = models::read_animation_meta(data_dir, db, &assets.model_id);
+    let (window_width, window_height) = get_window_size(db);
+    let (offset_x, offset_y) = get_model_offset(db);
     Ok(PetConfigPayload {
         model_id: assets.model_id,
         model_name: assets.model_name,
@@ -1049,8 +1143,8 @@ pub fn get_config(st: &AppState) -> Result<PetConfigPayload, String> {
         atlas_file: assets.atlas_file,
         png_file: assets.png_file,
         use_file_src: assets.use_file_src,
-        power_mode: model_power_mode(&db, &anim_meta),
-        scale: model_scale(&db, &anim_meta),
+        power_mode: model_power_mode(db, &anim_meta),
+        scale: model_scale(db, &anim_meta),
         animations: anim_meta.animations,
         idle_animation: anim_meta.idle_animation,
         click_animation: anim_meta.click_animation,
@@ -1065,7 +1159,39 @@ pub fn get_config(st: &AppState) -> Result<PetConfigPayload, String> {
         window_height,
         offset_x,
         offset_y,
-        bubble_enabled: is_bubble_enabled(&db),
+        bubble_enabled: is_bubble_enabled(db),
+    })
+}
+
+/// 预加载专用：仅资源字段，避免读台词/窗口设置
+pub fn get_model_preload_config(data_dir: &std::path::Path, model_id: &str) -> Result<PetConfigPayload, String> {
+    let assets = models::resolve_assets(data_dir, model_id)?;
+    Ok(PetConfigPayload {
+        model_id: assets.model_id,
+        model_name: assets.model_name,
+        asset_base: assets.asset_base,
+        config_file: assets.config_file,
+        skel_file: assets.skel_file,
+        atlas_file: assets.atlas_file,
+        png_file: assets.png_file,
+        use_file_src: assets.use_file_src,
+        power_mode: "balanced".into(),
+        scale: 0.55,
+        animations: vec![],
+        idle_animation: Some("normal".into()),
+        click_animation: Some("touch".into()),
+        boot_animation: Some("normal".into()),
+        return_idle_animation: Some("normal".into()),
+        drag_animation: Some("tuozhuai".into()),
+        random_animations: vec![],
+        random_min_sec: 30,
+        random_max_sec: 120,
+        lines: vec![],
+        window_width: 0.0,
+        window_height: 0.0,
+        offset_x: 0.0,
+        offset_y: 0.0,
+        bubble_enabled: false,
     })
 }
 
@@ -1215,6 +1341,9 @@ pub fn ensure_pet_window(app: &AppHandle, st: &AppState) -> Result<(), String> {
             rt.page_load_finished.store(false, Ordering::Release);
             rt.page_load_count.store(0, Ordering::Release);
             rt.spine_ready.store(false, Ordering::Release);
+            if let Ok(mut guard) = rt.spine_ready_model_id.lock() {
+                guard.clear();
+            }
         }
     }
 
@@ -1274,6 +1403,18 @@ pub fn ensure_pet_window(app: &AppHandle, st: &AppState) -> Result<(), String> {
         create(app, st)
     } else {
         create(app, st)
+    }
+}
+
+/// 退出准备阶段：立刻隐藏桌宠/菜单并通知前端停止渲染（不等待 RunEvent::Exit）
+pub fn hide_pet_windows_immediately(app: &AppHandle) {
+    let _ = app.emit_to(PET_LABEL, "pet-app-exiting", ());
+    let _ = app.emit_to(PET_MENU_LABEL, "pet-app-exiting", ());
+    if let Some(win) = app.get_webview_window(PET_MENU_LABEL) {
+        detach_menu_window_effects(&win);
+    }
+    if let Some(win) = app.get_webview_window(PET_LABEL) {
+        detach_pet_window_effects(&win);
     }
 }
 
@@ -1372,6 +1513,9 @@ fn reset_pet_runtime_state(app: &AppHandle) {
         rt.page_load_finished.store(false, Ordering::Release);
         rt.page_load_count.store(0, Ordering::Release);
         rt.spine_ready.store(false, Ordering::Release);
+        if let Ok(mut guard) = rt.spine_ready_model_id.lock() {
+            guard.clear();
+        }
         rt.fullscreen_suppressed.store(false, Ordering::Relaxed);
         rt.user_hidden_pet.store(false, Ordering::Release);
     }
@@ -1427,7 +1571,7 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     win.show().map_err(|e| e.to_string())?;
     companion_session_start(st);
     if should_full_reload_pet(app) {
-        schedule_pet_reload_after_show(app);
+        schedule_pet_reload_after_show(app, st.clone());
     } else {
         schedule_pet_resume_after_show(app);
     }
@@ -1493,15 +1637,276 @@ fn schedule_pet_resume_after_show(app: &AppHandle) {
     });
 }
 
-pub fn mark_spine_ready(app: &AppHandle) {
+pub fn mark_spine_ready(app: &AppHandle, model_id: &str) {
     if let Some(rt) = app.try_state::<PetRuntimeState>() {
         rt.spine_ready.store(true, Ordering::Release);
+        if let Ok(mut guard) = rt.spine_ready_model_id.lock() {
+            *guard = model_id.to_string();
+        }
+    }
+}
+
+fn try_complete_switch_wait(app: &AppHandle, model_id: &str) {
+    let target = app
+        .try_state::<PetRuntimeState>()
+        .and_then(|rt| rt.switch_target_model_id.lock().ok().and_then(|g| g.clone()));
+    let Some(target) = target else {
+        return;
+    };
+    if models::canonical_model_id(&target) != models::canonical_model_id(model_id) {
+        return;
+    }
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        if let Ok(mut tx_guard) = rt.switch_confirm_tx.lock() {
+            if let Some(tx) = tx_guard.take() {
+                let _ = tx.send(model_id.to_string());
+                eprintln!("xiaohan-daily: pet menu switch confirmed model={model_id}");
+            }
+        }
+    }
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        if let Ok(mut id_guard) = rt.switch_target_model_id.lock() {
+            *id_guard = None;
+        }
+    }
+}
+
+fn cancel_switch_wait(app: &AppHandle) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        if let Ok(mut tx_guard) = rt.switch_confirm_tx.lock() {
+            tx_guard.take();
+        }
+        if let Ok(mut id_guard) = rt.switch_target_model_id.lock() {
+            *id_guard = None;
+        }
+        if let Ok(mut req_guard) = rt.switch_request_id.lock() {
+            *req_guard = None;
+        }
+    }
+}
+
+fn begin_switch_wait(app: &AppHandle, target_model_id: &str) -> (mpsc::Receiver<String>, u64) {
+    cancel_switch_wait(app);
+    clear_spine_ready(app);
+    let switch_id = app
+        .try_state::<PetRuntimeState>()
+        .map(|rt| rt.switch_seq.fetch_add(1, Ordering::Relaxed) + 1)
+        .unwrap_or(1);
+    let (tx, rx) = mpsc::sync_channel(1);
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        if let Ok(mut tx_guard) = rt.switch_confirm_tx.lock() {
+            *tx_guard = Some(tx);
+        }
+        if let Ok(mut id_guard) = rt.switch_target_model_id.lock() {
+            *id_guard = Some(target_model_id.to_string());
+        }
+        if let Ok(mut req_guard) = rt.switch_request_id.lock() {
+            *req_guard = Some(switch_id);
+        }
+    }
+    eprintln!("xiaohan-daily: pet menu switch wait id={switch_id} target={target_model_id}");
+    (rx, switch_id)
+}
+
+fn emit_pet_switch(app: &AppHandle, st: &AppState, switch_id: u64) -> Result<(), String> {
+    let config = get_config(st)?;
+    let payload = PetSwitchPayload { switch_id, config };
+    let _ = app.emit_to(PET_LABEL, "pet-switch", payload);
+    Ok(())
+}
+
+pub fn confirm_switch(app: &AppHandle, switch_id: u64, model_id: &str) {
+    let expected = app
+        .try_state::<PetRuntimeState>()
+        .and_then(|rt| rt.switch_request_id.lock().ok().and_then(|g| *g));
+    if expected != Some(switch_id) {
+        eprintln!(
+            "xiaohan-daily: pet switch confirm ignored id={switch_id} expected={expected:?}"
+        );
+        return;
+    }
+    mark_spine_ready(app, model_id);
+    try_complete_switch_wait(app, model_id);
+}
+
+/// 菜单专用：切换模型并阻塞到桌宠前端确认（或超时）。同步实现，可在测试 API 线程直接调用。
+pub fn menu_switch_to_model_blocking(
+    app: &AppHandle,
+    st: Arc<AppState>,
+    raw_model_id: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let assets = models::resolve_assets(st.data_dir(), raw_model_id)?;
+    let canonical = assets.model_id.clone();
+
+    if app.get_webview_window(PET_LABEL).is_none() {
+        set_active_model(app, st.clone(), raw_model_id)?;
+        if await_spine_ready_blocking(app, &st, Some(canonical.clone()), timeout_ms) {
+            return Ok(canonical);
+        }
+        return Err("模型加载超时，请稍后重试".into());
+    }
+
+    let (rx, switch_id) = begin_switch_wait(app, &canonical);
+    if let Err(e) = emit_pet_switch(app, &st, switch_id) {
+        cancel_switch_wait(app);
+        return Err(e);
+    }
+    let _ = app.emit_to(PET_MENU_LABEL, "pet-menu-refresh-pickers", ());
+    let wait_t0 = Instant::now();
+    let result = match rx.recv_timeout(Duration::from_millis(timeout_ms)) {
+        Ok(id) => {
+            eprintln!(
+                "xiaohan-daily: pet menu switch done id={switch_id} model={id} ms={}",
+                wait_t0.elapsed().as_millis()
+            );
+            Ok(id)
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            cancel_switch_wait(app);
+            eprintln!(
+                "xiaohan-daily: pet menu switch timeout id={switch_id} target={canonical} ms={}",
+                wait_t0.elapsed().as_millis()
+            );
+            Err("模型加载超时，请稍后重试".into())
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            cancel_switch_wait(app);
+            Err("桌宠加载已中断".into())
+        }
+    };
+    result
+}
+
+/// 菜单专用：切换模型并阻塞到桌宠前端确认（或超时）
+pub async fn menu_switch_to_model(
+    app: &AppHandle,
+    st: Arc<AppState>,
+    raw_model_id: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let app = app.clone();
+    let raw = raw_model_id.to_string();
+    tokio::task::spawn_blocking(move || menu_switch_to_model_blocking(&app, st, &raw, timeout_ms))
+        .await
+        .map_err(|e| format!("menu switch task failed: {e}"))?
+}
+
+pub async fn menu_switch_skin(
+    app: &AppHandle,
+    st: Arc<AppState>,
+    character_id: &str,
+    skin_id: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let raw_id = {
+        let db = crate::db::lock_conn(&st.db)?;
+        crate::character::select_character_skin(st.data_dir(), &db, character_id, skin_id)?
+    };
+    menu_switch_to_model(app, st, &raw_id, timeout_ms).await
+}
+
+pub async fn menu_switch_character(
+    app: &AppHandle,
+    st: Arc<AppState>,
+    character_id: &str,
+    timeout_ms: u64,
+) -> Result<String, String> {
+    let raw_id = {
+        let db = crate::db::lock_conn(&st.db)?;
+        let manifest = crate::persona::load_manifest(st.data_dir());
+        crate::character::set_active_character(st.data_dir(), &db, &manifest, character_id)?;
+        models::active_model_id(&db)
+    };
+    menu_switch_to_model(app, st, &raw_id, timeout_ms).await
+}
+
+fn await_spine_ready_blocking(
+    app: &AppHandle,
+    _st: &AppState,
+    expected_model_id: Option<String>,
+    timeout_ms: u64,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let (ready, ready_model) = app
+            .try_state::<PetRuntimeState>()
+            .map(|rt| {
+                (
+                    rt.spine_ready.load(Ordering::Acquire),
+                    rt.spine_ready_model_id
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or((false, String::new()));
+        if ready {
+            let ready_canon = models::canonical_model_id(&ready_model);
+            if let Some(expected) = expected_model_id.as_deref() {
+                if !ready_model.is_empty()
+                    && ready_canon == models::canonical_model_id(expected)
+                {
+                    return true;
+                }
+            } else if !ready_model.is_empty() {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+pub async fn await_spine_ready(
+    app: &AppHandle,
+    _st: &AppState,
+    expected_model_id: Option<String>,
+    timeout_ms: u64,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let (ready, ready_model) = app
+            .try_state::<PetRuntimeState>()
+            .map(|rt| {
+                (
+                    rt.spine_ready.load(Ordering::Acquire),
+                    rt.spine_ready_model_id
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or((false, String::new()));
+        if ready {
+            let ready_canon = models::canonical_model_id(&ready_model);
+            if let Some(expected) = expected_model_id.as_deref() {
+                if !ready_model.is_empty()
+                    && ready_canon == models::canonical_model_id(expected)
+                {
+                    return true;
+                }
+            } else if !ready_model.is_empty() {
+                return true;
+            }
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
 pub fn clear_spine_ready(app: &AppHandle) {
     if let Some(rt) = app.try_state::<PetRuntimeState>() {
         rt.spine_ready.store(false, Ordering::Release);
+        if let Ok(mut guard) = rt.spine_ready_model_id.lock() {
+            guard.clear();
+        }
     }
 }
 
@@ -1510,7 +1915,7 @@ pub fn resume_pet(app: &AppHandle) {
     let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
 }
 
-fn schedule_pet_reload_after_show(app: &AppHandle) {
+fn schedule_pet_reload_after_show(app: &AppHandle, st: Arc<AppState>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let already_ready = app
@@ -1528,7 +1933,15 @@ fn schedule_pet_reload_after_show(app: &AppHandle) {
             .and_then(|w| w.is_visible().ok())
             .unwrap_or(false)
         {
-            nudge_pet(&app);
+            let spine_ready = app
+                .try_state::<PetRuntimeState>()
+                .map(|rt| rt.spine_ready.load(Ordering::Acquire))
+                .unwrap_or(false);
+            if spine_ready {
+                resume_pet(&app);
+            } else {
+                nudge_pet(&app, &st);
+            }
         }
     });
 }
@@ -1552,7 +1965,7 @@ async fn wait_pet_page_ready(app: &AppHandle, timeout: Duration) -> bool {
 
 pub fn reload_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     if app.get_webview_window(PET_LABEL).is_some() {
-        nudge_pet(app);
+        nudge_pet(app, st);
         return Ok(());
     }
     let enabled = st
@@ -1567,10 +1980,11 @@ pub fn reload_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// 通知桌宠前端重新读配置（不销毁窗口）
-pub fn nudge_pet(app: &AppHandle) {
+/// 通知桌宠前端重新读配置（不销毁窗口）；payload 为当前配置快照，避免切换时再走 IPC get_config
+pub fn nudge_pet(app: &AppHandle, st: &AppState) {
     clear_spine_ready(app);
-    let _ = app.emit_to(PET_LABEL, "pet-reload", ());
+    let payload = get_config(st).ok();
+    let _ = app.emit_to(PET_LABEL, "pet-reload", payload);
 }
 
 /// 设置页调整角色大小时仅更新 CSS scale，不重建 Spine
@@ -1625,8 +2039,8 @@ pub fn set_active_model(app: &AppHandle, st: Arc<AppState>, model_id: &str) -> R
     drop(db);
     if enabled {
         if app.get_webview_window(PET_LABEL).is_some() {
-            clear_spine_ready(app);
-            nudge_pet(app);
+            nudge_pet(app, &st);
+            let _ = app.emit_to(PET_MENU_LABEL, "pet-menu-refresh-pickers", ());
         } else {
             show_pet(app, &st)?;
         }
@@ -1876,14 +2290,18 @@ pub fn set_enabled(app: &AppHandle, st: Arc<AppState>, enabled: bool) -> Result<
 }
 
 /// 启动时提前创建隐藏桌宠 WebView，与主窗口首屏并行，缩短首显等待。
-pub fn prewarm_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
+pub fn prewarm_on_startup(_app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
     {
         let db = crate::db::lock_conn(&st.db)?;
         if !is_enabled(&db) {
             return Ok(());
         }
     }
-    ensure_pet_window(app, &st)
+    #[cfg(not(debug_assertions))]
+    {
+        ensure_pet_window(app, &st)?;
+    }
+    Ok(())
 }
 
 pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
@@ -2267,12 +2685,26 @@ fn companion_session_stop(st: &AppState) {
 
 /// 桌宠编辑/移动调试日志（JSONL，位于 data_dir/logs/pet-movement.jsonl）
 pub fn append_movement_debug_logs(data_dir: &std::path::Path, lines: &[String]) -> Result<(), String> {
+    append_jsonl_logs(data_dir, "pet-movement.jsonl", lines, false)
+}
+
+/// 桌宠显示层日志（JSONL + 终端 stderr）
+pub fn append_display_debug_logs(data_dir: &std::path::Path, lines: &[String]) -> Result<(), String> {
+    append_jsonl_logs(data_dir, "pet-display.jsonl", lines, true)
+}
+
+fn append_jsonl_logs(
+    data_dir: &std::path::Path,
+    filename: &str,
+    lines: &[String],
+    mirror_terminal: bool,
+) -> Result<(), String> {
     if lines.is_empty() {
         return Ok(());
     }
     let dir = data_dir.join("logs");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("pet-movement.jsonl");
+    let path = dir.join(filename);
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -2280,6 +2712,29 @@ pub fn append_movement_debug_logs(data_dir: &std::path::Path, lines: &[String]) 
         .open(&path)
         .map_err(|e| e.to_string())?;
     for line in lines {
+        if mirror_terminal {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                let scope = v.get("scope").and_then(|s| s.as_str()).unwrap_or("pet");
+                let level = v.get("level").and_then(|s| s.as_str()).unwrap_or("info");
+                let mut msg = v.get("message").and_then(|s| s.as_str()).unwrap_or(line).to_string();
+                if matches!(level, "warn" | "error") {
+                    if let Some(detail) = v.get("detail") {
+                        if !detail.is_null() {
+                            msg.push(' ');
+                            msg.push_str(&detail.to_string());
+                        }
+                    }
+                }
+                let formatted = format!("[pet][{scope}] {msg}");
+                if matches!(level, "warn" | "error") {
+                    crate::log::warn(formatted);
+                } else {
+                    crate::log::info(formatted);
+                }
+            } else {
+                crate::log::info(format!("[pet] {line}"));
+            }
+        }
         writeln!(file, "{line}").map_err(|e| e.to_string())?;
     }
     Ok(())

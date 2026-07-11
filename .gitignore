@@ -36,8 +36,9 @@ src-tauri/gen/schemas/
 *.local
 
 # Local Live2D/Spine model packs (import via app or live2d_import)
-live2d/
+/live2d/
 
 # Local agent/editor tooling
 .agents/
 .cursor/
+.iterative-hardening/
