@@ -1,9 +1,11 @@
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 
 export type ResolveAssetUrl = (filename: string) => Promise<string>;
 
 export interface PetAssetResolver {
   urlFor: ResolveAssetUrl;
+  /** 用户模型：asset 协议加载失败时回退 IPC blob */
+  readViaIpc?: (filename: string) => Promise<string>;
   dispose: () => void;
 }
 
@@ -48,26 +50,59 @@ export function petBlobCacheSize(): number {
   return GLOBAL_BLOB_CACHE.size;
 }
 
-/** 批量预读模型资源（单次 IPC），切换模型前调用可显著缩短等待。 */
-export async function preloadModelAssets(
-  modelId: string,
-  filenames: string[],
-  useFileSrc: boolean,
-): Promise<void> {
-  if (!useFileSrc) return;
-  const missing = filenames.filter((f) => f && !GLOBAL_BLOB_CACHE.has(cacheKey(modelId, f)));
-  if (missing.length === 0) return;
+/** 批量 IPC 预热用户模型 blob 缓存（doc 82 换肤快路径） */
+export async function warmModelBundleCache(modelId: string, filenames: string[]): Promise<void> {
+  const files = filenames.filter(Boolean);
+  if (files.length === 0) return;
   try {
     const bundle = await invoke<{ files: Record<string, string> }>("pet_read_model_bundle", {
       modelId,
-      filenames: missing,
+      filenames: files,
     });
-    for (const [name, b64] of Object.entries(bundle.files ?? {})) {
-      blobUrlFromBase64(modelId, name, b64);
+    for (const [filename, b64] of Object.entries(bundle.files ?? {})) {
+      blobUrlFromBase64(modelId, filename, b64);
     }
   } catch {
-    // 预加载失败时按需读取
+    // 批量失败时回退逐文件 readViaIpc
   }
+}
+
+/** 预读模型资源：仅内置模型走 HTTP 缓存；用户模型按需加载。 */
+export async function preloadModelAssets(
+  _modelId: string,
+  filenames: string[],
+  useFileSrc: boolean,
+  assetBase?: string,
+): Promise<void> {
+  if (useFileSrc) return;
+
+  const files = filenames.filter(Boolean);
+  if (files.length === 0) return;
+
+  const base = assetBase?.endsWith("/") ? assetBase : `${assetBase ?? ""}/`;
+  if (!base || base === "/") return;
+  await Promise.all(
+    files.map(async (f) => {
+      try {
+        await fetch(`${base}${f}`, { cache: "force-cache" });
+      } catch {
+        // 预加载失败时按需读取
+      }
+    }),
+  );
+}
+
+function joinAssetPath(base: string, filename: string): string {
+  const trimmed = base.replace(/[/\\]+$/, "");
+  return `${trimmed}/${filename}`;
+}
+
+async function readModelAssetViaIpc(modelId: string, filename: string): Promise<string> {
+  const key = cacheKey(modelId, filename);
+  const cached = GLOBAL_BLOB_CACHE.get(key);
+  if (cached) return cached;
+  const b64 = await invoke<string>("pet_read_model_asset", { modelId, filename });
+  return blobUrlFromBase64(modelId, filename, b64);
 }
 
 export function createPetAssetResolver(cfg: {
@@ -89,13 +124,9 @@ export function createPetAssetResolver(cfg: {
       const key = cacheKey(cfg.model_id, filename);
       const cached = GLOBAL_BLOB_CACHE.get(key);
       if (cached) return cached;
-
-      const b64 = await invoke<string>("pet_read_model_asset", {
-        modelId: cfg.model_id,
-        filename,
-      });
-      return blobUrlFromBase64(cfg.model_id, filename, b64);
+      return convertFileSrc(joinAssetPath(cfg.asset_base, filename));
     },
+    readViaIpc: async (filename) => readModelAssetViaIpc(cfg.model_id, filename),
     dispose: () => {},
   };
 }

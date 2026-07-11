@@ -813,6 +813,118 @@ fn read_import_action_template() -> PetAnimationMeta {
     serde_json::from_str(IMPORT_ACTION_TEMPLATE).unwrap_or_default()
 }
 
+/// 台词是否仍为 Live2D 导入模板的 5 条占位（尚未写入 Wiki / 用户自定义内容）
+pub fn lines_are_import_template_placeholder(lines: &[PetRemarkLine]) -> bool {
+    if lines.is_empty() {
+        return true;
+    }
+    let template = read_import_action_template();
+    if template.lines.is_empty() {
+        return false;
+    }
+    lines_sorted_texts(lines) == lines_sorted_texts(&template.lines)
+}
+
+fn lines_sorted_texts(lines: &[PetRemarkLine]) -> Vec<String> {
+    let mut texts: Vec<String> = lines
+        .iter()
+        .map(|l| l.text.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+    texts.sort();
+    texts
+}
+
+/// 台词是否仍为内置模型自带的默认占位（如柴郡 bundled meta）
+pub fn lines_are_builtin_default_placeholder(model_id: &str, lines: &[PetRemarkLine]) -> bool {
+    let Some(bundled) = read_bundled_animation_meta(model_id) else {
+        return false;
+    };
+    if bundled.lines.is_empty() {
+        return false;
+    }
+    lines_sorted_texts(lines) == lines_sorted_texts(&bundled.lines)
+}
+
+fn wiki_lines_failed_key(model_id: &str) -> String {
+    format!("pet_lines_wiki_failed:{model_id}")
+}
+
+const WIKI_LINES_RETRY_SECS: i64 = 900;
+
+pub fn wiki_lines_import_in_cooldown(db: &rusqlite::Connection, model_id: &str) -> bool {
+    let Some(raw) = crate::db::get_setting(db, &wiki_lines_failed_key(model_id)) else {
+        return false;
+    };
+    if raw.trim().is_empty() {
+        return false;
+    }
+    let Ok(ts) = raw.parse::<i64>() else {
+        return false;
+    };
+    chrono::Utc::now().timestamp() - ts < WIKI_LINES_RETRY_SECS
+}
+
+pub fn record_wiki_lines_import_failed(db: &rusqlite::Connection, model_id: &str) {
+    let _ = crate::db::set_setting(
+        db,
+        &wiki_lines_failed_key(model_id),
+        &chrono::Utc::now().timestamp().to_string(),
+    );
+}
+
+pub fn clear_wiki_lines_import_failed(db: &rusqlite::Connection, model_id: &str) {
+    let _ = crate::db::set_setting(db, &wiki_lines_failed_key(model_id), "");
+}
+
+pub fn is_model_wiki_lines_imported(db: &rusqlite::Connection, model_id: &str) -> bool {
+    crate::db::get_setting(db, &wiki_lines_imported_key(model_id)).as_deref() == Some("1")
+}
+
+pub fn mark_model_wiki_lines_imported(
+    db: &rusqlite::Connection,
+    model_id: &str,
+) -> Result<(), String> {
+    clear_wiki_lines_import_failed(db, model_id);
+    crate::db::set_setting(db, &wiki_lines_imported_key(model_id), "1").map_err(|e| e.to_string())
+}
+
+pub fn clear_model_wiki_lines_imported(
+    db: &rusqlite::Connection,
+    model_id: &str,
+) -> Result<(), String> {
+    crate::db::set_setting(db, &wiki_lines_imported_key(model_id), "0").map_err(|e| e.to_string())
+}
+
+/// 是否仍需从 Wiki 自动导入台词
+pub fn model_needs_wiki_lines_import(
+    data_dir: &Path,
+    db: &rusqlite::Connection,
+    model_id: &str,
+) -> bool {
+    if wiki_lines_import_in_cooldown(db, model_id) {
+        return false;
+    }
+    if is_model_wiki_lines_imported(db, model_id) {
+        return false;
+    }
+    let meta = read_animation_meta(data_dir, db, model_id);
+    if meta.lines.is_empty() {
+        return true;
+    }
+    if lines_are_import_template_placeholder(&meta.lines) {
+        return true;
+    }
+    if lines_are_builtin_default_placeholder(model_id, &meta.lines) {
+        return true;
+    }
+    false
+}
+
+fn wiki_lines_imported_key(model_id: &str) -> String {
+    format!("pet_lines_wiki_imported:{model_id}")
+}
+
 fn match_animation_name(preferred: &str, names: &[String]) -> Option<String> {
     let pref = preferred.trim();
     if pref.is_empty() {
@@ -852,7 +964,7 @@ fn resolve_role_animation(
         }
         let lower = pref.to_ascii_lowercase();
         let mut keys: Vec<&str> = keywords.to_vec();
-        if !keys.iter().any(|k| *k == lower.as_str()) {
+        if !keys.contains(&lower.as_str()) {
             keys.push(lower.as_str());
         }
         if let Some(matched) = match_animation_keyword(&keys, names) {
@@ -927,27 +1039,13 @@ fn apply_template_to_meta(meta: &mut PetAnimationMeta, template: &PetAnimationMe
 
     meta.random_min_sec = template.random_min_sec;
     meta.random_max_sec = template.random_max_sec;
-    meta.lines = template
-        .lines
-        .iter()
-        .map(|line| PetRemarkLine {
-            text: line.text.clone(),
-            animation: line
-                .animation
-                .as_ref()
-                .and_then(|anim| match_animation_name(anim, &names)),
-        })
-        .filter(|line| !line.text.trim().is_empty())
-        .collect();
+    // 台词由 Wiki 自动导入或用户手动添加，不在动作模板中预置占位
     normalize_idle_animation(meta);
 }
 
 fn is_likely_idle_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    if ["normal", "stand", "idle", "standby", "default"]
-        .iter()
-        .any(|k| lower.as_str() == *k)
-    {
+    if ["normal", "stand", "idle", "standby", "default"].contains(&lower.as_str()) {
         return true;
     }
     ["idle", "stand", "normal"]
@@ -966,6 +1064,7 @@ pub fn apply_import_action_template(
     }
     let mut meta = read_import_action_template();
     meta.animations = Vec::new();
+    meta.lines = Vec::new();
     save_animation_meta(data_dir, db, model_id, &meta)
 }
 
@@ -1337,7 +1436,7 @@ fn prune_animation_refs(meta: &mut PetAnimationMeta) {
        meta.random_animations.retain(|n| n != idle);
    }
     meta.lines.retain(|line| {
-        line.text.trim().len() >= 1
+        !line.text.trim().is_empty()
             && line.animation.as_ref().is_none_or(|a| {
                 meta.animations.is_empty() || meta.animations.iter().any(|n| n == a)
             })
@@ -1600,15 +1699,11 @@ pub fn save_model_display_settings(
     db: &rusqlite::Connection,
     model_id: &str,
     _power_mode: Option<String>,
-    scale: Option<f64>,
     remark_interval_sec: Option<i64>,
 ) -> Result<PetAnimationMeta, String> {
     let mut meta = read_animation_meta(data_dir, db, model_id);
     // 省电模式已移除，固定 balanced；忽略传入的 power_mode
     meta.power_mode = None;
-    if let Some(s) = scale {
-        meta.scale = Some(s.clamp(0.4, 1.5));
-    }
     if let Some(r) = remark_interval_sec {
         meta.remark_interval_sec = Some(r.clamp(0, 3600));
     }
@@ -1642,6 +1737,48 @@ pub fn pick_remark_line(meta: &PetAnimationMeta, animation: Option<&str>) -> Opt
         .unwrap_or(0) as usize)
         % pool.len();
     Some(pool[idx].clone())
+}
+
+fn read_model_wiki_title(dir: &Path) -> Option<String> {
+    if let Ok(raw) = fs::read_to_string(dir.join("wiki_title.txt")) {
+        let title = raw.trim().to_string();
+        if !title.is_empty() {
+            return Some(title);
+        }
+    }
+    None
+}
+
+pub fn write_model_wiki_title(dir: &Path, title: &str) -> Result<(), String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Ok(());
+    }
+    fs::write(dir.join("wiki_title.txt"), title).map_err(|e| e.to_string())
+}
+
+/// 轻量 BWIKI 词条索引：只读 wiki_title.txt
+pub fn model_wiki_titles_map(data_dir: &Path) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let dir = models_dir(data_dir);
+    if !dir.is_dir() {
+        return map;
+    }
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            if is_legacy_or_builtin_id(&id) {
+                continue;
+            }
+            if let Some(title) = read_model_wiki_title(&entry.path()) {
+                map.insert(id, title);
+            }
+        }
+    }
+    map
 }
 
 fn read_model_name(dir: &Path) -> Option<String> {
@@ -1700,10 +1837,8 @@ fn slugify_id(raw: &str) -> Result<String, String> {
             if !id.ends_with('-') {
                 id.push('-');
             }
-        } else if c.is_whitespace() {
-            if !id.is_empty() && !id.ends_with('-') {
-                id.push('-');
-            }
+        } else if c.is_whitespace() && !id.is_empty() && !id.ends_with('-') {
+            id.push('-');
         }
     }
     let id = id.trim_matches('-').to_string();
@@ -1745,6 +1880,7 @@ pub fn import_from_folder(
     data_dir: &Path,
     name: &str,
     folder: &Path,
+    wiki_title: Option<&str>,
 ) -> Result<PetModelInfo, String> {
     let name = name.trim();
     if name.is_empty() {
@@ -1756,6 +1892,9 @@ pub fn import_from_folder(
     fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
     copy_model_files(folder, &dest, &triple)?;
     write_model_name(&dest, name)?;
+    if let Some(title) = wiki_title.map(str::trim).filter(|s| !s.is_empty()) {
+        write_model_wiki_title(&dest, title)?;
+    }
     Ok(PetModelInfo {
         id,
         name: name.to_string(),
@@ -1955,7 +2094,7 @@ mod tests {
             meta.random_animations,
             vec!["DanceMove".to_string(), "Sleepy".to_string()]
         );
-        assert_eq!(meta.lines.len(), template.lines.len());
+        assert!(meta.lines.is_empty());
     }
 
     #[test]
@@ -1963,7 +2102,65 @@ mod tests {
         let template = read_import_action_template();
         assert_eq!(template.click_animation.as_deref(), Some("touch"));
         assert_eq!(template.random_min_sec, 30);
-        assert!(!template.lines.is_empty());
+        assert_eq!(template.lines.len(), 5);
+    }
+
+    #[test]
+    fn template_placeholder_lines_detected() {
+        let template = read_import_action_template();
+        assert!(lines_are_import_template_placeholder(&template.lines));
+        assert!(lines_are_import_template_placeholder(&[]));
+        assert!(!lines_are_import_template_placeholder(&[PetRemarkLine {
+            text: "这是 Wiki 台词".into(),
+            animation: None,
+        }]));
+    }
+
+    #[test]
+    fn builtin_default_placeholder_lines_detected() {
+        let bundled = read_bundled_animation_meta(crate::pet::models::BUILTIN_CHAIJUN).unwrap();
+        assert!(!bundled.lines.is_empty());
+        assert!(lines_are_builtin_default_placeholder(
+            crate::pet::models::BUILTIN_CHAIJUN,
+            &bundled.lines
+        ));
+        assert!(!lines_are_builtin_default_placeholder(
+            crate::pet::models::BUILTIN_CHAIJUN,
+            &[PetRemarkLine {
+                text: "这是 Wiki 台词".into(),
+                animation: None,
+            }]
+        ));
+    }
+
+    #[test]
+    fn model_needs_wiki_lines_import_respects_imported_flag() {
+        let dir = std::env::temp_dir().join(format!(
+            "handaily-wiki-imported-flag-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open_and_migrate(&dir.join("test.db")).unwrap();
+        let model_id = "test_model";
+        mark_model_wiki_lines_imported(&db, model_id).unwrap();
+        assert!(!model_needs_wiki_lines_import(&dir, &db, model_id));
+        clear_model_wiki_lines_imported(&db, model_id).unwrap();
+        assert!(model_needs_wiki_lines_import(&dir, &db, model_id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wiki_lines_import_cooldown_blocks_retry() {
+        let dir = std::env::temp_dir().join(format!("handaily-wiki-cooldown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::open_and_migrate(&dir.join("test.db")).unwrap();
+        record_wiki_lines_import_failed(&db, "test_model");
+        assert!(wiki_lines_import_in_cooldown(&db, "test_model"));
+        clear_wiki_lines_import_failed(&db, "test_model");
+        assert!(!wiki_lines_import_in_cooldown(&db, "test_model"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

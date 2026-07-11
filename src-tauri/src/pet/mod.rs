@@ -4,10 +4,10 @@ pub mod lines_import;
 pub mod models;
 pub mod wiki_scrape;
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::webview::{Color, PageLoadEvent};
@@ -19,9 +19,12 @@ use tauri::{
 use crate::state::AppState;
 
 pub const PET_LABEL: &str = "pet";
+pub const PET_MENU_LABEL: &str = "pet-menu";
 
 const DEFAULT_WIDTH: f64 = 240.0;
 const DEFAULT_HEIGHT: f64 = 320.0;
+const MENU_WIDTH: f64 = 220.0;
+const MENU_HEIGHT: f64 = 360.0;
 
 #[cfg(debug_assertions)]
 const DEV_PET_PAGE: &str = "http://127.0.0.1:1420/pet.html";
@@ -44,6 +47,26 @@ pub struct PetRuntimeState {
     pub page_load_count: AtomicU32,
     /// 前端 Spine 已成功初始化；隐藏后再显示时走 resume 而非全量 reload
     pub spine_ready: AtomicBool,
+    /// 正在后台爬取 Wiki 台词的 model_id，避免重复请求
+    pub wiki_lines_import_inflight: Mutex<HashSet<String>>,
+    /// 启动批量 Wiki 台词导入是否进行中
+    pub wiki_bulk_import_running: AtomicBool,
+    /// 最近一次批量导入进度（供前端晚挂载时恢复）
+    pub wiki_bulk_last_progress: Mutex<Option<lines_import::PetWikiBulkImportProgress>>,
+    /// 用户请求停止批量 Wiki 导入
+    pub wiki_bulk_stop_requested: AtomicBool,
+    /// 批量 Wiki 导入是否暂停
+    pub wiki_bulk_paused: AtomicBool,
+    /// pet-menu.html 是否已完成至少一次 Finished 加载
+    pub menu_page_load_finished: AtomicBool,
+    /// 菜单页未就绪时暂存的显示坐标（物理像素）
+    pub menu_pending_show: Mutex<Option<(i32, i32)>>,
+    /// 是否已有 pending menu show 轮询任务在跑
+    pub menu_pending_spawn_running: AtomicBool,
+    /// 用户已关闭菜单；阻止迟到的 show 把菜单又弹出来
+    pub menu_suppress_show: AtomicBool,
+    /// 用户通过菜单/托盘主动隐藏桌宠（非全屏抑制）；阻止台词等逻辑自动 show
+    pub user_hidden_pet: AtomicBool,
 }
 
 #[derive(Clone, Serialize)]
@@ -72,6 +95,8 @@ pub struct PetRemarkPayload {
 pub struct PetStatusPayload {
     pub enabled: bool,
     pub visible: bool,
+    /// 设置页「启用桌宠」：DB 已启用且非用户主动隐藏（全屏临时隐藏仍为 true）。
+    pub active: bool,
     pub power_mode: String,
     pub scale: f64,
     pub remark_interval_sec: i64,
@@ -88,6 +113,19 @@ pub struct PetStatusPayload {
     pub random_min_sec: i64,
     pub random_max_sec: i64,
     pub lines: Vec<models::PetRemarkLine>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PetStatusChangedPayload {
+    /// 设置页「启用桌宠」开关：DB 已启用且非用户主动隐藏。
+    pub active: bool,
+    pub bubble_enabled: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub struct PetMenuDismissPoll {
+    pub left_down: bool,
+    pub menu_contains_cursor: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -155,10 +193,13 @@ fn model_power_mode(_db: &rusqlite::Connection, _meta: &models::PetAnimationMeta
     "balanced".to_string()
 }
 
-fn model_scale(db: &rusqlite::Connection, meta: &models::PetAnimationMeta) -> f64 {
-    meta.scale
-        .map(|s| s.clamp(0.4, 1.5))
-        .unwrap_or_else(|| get_scale(db))
+fn model_scale(db: &rusqlite::Connection, _meta: &models::PetAnimationMeta) -> f64 {
+    get_scale(db)
+}
+
+pub fn set_scale(db: &rusqlite::Connection, scale: f64) -> Result<(), String> {
+    let s = scale.clamp(0.4, 1.5);
+    crate::db::set_setting(db, "pet_scale", &s.to_string()).map_err(|e| e.to_string())
 }
 
 fn model_remark_interval_sec(db: &rusqlite::Connection, meta: &models::PetAnimationMeta) -> i64 {
@@ -201,6 +242,8 @@ pub fn save_layout(
     scale: f64,
     offset_x: f64,
     offset_y: f64,
+    position_win_w: Option<i32>,
+    position_win_h: Option<i32>,
 ) -> Result<(), String> {
     save_window_size(db, width, height)?;
     let s = scale.clamp(0.4, 1.5);
@@ -210,9 +253,7 @@ pub fn save_layout(
     crate::db::set_setting(db, "pet_offset_y", &offset_y.round().to_string())
         .map_err(|e| e.to_string())?;
     let pos = load_position(db);
-    let (w, h) = get_window_size(db);
-    let (x, y) = clamp_pet_position(pos.0, pos.1, w as i32, h as i32);
-    save_position(db, x, y)?;
+    save_position(db, pos.0, pos.1, position_win_w, position_win_h)?;
     Ok(())
 }
 
@@ -222,29 +263,652 @@ fn pet_webview_url() -> WebviewUrl {
     WebviewUrl::App("pet.html".into())
 }
 
+fn pet_menu_webview_url() -> WebviewUrl {
+    WebviewUrl::App("pet-menu.html".into())
+}
+
+fn clamp_menu_position(x: i32, y: i32) -> (i32, i32) {
+    clamp_pet_position(x, y, MENU_WIDTH as i32, MENU_HEIGHT as i32)
+}
+
+fn prepare_menu_webview(win: &WebviewWindow) -> Result<(), String> {
+    let _ = win.set_background_color(Some(Color(0, 0, 0, 0)));
+    let _ = win.set_always_on_top(true);
+    Ok(())
+}
+
+fn is_pet_menu_visible(app: &AppHandle) -> bool {
+    app.get_webview_window(PET_MENU_LABEL)
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// 将菜单窗置于桌宠窗之上（Windows 下两者均为 TOPMOST 时后设的在上层）
+fn raise_menu_above_pet(app: &AppHandle, menu: &WebviewWindow) {
+    let pet = app.get_webview_window(PET_LABEL);
+    if let Some(pet) = &pet {
+        if pet.is_visible().unwrap_or(false) {
+            let _ = pet.set_always_on_top(true);
+        }
+    }
+    let _ = menu.set_always_on_top(true);
+    raise_menu_hwnd_above_pet(menu, pet.as_ref());
+}
+
+pub fn sync_menu_z_order_if_visible(app: &AppHandle) {
+    if !is_pet_menu_visible(app) {
+        return;
+    }
+    if let Some(menu) = app.get_webview_window(PET_MENU_LABEL) {
+        raise_menu_above_pet(app, &menu);
+    }
+}
+
+#[cfg(windows)]
+fn raise_menu_hwnd_above_pet(menu: &WebviewWindow, pet: Option<&WebviewWindow>) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+
+    let Ok(menu_hwnd) = menu.hwnd() else {
+        return;
+    };
+    unsafe {
+        if let Some(pet) = pet.filter(|p| p.is_visible().unwrap_or(false)) {
+            if let Ok(pet_hwnd) = pet.hwnd() {
+                let _ = SetWindowPos(
+                    pet_hwnd,
+                    Some(HWND_TOPMOST),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+        let _ = SetWindowPos(
+            menu_hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn raise_menu_hwnd_above_pet(_menu: &WebviewWindow, _pet: Option<&WebviewWindow>) {}
+
+fn point_in_rect(cx: i32, cy: i32, rx: i32, ry: i32, rw: i32, rh: i32) -> bool {
+    cx >= rx && cx < rx + rw && cy >= ry && cy < ry + rh
+}
+
+#[cfg(windows)]
+fn read_window_frame_rect(win: &WebviewWindow) -> Result<(i32, i32, i32, i32), String> {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+    let frame = pet_frame_hwnd(win)?;
+    let mut rect = RECT::default();
+    unsafe {
+        GetWindowRect(frame, &mut rect).map_err(|e| e.to_string())?;
+    }
+    Ok((
+        rect.left,
+        rect.top,
+        (rect.right - rect.left).max(1),
+        (rect.bottom - rect.top).max(1),
+    ))
+}
+
+#[cfg(not(windows))]
+fn read_window_frame_rect(win: &WebviewWindow) -> Result<(i32, i32, i32, i32), String> {
+    use tauri::{PhysicalPosition, PhysicalSize};
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    let size = win.outer_size().map_err(|e| e.to_string())?;
+    Ok((
+        pos.x,
+        pos.y,
+        size.width as i32,
+        size.height as i32,
+    ))
+}
+
+fn is_cursor_over_webview(win: &WebviewWindow, cursor_x: i32, cursor_y: i32) -> bool {
+    if !win.is_visible().unwrap_or(false) {
+        return false;
+    }
+    let Ok((x, y, w, h)) = read_window_frame_rect(win) else {
+        return false;
+    };
+    point_in_rect(cursor_x, cursor_y, x, y, w, h)
+}
+
+fn is_cursor_over_pet_window(app: &AppHandle) -> bool {
+    let Ok(cursor) = app.cursor_position() else {
+        return false;
+    };
+    let Some(pet) = app.get_webview_window(PET_LABEL) else {
+        return false;
+    };
+    is_cursor_over_webview(
+        &pet,
+        cursor.x.round() as i32,
+        cursor.y.round() as i32,
+    )
+}
+
+fn spawn_pending_menu_show(app: &AppHandle) {
+    let Some(rt) = app.try_state::<PetRuntimeState>() else {
+        return;
+    };
+    if rt
+        .menu_pending_spawn_running
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        struct ResetGuard {
+            app: AppHandle,
+        }
+        impl Drop for ResetGuard {
+            fn drop(&mut self) {
+                if let Some(rt) = self.app.try_state::<PetRuntimeState>() {
+                    rt.menu_pending_spawn_running
+                        .store(false, Ordering::Release);
+                }
+            }
+        }
+        let _guard = ResetGuard { app: app.clone() };
+
+        for _ in 0..60 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let Some(rt) = app.try_state::<PetRuntimeState>() else {
+                continue;
+            };
+            if !rt.menu_page_load_finished.load(Ordering::Acquire) {
+                continue;
+            }
+            let pending = rt
+                .menu_pending_show
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some((x, y)) = pending {
+                let _ = show_pet_menu_immediate(&app, x, y);
+            }
+            return;
+        }
+        crate::log::warn("桌宠菜单页加载超时，仍尝试显示");
+        if let Some(rt) = app.try_state::<PetRuntimeState>() {
+            rt.menu_page_load_finished
+                .store(true, Ordering::Release);
+            let pending = rt
+                .menu_pending_show
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take();
+            if let Some((x, y)) = pending {
+                let _ = show_pet_menu_immediate(&app, x, y);
+            }
+        }
+    });
+}
+
+pub fn ensure_pet_menu_window(app: &AppHandle) -> Result<(), String> {
+    if app.get_webview_window(PET_MENU_LABEL).is_some() {
+        return Ok(());
+    }
+    let app_for_load = app.clone();
+    WebviewWindowBuilder::new(app, PET_MENU_LABEL, pet_menu_webview_url())
+        .title("小寒桌宠菜单")
+        .inner_size(MENU_WIDTH, MENU_HEIGHT)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .visible(false)
+        .focused(false)
+        .on_page_load(move |_window, payload| {
+            if payload.event() != PageLoadEvent::Finished {
+                return;
+            }
+            if let Some(rt) = app_for_load.try_state::<PetRuntimeState>() {
+                rt.menu_page_load_finished
+                    .store(true, Ordering::Release);
+                let pending = rt
+                    .menu_pending_show
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some((x, y)) = pending {
+                    let _ = show_pet_menu_immediate(&app_for_load, x, y);
+                }
+            }
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+    if let Some(win) = app.get_webview_window(PET_MENU_LABEL) {
+        let _ = prepare_menu_webview(&win);
+    }
+    Ok(())
+}
+
+fn emit_pet_menu_state(app: &AppHandle, open: bool) {
+    let _ = app.emit_to(PET_LABEL, "pet-menu-state", open);
+}
+
+fn reset_menu_runtime(rt: &PetRuntimeState) {
+    rt.menu_page_load_finished.store(false, Ordering::Release);
+    rt.menu_pending_spawn_running
+        .store(false, Ordering::Release);
+    suppress_menu_show(rt);
+}
+
+fn suppress_menu_show(rt: &PetRuntimeState) {
+    rt.menu_suppress_show.store(true, Ordering::Release);
+    *rt.menu_pending_show
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn user_hidden_pet(app: &AppHandle) -> bool {
+    app.try_state::<PetRuntimeState>()
+        .map(|rt| rt.user_hidden_pet.load(Ordering::Acquire))
+        .unwrap_or(false)
+}
+
+fn pet_active_flag(app: &AppHandle, db: &rusqlite::Connection) -> bool {
+    is_enabled(db) && !user_hidden_pet(app)
+}
+
+fn pet_status_changed_payload(app: &AppHandle) -> PetStatusChangedPayload {
+    app.try_state::<Arc<AppState>>()
+        .and_then(|st| {
+            st.db.lock().ok().map(|db| PetStatusChangedPayload {
+                active: pet_active_flag(app, &db),
+                bubble_enabled: is_bubble_enabled(&db),
+            })
+        })
+        .unwrap_or(PetStatusChangedPayload {
+            active: false,
+            bubble_enabled: true,
+        })
+}
+
+fn sync_pet_visibility_ui(app: &AppHandle) {
+    crate::tray::sync_pet_toggle_label(app);
+    emit_pet_status_changed(app);
+}
+
+/// 推送轻量状态供设置页增量同步（payload 极小，不门控主窗口可见性）。
+pub fn emit_pet_status_changed(app: &AppHandle) {
+    if crate::APP_EXITING.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = app.emit_to(
+        "main",
+        "pet-status-changed",
+        pet_status_changed_payload(app),
+    );
+}
+
+pub fn poll_menu_dismiss(app: &AppHandle) -> PetMenuDismissPoll {
+    PetMenuDismissPoll {
+        left_down: is_left_mouse_down(),
+        menu_contains_cursor: is_cursor_over_menu_window(app),
+    }
+}
+
+pub fn hide_pet_menu(app: &AppHandle) -> Result<(), String> {
+    if crate::APP_EXITING.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        suppress_menu_show(&rt);
+    }
+    if let Some(win) = app.get_webview_window(PET_MENU_LABEL) {
+        let _ = win.hide();
+    }
+    emit_pet_menu_state(app, false);
+    Ok(())
+}
+
+fn detach_menu_window_effects(win: &WebviewWindow) {
+    let _ = win.set_always_on_top(false);
+    let _ = win.hide();
+}
+
+fn destroy_pet_menu_window(app: &AppHandle) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        reset_menu_runtime(&rt);
+    }
+    if is_pet_menu_visible(app) || pet_menu_open_or_pending(app) {
+        emit_pet_menu_state(app, false);
+    }
+    if let Some(win) = app.get_webview_window(PET_MENU_LABEL) {
+        detach_menu_window_effects(&win);
+        let _ = win.close();
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct PetMenuShownPayload {
+    pub suppress_blur_ms: u64,
+}
+
+fn show_pet_menu_immediate(app: &AppHandle, screen_x: i32, screen_y: i32) -> Result<(), String> {
+    if app
+        .try_state::<PetRuntimeState>()
+        .map(|rt| rt.menu_suppress_show.load(Ordering::Acquire))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let win = app
+        .get_webview_window(PET_MENU_LABEL)
+        .ok_or_else(|| "菜单窗口不存在".to_string())?;
+    let _ = prepare_menu_webview(&win);
+    let (x, y) = clamp_menu_position(screen_x, screen_y);
+    win.set_position(PhysicalPosition::new(x, y))
+        .map_err(|e| e.to_string())?;
+    win.show().map_err(|e| e.to_string())?;
+    raise_menu_above_pet(app, &win);
+    let _ = app.emit_to(
+        PET_MENU_LABEL,
+        "pet-menu-shown",
+        PetMenuShownPayload {
+            suppress_blur_ms: 1200,
+        },
+    );
+    emit_pet_menu_state(app, true);
+    Ok(())
+}
+
+pub fn show_pet_menu(app: &AppHandle, screen_x: i32, screen_y: i32) -> Result<(), String> {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.menu_suppress_show.store(false, Ordering::Release);
+    }
+    ensure_pet_menu_window(app)?;
+    let ready = app
+        .try_state::<PetRuntimeState>()
+        .map(|rt| rt.menu_page_load_finished.load(Ordering::Acquire))
+        .unwrap_or(false);
+    if !ready {
+        if let Some(rt) = app.try_state::<PetRuntimeState>() {
+            *rt.menu_pending_show
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some((screen_x, screen_y));
+        }
+        spawn_pending_menu_show(app);
+        return Ok(());
+    }
+    show_pet_menu_immediate(app, screen_x, screen_y)
+}
+
+fn pet_menu_open_or_pending(app: &AppHandle) -> bool {
+    if is_pet_menu_visible(app) {
+        return true;
+    }
+    app.try_state::<PetRuntimeState>()
+        .map(|rt| {
+            rt.menu_pending_show
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        })
+        .unwrap_or(false)
+}
+
+pub fn toggle_pet_menu(app: &AppHandle, screen_x: i32, screen_y: i32) -> Result<(), String> {
+    if pet_menu_open_or_pending(app) {
+        hide_pet_menu(app)
+    } else {
+        show_pet_menu(app, screen_x, screen_y)
+    }
+}
+
+pub fn toggle_pet_menu_at_cursor(app: &AppHandle) -> Result<bool, String> {
+    if !is_cursor_over_pet_window(app) {
+        return Ok(pet_menu_open_or_pending(app));
+    }
+    if pet_menu_open_or_pending(app) {
+        hide_pet_menu(app)?;
+        return Ok(false);
+    }
+    let pos = app.cursor_position().map_err(|e| e.to_string())?;
+    show_pet_menu(app, pos.x.round() as i32, pos.y.round() as i32)?;
+    Ok(pet_menu_open_or_pending(app))
+}
+
+pub fn show_pet_menu_at_cursor(app: &AppHandle) -> Result<(), String> {
+    toggle_pet_menu_at_cursor(app).map(|_| ())
+}
+
+#[cfg(windows)]
+pub fn is_right_mouse_down() -> bool {
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        GetAsyncKeyState(0x02) as u16 & 0x8000 != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_right_mouse_down() -> bool {
+    false
+}
+
+#[cfg(windows)]
+pub fn is_left_mouse_down() -> bool {
+    unsafe {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+        GetAsyncKeyState(0x01) as u16 & 0x8000 != 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn is_left_mouse_down() -> bool {
+    false
+}
+
+pub fn is_cursor_over_menu_window(app: &AppHandle) -> bool {
+    let Ok(cursor) = app.cursor_position() else {
+        return false;
+    };
+    let Some(menu) = app.get_webview_window(PET_MENU_LABEL) else {
+        return false;
+    };
+    is_cursor_over_webview(
+        &menu,
+        cursor.x.round() as i32,
+        cursor.y.round() as i32,
+    )
+}
+
+pub fn enter_pet_edit_bounds(app: &AppHandle) -> Result<(), String> {
+    if crate::APP_EXITING.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    // 先发事件让桌宠窗进入编辑模式（禁用穿透），再关菜单，避免 pet-menu-state 抢先 startClickThrough
+    let _ = app.emit_to(PET_LABEL, "pet-enter-edit-bounds", ());
+    hide_pet_menu(app)?;
+    if let Some(win) = app.get_webview_window(PET_LABEL) {
+        let _ = win.set_ignore_cursor_events(false);
+        let _ = win.show();
+        let _ = win.set_always_on_top(true);
+        let _ = win.set_focus();
+    }
+    Ok(())
+}
+
+#[derive(Clone, Serialize)]
+pub struct PetWindowBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[cfg(windows)]
+fn pet_frame_hwnd(win: &WebviewWindow) -> Result<windows::Win32::Foundation::HWND, String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
+    let hwnd = win.hwnd().map_err(|e| e.to_string())?;
+    let frame = unsafe {
+        let root = GetAncestor(hwnd, GA_ROOT);
+        if root.0.is_null() {
+            hwnd
+        } else {
+            root
+        }
+    };
+    Ok(frame)
+}
+
+fn read_pet_window_bounds_from_win(win: &WebviewWindow) -> Result<PetWindowBounds, String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        let frame = pet_frame_hwnd(win)?;
+        let mut rect = RECT::default();
+        unsafe {
+            GetWindowRect(frame, &mut rect).map_err(|e| e.to_string())?;
+        }
+        let width = (rect.right - rect.left).max(1) as u32;
+        let height = (rect.bottom - rect.top).max(1) as u32;
+        Ok(PetWindowBounds {
+            x: rect.left,
+            y: rect.top,
+            width,
+            height,
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri::{PhysicalPosition, PhysicalSize};
+        let size = win.outer_size().map_err(|e| e.to_string())?;
+        let pos = win.outer_position().map_err(|e| e.to_string())?;
+        Ok(PetWindowBounds {
+            x: pos.x,
+            y: pos.y,
+            width: size.width,
+            height: size.height,
+        })
+    }
+}
+
+pub fn get_pet_window_bounds(app: &AppHandle) -> Result<PetWindowBounds, String> {
+    let win = app
+        .get_webview_window(PET_LABEL)
+        .ok_or_else(|| "桌宠窗口不存在".to_string())?;
+    read_pet_window_bounds_from_win(&win)
+}
+
+pub fn set_pet_window_bounds(
+    app: &AppHandle,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    move_x: bool,
+    move_y: bool,
+) -> Result<(), String> {
+    let win = app
+        .get_webview_window(PET_LABEL)
+        .ok_or_else(|| "桌宠窗口不存在".to_string())?;
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.position_clamp_suppress
+            .store(true, Ordering::Release);
+    }
+    let result = set_pet_window_bounds_on_win(&win, x, y, width, height, move_x, move_y);
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.position_clamp_suppress
+            .store(false, Ordering::Release);
+    }
+    result
+}
+
+fn set_pet_window_bounds_on_win(
+    win: &WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    move_x: bool,
+    move_y: bool,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::RECT;
+        use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SetWindowPos, SWP_NOACTIVATE, SWP_NOZORDER};
+        let frame = pet_frame_hwnd(win)?;
+        let mut rect = RECT::default();
+        unsafe {
+            GetWindowRect(frame, &mut rect).map_err(|e| e.to_string())?;
+        }
+        let final_x = if move_x { x } else { rect.left };
+        let final_y = if move_y { y } else { rect.top };
+        unsafe {
+            SetWindowPos(
+                frame,
+                None,
+                final_x,
+                final_y,
+                width as i32,
+                height as i32,
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+            .map_err(|e| e.to_string())?;
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri::{PhysicalPosition, PhysicalSize, Size};
+        if move_x || move_y {
+            let pos = win.outer_position().map_err(|e| e.to_string())?;
+            win.set_position(PhysicalPosition::new(
+                if move_x { x } else { pos.x },
+                if move_y { y } else { pos.y },
+            ))
+            .map_err(|e| e.to_string())?;
+        }
+        win.set_size(Size::Physical(PhysicalSize::new(width, height)))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(debug_assertions)]
 async fn wait_frontend_ready(max_secs: u64) {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(800))
+        .timeout(Duration::from_millis(400))
         .build()
         .ok();
     let deadline = Instant::now() + Duration::from_secs(max_secs);
     while Instant::now() < deadline {
-        let ok = if let Some(c) = &client {
-            c.get(DEV_PET_PAGE)
-                .send()
-                .await
-                .map(|r| r.status().is_success())
-                .unwrap_or(false)
-        } else {
-            tokio::net::TcpStream::connect("127.0.0.1:1420")
-                .await
-                .is_ok()
-        };
+        let ok = tokio::net::TcpStream::connect("127.0.0.1:1420")
+            .await
+            .is_ok()
+            || if let Some(c) = &client {
+                c.get(DEV_PET_PAGE)
+                    .send()
+                    .await
+                    .map(|r| r.status().is_success())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
         if ok {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     crate::log::info("桌宠: 等待 Vite dev server 超时，仍将尝试显示");
 }
@@ -265,17 +929,16 @@ pub fn pet_visible(app: &AppHandle) -> bool {
 
 /// 显示主窗口；桌宠 `always_on_top` 会挡住主窗口，需先让桌宠降层。
 pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), String> {
-    let _ = app.emit_to(PET_LABEL, "pet-main-opening", 1500u64);
-    let win = app
-        .get_webview_window("main")
-        .ok_or_else(|| "主窗口不存在".to_string())?;
+    let _ = hide_pet_menu(app);
+    let _ = app.emit_to(PET_LABEL, "pet-main-opening", 800u64);
+    let win = crate::ensure_main_window(app)?;
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         let _ = pet.set_always_on_top(false);
         let _ = pet.set_ignore_cursor_events(true);
     }
     let _ = win.unminimize();
     win.show().map_err(|e| e.to_string())?;
-    win.set_focus().map_err(|e| e.to_string())?;
+    let _ = win.set_focus();
     let _ = win.emit("main-window-visible", true);
     if let Some(page) = page.filter(|p| !p.is_empty()) {
         let _ = app.emit_to("main", "main-navigate", page.to_string());
@@ -283,9 +946,22 @@ pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), Strin
     Ok(())
 }
 
-/// 主窗口失焦/隐藏后恢复桌宠置顶（若仍可见）。
+/// 主窗口失焦/隐藏后恢复桌宠置顶（若仍可见）；菜单打开时保持菜单在桌宠之上。
 pub fn restore_pet_topmost_if_visible(app: &AppHandle) {
     let _ = app.emit_to(PET_LABEL, "pet-main-closed", ());
+    if app
+        .try_state::<PetRuntimeState>()
+        .map(|rt| rt.user_hidden_pet.load(Ordering::Acquire))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    if is_pet_menu_visible(app) {
+        if let Some(menu) = app.get_webview_window(PET_MENU_LABEL) {
+            raise_menu_above_pet(app, &menu);
+            return;
+        }
+    }
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         if pet.is_visible().unwrap_or(false) {
             let _ = pet.set_always_on_top(true);
@@ -294,7 +970,11 @@ pub fn restore_pet_topmost_if_visible(app: &AppHandle) {
     }
 }
 
-pub fn model_status(st: &AppState, model_id: &str) -> Result<PetStatusPayload, String> {
+pub fn model_status(
+    app: &AppHandle,
+    st: &AppState,
+    model_id: &str,
+) -> Result<PetStatusPayload, String> {
     let db = crate::db::lock_conn(&st.db)?;
     let anim_meta = models::read_animation_meta(st.data_dir(), &db, model_id);
     let model_name = models::resolve_assets(st.data_dir(), model_id)
@@ -303,6 +983,7 @@ pub fn model_status(st: &AppState, model_id: &str) -> Result<PetStatusPayload, S
     Ok(PetStatusPayload {
         enabled: is_enabled(&db),
         visible: false,
+        active: pet_active_flag(app, &db),
         power_mode: model_power_mode(&db, &anim_meta),
         scale: model_scale(&db, &anim_meta),
         remark_interval_sec: model_remark_interval_sec(&db, &anim_meta),
@@ -332,6 +1013,7 @@ pub fn status(app: &AppHandle, st: &AppState) -> Result<PetStatusPayload, String
     Ok(PetStatusPayload {
         enabled: is_enabled(&db),
         visible: pet_visible(app),
+        active: pet_active_flag(app, &db),
         power_mode: model_power_mode(&db, &anim_meta),
         scale: model_scale(&db, &anim_meta),
         remark_interval_sec: model_remark_interval_sec(&db, &anim_meta),
@@ -458,9 +1140,21 @@ fn load_position(db: &rusqlite::Connection) -> (i32, i32) {
     (x, y)
 }
 
-pub fn save_position(db: &rusqlite::Connection, x: i32, y: i32) -> Result<PetPoint, String> {
-    let (w, h) = get_window_size(db);
-    let (x, y) = clamp_pet_position(x, y, w as i32, h as i32);
+pub fn save_position(
+    db: &rusqlite::Connection,
+    x: i32,
+    y: i32,
+    win_w: Option<i32>,
+    win_h: Option<i32>,
+) -> Result<PetPoint, String> {
+    let (w, h) = match (win_w, win_h) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
+        _ => {
+            let (lw, lh) = get_window_size(db);
+            (lw as i32, lh as i32)
+        }
+    };
+    let (x, y) = clamp_pet_position(x, y, w, h);
     crate::db::set_setting(db, "pet_x", &x.to_string()).map_err(|e| e.to_string())?;
     crate::db::set_setting(db, "pet_y", &y.to_string()).map_err(|e| e.to_string())?;
     Ok(PetPoint { x, y })
@@ -584,7 +1278,9 @@ pub fn ensure_pet_window(app: &AppHandle, st: &AppState) -> Result<(), String> {
 }
 
 pub fn destroy_pet_window(app: &AppHandle) -> Result<(), String> {
+    destroy_pet_menu_window(app);
     if let Some(win) = app.get_webview_window(PET_LABEL) {
+        detach_pet_window_effects(&win);
         win.close().map_err(|e| e.to_string())?;
         wait_pet_window_closed(app, Duration::from_millis(2000))?;
     }
@@ -592,15 +1288,79 @@ pub fn destroy_pet_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/// 应用退出：快速销毁桌宠窗，避免透明置顶窗残留导致桌面无法点击
-pub fn destroy_pet_window_for_exit(app: &AppHandle) {
-    if let Some(win) = app.get_webview_window(PET_LABEL) {
-        let _ = win.set_ignore_cursor_events(true);
-        let _ = win.destroy();
-        let _ = wait_pet_window_closed(app, Duration::from_millis(500));
-        if app.get_webview_window(PET_LABEL).is_some() {
-            crate::log::warn("桌宠窗口退出时未能及时销毁");
+fn stop_pet_runtime(app: &AppHandle) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.scheduler_running.store(false, Ordering::SeqCst);
+    }
+    if let Some(st) = app.try_state::<Arc<AppState>>() {
+        companion_session_stop(st.inner());
+    }
+}
+
+/// 立刻解除透明置顶窗对桌面的遮挡（隐藏 + 取消置顶 + 穿透）。退出路径复用，不调用 close()。
+fn detach_pet_window_effects(win: &WebviewWindow) {
+    let _ = win.set_ignore_cursor_events(true);
+    let _ = win.set_always_on_top(false);
+    let _ = win.hide();
+}
+
+#[cfg(windows)]
+pub(crate) fn pump_ui_messages() {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            DispatchMessageW, PeekMessageW, TranslateMessage, PM_REMOVE,
+        };
+        let mut msg = std::mem::zeroed();
+        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            let _ = DispatchMessageW(&msg);
         }
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn pump_ui_messages() {}
+
+fn drain_ui_after_pet_exit(app: &AppHandle) {
+    for _ in 0..10 {
+        pump_ui_messages();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = app;
+}
+
+/// 退出前隐藏全部 WebView 并泵送消息，减轻 Chrome_WidgetWin_0 1411/1412 噪声。
+pub fn finalize_all_webviews_for_exit(app: &AppHandle) {
+    destroy_pet_window_for_exit(app);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    drain_ui_after_pet_exit(app);
+}
+
+/// 应用退出：解除桌宠/菜单窗对桌面的遮挡。仅 detach（隐藏/取消置顶），不 close()，
+/// 避免 WebView2 在进程退出前 PostMessage 到已销毁 HWND（1412 / 0x80070578）。
+static PET_EXIT_DESTROYED: AtomicBool = AtomicBool::new(false);
+
+pub fn destroy_pet_window_for_exit(app: &AppHandle) {
+    if PET_EXIT_DESTROYED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    stop_pet_runtime(app);
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        reset_menu_runtime(&rt);
+    }
+    let _ = app.emit_to(PET_LABEL, "pet-app-exiting", ());
+    let _ = app.emit_to(PET_MENU_LABEL, "pet-app-exiting", ());
+    for _ in 0..6 {
+        pump_ui_messages();
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    if let Some(win) = app.get_webview_window(PET_MENU_LABEL) {
+        detach_menu_window_effects(&win);
+    }
+    if let Some(win) = app.get_webview_window(PET_LABEL) {
+        detach_pet_window_effects(&win);
     }
     reset_pet_runtime_state(app);
 }
@@ -613,6 +1373,7 @@ fn reset_pet_runtime_state(app: &AppHandle) {
         rt.page_load_count.store(0, Ordering::Release);
         rt.spine_ready.store(false, Ordering::Release);
         rt.fullscreen_suppressed.store(false, Ordering::Relaxed);
+        rt.user_hidden_pet.store(false, Ordering::Release);
     }
 }
 
@@ -622,7 +1383,8 @@ fn wait_pet_window_closed(app: &AppHandle, timeout: Duration) -> Result<(), Stri
         if Instant::now() >= deadline {
             return Err("桌宠窗口关闭超时，请稍后重试".into());
         }
-        std::thread::sleep(Duration::from_millis(20));
+        pump_ui_messages();
+        std::thread::sleep(Duration::from_millis(10));
     }
     Ok(())
 }
@@ -635,24 +1397,29 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
 
     prepare_pet_webview(&win)?;
 
-    let (x, y, w, h) = {
+    let (w, h) = {
         let db = crate::db::lock_conn(&st.db)?;
-        let pos = load_position(&db);
-        let (pw, ph) = get_window_size(&db);
-        let win_w = pw as i32;
-        let win_h = ph as i32;
-        let (x, y) = resolve_pet_position(pos.0, pos.1, win_w, win_h);
-        if (x, y) != pos {
-            let _ = save_position(&db, x, y);
-            crate::log::info(format!(
-                "桌宠: 位置 ({},{}) 在屏幕外，已重置为 ({},{})",
-                pos.0, pos.1, x, y
-            ));
-        }
-        (x, y, pw, ph)
+        get_window_size(&db)
     };
 
     let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize::new(w, h)));
+    let (resolve_w, resolve_h) = win
+        .outer_size()
+        .map(|s| (s.width as i32, s.height as i32))
+        .unwrap_or((w as i32, h as i32));
+    let (x, y) = {
+        let db = crate::db::lock_conn(&st.db)?;
+        let pos = load_position(&db);
+        let (cx, cy) = resolve_pet_position(pos.0, pos.1, resolve_w, resolve_h);
+        if (cx, cy) != pos {
+            let _ = save_position(&db, cx, cy, Some(resolve_w), Some(resolve_h));
+            crate::log::info(format!(
+                "桌宠: 位置 ({},{}) 在屏幕外，已重置为 ({},{})",
+                pos.0, pos.1, cx, cy
+            ));
+        }
+        (cx, cy)
+    };
     let rt = app.state::<PetRuntimeState>();
     attach_position_guard(app, &win);
     set_pet_position(&win, &rt, x, y)?;
@@ -665,6 +1432,40 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
         schedule_pet_resume_after_show(app);
     }
     let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
+    let _ = ensure_pet_menu_window(app);
+    sync_menu_z_order_if_visible(app);
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.user_hidden_pet.store(false, Ordering::Release);
+    }
+    sync_pet_visibility_ui(app);
+    Ok(())
+}
+
+pub fn hide_pet(app: &AppHandle, destroy: bool) -> Result<(), String> {
+    hide_pet_impl(app, destroy, true)
+}
+
+fn hide_pet_transient(app: &AppHandle) -> Result<(), String> {
+    hide_pet_impl(app, false, false)
+}
+
+fn hide_pet_impl(app: &AppHandle, destroy: bool, mark_user_hidden: bool) -> Result<(), String> {
+    if mark_user_hidden {
+        if let Some(rt) = app.try_state::<PetRuntimeState>() {
+            rt.user_hidden_pet.store(true, Ordering::Release);
+        }
+    }
+    stop_pet_runtime(app);
+    let _ = hide_pet_menu(app);
+    let _ = app.emit_to(PET_LABEL, "pet-hidden", ());
+    if destroy {
+        destroy_pet_window(app)?;
+    } else if let Some(win) = app.get_webview_window(PET_LABEL) {
+        detach_pet_window_effects(&win);
+    }
+    if mark_user_hidden || destroy {
+        sync_pet_visibility_ui(app);
+    }
     Ok(())
 }
 
@@ -712,11 +1513,16 @@ pub fn resume_pet(app: &AppHandle) {
 fn schedule_pet_reload_after_show(app: &AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        if !wait_pet_page_ready(&app, Duration::from_secs(20)).await {
+        let already_ready = app
+            .try_state::<PetRuntimeState>()
+            .map(|rt| rt.page_load_finished.load(Ordering::Acquire))
+            .unwrap_or(false);
+        if !already_ready && !wait_pet_page_ready(&app, Duration::from_secs(5)).await {
             crate::log::info("桌宠: pet.html 加载超时，仍尝试初始化");
         }
-        // 可见后短暂等待 WebView 合成就绪，再初始化 Spine
-        tokio::time::sleep(Duration::from_millis(80)).await;
+        if !already_ready {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         if app
             .get_webview_window(PET_LABEL)
             .and_then(|w| w.is_visible().ok())
@@ -744,20 +1550,6 @@ async fn wait_pet_page_ready(app: &AppHandle, timeout: Duration) -> bool {
     }
 }
 
-pub fn hide_pet(app: &AppHandle, destroy: bool) -> Result<(), String> {
-    if let Some(st) = app.try_state::<Arc<AppState>>() {
-        companion_session_stop(st.inner());
-    }
-    if destroy {
-        destroy_pet_window(app)
-    } else if let Some(win) = app.get_webview_window(PET_LABEL) {
-        let _ = win.set_ignore_cursor_events(true);
-        win.hide().map_err(|e| e.to_string())
-    } else {
-        Ok(())
-    }
-}
-
 pub fn reload_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     if app.get_webview_window(PET_LABEL).is_some() {
         nudge_pet(app);
@@ -779,6 +1571,12 @@ pub fn reload_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
 pub fn nudge_pet(app: &AppHandle) {
     clear_spine_ready(app);
     let _ = app.emit_to(PET_LABEL, "pet-reload", ());
+}
+
+/// 设置页调整角色大小时仅更新 CSS scale，不重建 Spine
+pub fn nudge_pet_scale(app: &AppHandle, scale: f64) {
+    let s = scale.clamp(0.4, 1.5);
+    let _ = app.emit_to(PET_LABEL, "pet-scale-changed", s);
 }
 
 /// 仅刷新动作配置（待机/点击/随机），不重建 Spine
@@ -817,45 +1615,249 @@ pub fn preview_animation(
     Ok(())
 }
 
-/// 切换模型时重建桌宠 WebView，与「关闭桌宠再启用」同路径，避免同 canvas 热重载碎块。
-fn restart_pet_window(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
-    let had_window = app.get_webview_window(PET_LABEL).is_some();
-    let was_visible = pet_visible(app);
-    if had_window {
-        companion_session_stop(st);
-        destroy_pet_window(app)?;
-    }
-    if was_visible || !had_window {
-        show_pet(app, st)
-    } else {
-        ensure_pet_window(app, st)
-    }
-}
-
 pub fn set_active_model(app: &AppHandle, st: Arc<AppState>, model_id: &str) -> Result<(), String> {
     let data_dir = st.data_dir();
     let assets = models::resolve_assets(data_dir, model_id)?;
-    // 切换前批量读入 OS 页缓存，缩短重建 WebView 后的资源加载
-    if assets.use_file_src {
-        let mut files = vec![
-            assets.skel_file.clone(),
-            assets.atlas_file.clone(),
-            assets.png_file.clone(),
-        ];
-        if let Some(ref cfg) = assets.config_file {
-            files.push(cfg.clone());
-        }
-        let _ = models::read_model_asset_bundle(data_dir, model_id, &files);
-    }
     let db = crate::db::lock_conn(&st.db)?;
     models::set_active_model_id(&db, &assets.model_id)?;
     crate::character::sync_from_model(data_dir, &db, &assets.model_id);
     let enabled = is_enabled(&db);
     drop(db);
     if enabled {
-        restart_pet_window(app, &st)?;
+        if app.get_webview_window(PET_LABEL).is_some() {
+            clear_spine_ready(app);
+            nudge_pet(app);
+        } else {
+            show_pet(app, &st)?;
+        }
     }
     Ok(())
+}
+pub fn wiki_bulk_import_progress(app: &AppHandle) -> Option<lines_import::PetWikiBulkImportProgress> {
+    app.try_state::<PetRuntimeState>()
+        .and_then(|rt| rt.wiki_bulk_last_progress.lock().ok().map(|g| g.clone()))
+        .flatten()
+}
+
+pub fn wiki_bulk_import_is_running(app: &AppHandle) -> bool {
+    app.try_state::<PetRuntimeState>()
+        .map(|rt| rt.wiki_bulk_import_running.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+pub fn reset_wiki_bulk_control(app: &AppHandle) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.wiki_bulk_stop_requested
+            .store(false, Ordering::SeqCst);
+        rt.wiki_bulk_paused.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn request_wiki_bulk_stop(app: &AppHandle) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.wiki_bulk_stop_requested
+            .store(true, Ordering::SeqCst);
+        rt.wiki_bulk_paused.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn set_wiki_bulk_paused(app: &AppHandle, paused: bool) {
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.wiki_bulk_paused.store(paused, Ordering::SeqCst);
+    }
+}
+
+pub fn wiki_bulk_stop_requested(app: &AppHandle) -> bool {
+    app.try_state::<PetRuntimeState>()
+        .map(|rt| rt.wiki_bulk_stop_requested.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+pub fn wiki_bulk_is_paused(app: &AppHandle) -> bool {
+    app.try_state::<PetRuntimeState>()
+        .map(|rt| rt.wiki_bulk_paused.load(Ordering::SeqCst))
+        .unwrap_or(false)
+}
+
+pub async fn wiki_bulk_await_pause_or_stop(app: &AppHandle, st: &AppState) -> bool {
+    loop {
+        if st.stop_flag.load(Ordering::Relaxed) || wiki_bulk_stop_requested(app) {
+            return true;
+        }
+        if !wiki_bulk_is_paused(app) {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+fn reset_stale_wiki_bulk_import(app: &AppHandle) {
+    let Some(rt) = app.try_state::<PetRuntimeState>() else {
+        return;
+    };
+    if !rt.wiki_bulk_import_running.load(Ordering::SeqCst) {
+        return;
+    }
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let should_reset = rt
+        .wiki_bulk_last_progress
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|p| {
+            if p.phase == "done" || p.phase == "error" {
+                return true;
+            }
+            if p.phase == "scan"
+                && p.index == 0
+                && p.total == 0
+                && p.updated_at_ms > 0
+                && now_ms - p.updated_at_ms > 45_000
+            {
+                return true;
+            }
+            if (p.phase == "scan" || p.phase == "import")
+                && p.updated_at_ms > 0
+                && now_ms - p.updated_at_ms > 300_000
+            {
+                return true;
+            }
+            false
+        }))
+        .unwrap_or(false);
+    if should_reset {
+        rt.wiki_bulk_import_running
+            .store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = rt.wiki_bulk_last_progress.lock() {
+            *guard = None;
+        }
+    }
+}
+
+/// 由前端就绪后触发，避免事件在监听器挂载前丢失
+pub fn start_wiki_bulk_import(app: AppHandle, st: Arc<AppState>) -> lines_import::PetWikiBulkImportStartResult {
+    reset_stale_wiki_bulk_import(&app);
+    if st.stop_flag.load(Ordering::Relaxed) {
+        return lines_import::PetWikiBulkImportStartResult {
+            started: false,
+            already_running: false,
+        };
+    }
+    let runtime = app.state::<PetRuntimeState>();
+    if runtime.wiki_bulk_import_running.load(Ordering::SeqCst) {
+        return lines_import::PetWikiBulkImportStartResult {
+            started: false,
+            already_running: true,
+        };
+    }
+    if runtime
+        .wiki_bulk_import_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return lines_import::PetWikiBulkImportStartResult {
+            started: false,
+            already_running: true,
+        };
+    }
+
+    reset_wiki_bulk_control(&app);
+
+    lines_import::emit_wiki_bulk_import_progress(
+        &app,
+        lines_import::PetWikiBulkImportProgress {
+            phase: "scan".into(),
+            index: 0,
+            total: 0,
+            model_id: String::new(),
+            model_name: String::new(),
+            message: "准备批量导入…".into(),
+            lines_imported: 0,
+            succeeded: 0,
+            failed: 0,
+            skipped: 0,
+            updated_at_ms: 0,
+        },
+    );
+
+    tauri::async_runtime::spawn(async move {
+        struct BulkImportGuard(AppHandle);
+        impl Drop for BulkImportGuard {
+            fn drop(&mut self) {
+                if let Some(rt) = self.0.try_state::<PetRuntimeState>() {
+                    rt.wiki_bulk_import_running
+                        .store(false, Ordering::SeqCst);
+                }
+            }
+        }
+        let _guard = BulkImportGuard(app.clone());
+
+        if st.stop_flag.load(Ordering::Relaxed) {
+            lines_import::emit_wiki_bulk_import_progress(
+                &app,
+                lines_import::PetWikiBulkImportProgress {
+                    phase: "done".into(),
+                    index: 0,
+                    total: 0,
+                    model_id: String::new(),
+                    model_name: String::new(),
+                    message: "导入已取消".into(),
+                    lines_imported: 0,
+                    succeeded: 0,
+                    failed: 0,
+                    skipped: 0,
+                    updated_at_ms: 0,
+                },
+            );
+            return;
+        }
+
+        let (ok, _skip, _fail) = wiki_scrape::run_bulk_wiki_lines_import(&app, &st).await;
+        if ok > 0 {
+            nudge_pet_animations(&app);
+        }
+    });
+    lines_import::PetWikiBulkImportStartResult {
+        started: true,
+        already_running: false,
+    }
+}
+
+pub fn pause_wiki_bulk_import(app: &AppHandle) -> bool {
+    if !wiki_bulk_import_is_running(app) {
+        return false;
+    }
+    set_wiki_bulk_paused(app, true);
+    if let Some(mut progress) = wiki_bulk_import_progress(app) {
+        if progress.phase == "scan" || progress.phase == "import" {
+            progress.phase = "paused".into();
+            progress.message = "导入已暂停，点击继续恢复".into();
+            lines_import::emit_wiki_bulk_import_progress(app, progress);
+        }
+    }
+    true
+}
+
+pub fn resume_wiki_bulk_import(app: &AppHandle) -> bool {
+    if !wiki_bulk_import_is_running(app) {
+        return false;
+    }
+    set_wiki_bulk_paused(app, false);
+    if let Some(mut progress) = wiki_bulk_import_progress(app) {
+        if progress.phase == "paused" {
+            progress.phase = "import".into();
+            progress.message = "继续导入…".into();
+            lines_import::emit_wiki_bulk_import_progress(app, progress);
+        }
+    }
+    true
+}
+
+pub fn stop_wiki_bulk_import(app: &AppHandle) -> bool {
+    if !wiki_bulk_import_is_running(app) {
+        return false;
+    }
+    request_wiki_bulk_stop(app);
+    true
 }
 
 pub fn set_enabled(app: &AppHandle, st: Arc<AppState>, enabled: bool) -> Result<(), String> {
@@ -871,6 +1873,17 @@ pub fn set_enabled(app: &AppHandle, st: Arc<AppState>, enabled: bool) -> Result<
         hide_pet(app, true)?;
     }
     Ok(())
+}
+
+/// 启动时提前创建隐藏桌宠 WebView，与主窗口首屏并行，缩短首显等待。
+pub fn prewarm_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
+    {
+        let db = crate::db::lock_conn(&st.db)?;
+        if !is_enabled(&db) {
+            return Ok(());
+        }
+    }
+    ensure_pet_window(app, &st)
 }
 
 pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
@@ -893,15 +1906,15 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
     let st2 = st.clone();
     tauri::async_runtime::spawn(async move {
         #[cfg(debug_assertions)]
-        wait_frontend_ready(45).await;
+        wait_frontend_ready(12).await;
 
         let boot_delay = if crate::system::autostart::is_tray_launch() {
-            Duration::from_millis(900)
+            Duration::from_millis(150)
         } else {
-            Duration::from_millis(250)
+            Duration::from_millis(20)
         };
         tokio::time::sleep(boot_delay).await;
-        for attempt in 0..30 {
+        for attempt in 0..8 {
             if st2.stop_flag.load(Ordering::Relaxed) {
                 break;
             }
@@ -918,7 +1931,7 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
                 Ok(()) => {}
                 Err(e) => {
                     crate::log::warn(format!("桌宠 show_pet 失败 (attempt {attempt}): {e}"));
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    tokio::time::sleep(Duration::from_millis(400)).await;
                     continue;
                 }
             }
@@ -926,8 +1939,8 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
                 ensure_remark_scheduler(app2.clone(), st2.clone());
                 return;
             }
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            if attempt == 29 {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            if attempt == 7 {
                 crate::log::warn("桌宠启动失败: 窗口已创建但多次尝试后仍不可见");
             }
         }
@@ -1010,11 +2023,8 @@ pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
 
             let should_emit = context_changed || should_emit_by_interval(&app, interval_sec);
             if should_emit {
-                let remark = if is_text_ai_ready_for(&st) {
-                    build_remark_random_ai(&app, &st).await
-                } else {
-                    build_remark_from_lines(&st)
-                };
+                // [live2d-only] 台词仅来自本地台词库，不走 AI / 时间线
+                let remark = build_remark_from_lines(&st);
                 if let Some(remark) = remark {
                     let _ = app.emit_to(PET_LABEL, "pet-remark", remark);
                     if let Some(rt) = app.try_state::<PetRuntimeState>() {
@@ -1080,17 +2090,18 @@ fn sync_fullscreen_visibility(app: &AppHandle, st: &Arc<AppState>) {
     };
     if fullscreen {
         if pet_visible(app) && !rt.fullscreen_suppressed.load(Ordering::Relaxed) {
-            let _ = hide_pet(app, false);
+            let _ = hide_pet_transient(app);
             rt.fullscreen_suppressed.store(true, Ordering::Relaxed);
         }
     } else if rt.fullscreen_suppressed.swap(false, Ordering::Relaxed) {
+        let user_hidden = rt.user_hidden_pet.load(Ordering::Acquire);
         let enabled = st
             .db
             .lock()
             .ok()
             .map(|db| is_enabled(&db))
             .unwrap_or(false);
-        if enabled {
+        if enabled && !user_hidden {
             let _ = show_pet(app, st);
         }
     }
@@ -1130,7 +2141,9 @@ pub fn emit_remark(
 
     if !pet_visible(app) {
         if let Some(rt) = app.try_state::<PetRuntimeState>() {
-            if rt.fullscreen_suppressed.load(Ordering::Relaxed) {
+            if rt.fullscreen_suppressed.load(Ordering::Relaxed)
+                || rt.user_hidden_pet.load(Ordering::Acquire)
+            {
                 return;
             }
             let _ = show_pet(app, st);
@@ -1149,156 +2162,6 @@ pub fn emit_remark(
             animation,
         },
     );
-}
-
-async fn build_remark_random_ai(app: &AppHandle, st: &AppState) -> Option<PetRemarkPayload> {
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u32)
-        .unwrap_or(0);
-    let start = (seed % 3) as usize;
-    for i in 0..3 {
-        let src = (start + i) % 3;
-        let remark = match src {
-            0 => build_remark_with_ai(app, st).await,
-            1 => build_remark_from_timeline_random(st),
-            _ => build_remark_from_lines(st),
-        };
-        if remark.is_some() {
-            return remark;
-        }
-    }
-    None
-}
-
-fn is_text_ai_ready_for(st: &AppState) -> bool {
-    let Ok(db) = st.lock_db() else {
-        return false;
-    };
-    let data_dir = st.data_dir();
-    let config = crate::ai::AiConfig::load(&db, data_dir);
-    let catalog = crate::ai::load_catalog(data_dir);
-    crate::ai::is_text_ai_ready(&config, &catalog, &st.vault, &db)
-}
-
-fn build_remark_from_timeline_random(st: &AppState) -> Option<PetRemarkPayload> {
-    let db = st.lock_db().ok()?;
-    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let mut stmt = db
-        .prepare(
-            "SELECT summary FROM timeline_ai_cache \
-             WHERE substr(started_at, 1, 10) = ?1 AND trim(summary) != '' \
-             ORDER BY started_at DESC LIMIT 48",
-        )
-        .ok()?;
-    let summaries: Vec<String> = stmt
-        .query_map([&today], |r| r.get(0))
-        .ok()?
-        .filter_map(|r| r.ok())
-        .filter(|s: &String| !s.trim().is_empty() && !is_machine_text(s))
-        .collect();
-    if summaries.is_empty() {
-        return None;
-    }
-    let idx = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| (d.as_nanos() as usize) % summaries.len())
-        .unwrap_or(0);
-    Some(PetRemarkPayload {
-        text: trim_remark(summaries[idx].trim(), 80),
-        source: "timeline".into(),
-        animation: None,
-    })
-}
-
-async fn build_remark_with_ai(_app: &AppHandle, st: &AppState) -> Option<PetRemarkPayload> {
-    let data_dir = st.data_dir();
-    let (anim_meta, prep_result) = {
-        let db = st.lock_db().ok()?;
-        let config = crate::ai::AiConfig::load(&db, data_dir);
-        let catalog = crate::ai::load_catalog(data_dir);
-        let model_id = models::active_model_id(&db);
-        let anim_meta = models::read_animation_meta(data_dir, &db, &model_id);
-        let fg = st.foreground.lock().ok().and_then(|g| g.clone());
-        let prompt = build_ai_remark_prompt(data_dir, &fg, &anim_meta);
-        let prep_result = crate::ai::PreparedTextChat::prepare(
-            &config,
-            &catalog,
-            &st.vault,
-            &db,
-            data_dir,
-            prompt,
-        );
-        (anim_meta, prep_result)
-    };
-
-    let prep = match prep_result {
-        Ok(Some(p)) => p,
-        _ => return None,
-    };
-
-    let raw = prep.run_async().await.ok()?;
-    parse_ai_remark(&raw, &anim_meta)
-}
-
-fn build_ai_remark_prompt(
-    data_dir: &Path,
-    fg: &Option<crate::tracker::ForegroundPayload>,
-    anim_meta: &models::PetAnimationMeta,
-) -> String {
-    let app_name = fg
-        .as_ref()
-        .map(|f| {
-            crate::tracker::display_name::friendly_name(
-                &f.exe_path,
-                &f.app_name,
-                &f.window_title,
-            )
-        })
-        .unwrap_or_else(|| "电脑".into());
-    let idle = anim_meta.idle_animation.as_deref().unwrap_or("（未设置）");
-    let animations = if anim_meta.animations.is_empty() {
-        "（暂无）".to_string()
-    } else {
-        anim_meta.animations.join("、")
-    };
-    let idle_flag = if fg.as_ref().map(|f| f.is_idle).unwrap_or(false) {
-        "是"
-    } else {
-        "否"
-    };
-    crate::prompts::render(
-        data_dir,
-        "pet-remark",
-        &[
-            ("app_name", &app_name),
-            ("is_idle", idle_flag),
-            ("idle_animation", idle),
-            ("animation_list", &animations),
-        ],
-    )
-}
-
-fn parse_ai_remark(raw: &str, anim_meta: &models::PetAnimationMeta) -> Option<PetRemarkPayload> {
-    let json_str = crate::ai::json_util::extract_json_object(raw);
-    let v: serde_json::Value = serde_json::from_str(&json_str).ok()?;
-    let text = v.get("text").and_then(|t| t.as_str())?.trim();
-    if text.is_empty() || is_machine_text(text) {
-        return None;
-    }
-    let animation = v
-        .get("animation")
-        .and_then(|a| a.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .filter(|s| {
-            anim_meta.animations.is_empty() || anim_meta.animations.iter().any(|n| n == s)
-        });
-    Some(PetRemarkPayload {
-        text: trim_remark(text, 80),
-        source: "ai".into(),
-        animation,
-    })
 }
 
 pub fn build_remark_from_lines(st: &AppState) -> Option<PetRemarkPayload> {
@@ -1389,79 +2252,6 @@ pub fn build_remark(st: &AppState) -> Option<PetRemarkPayload> {
     })
 }
 
-pub async fn ai_suggest_lines(
-    st: &AppState,
-    model_id: &str,
-    count: usize,
-) -> Result<Vec<models::PetRemarkLine>, String> {
-    let data_dir = st.data_dir();
-    let (anim_meta, prep_result) = {
-        let db = st.lock_db().map_err(|e| e.to_string())?;
-        let config = crate::ai::AiConfig::load(&db, data_dir);
-        let catalog = crate::ai::load_catalog(data_dir);
-        let anim_meta = models::read_animation_meta(data_dir, &db, model_id);
-        let animations = if anim_meta.animations.is_empty() {
-            "（暂无）".to_string()
-        } else {
-            anim_meta.animations.join("、")
-        };
-        let prompt = format!(
-            "你是桌宠台词助手。请为模型「{model_id}」生成 {count} 条中文短台词（每条 8~36 字，可爱口语）。\n\
-             可选绑定动作：{animations}\n\
-             仅输出 JSON 数组，每项 {{\"text\":\"...\",\"animation\":null或动作名}}。不要 markdown。"
-        );
-        let prep_result = crate::ai::PreparedTextChat::prepare(
-            &config,
-            &catalog,
-            &st.vault,
-            &db,
-            data_dir,
-            prompt,
-        );
-        (anim_meta, prep_result)
-    };
-    let prep = match prep_result {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            return Err("未配置 AI 或密钥不可用".into());
-        }
-        Err(e) => return Err(e),
-    };
-    let raw = prep.run_async().await.map_err(|e| e.to_string())?;
-    let json_str = crate::ai::json_util::extract_json_array(&raw);
-    let parsed: serde_json::Value =
-        serde_json::from_str(&json_str).or_else(|_| serde_json::from_str(&raw)).map_err(|e| e.to_string())?;
-    let arr = parsed
-        .as_array()
-        .cloned()
-        .or_else(|| parsed.get("lines").and_then(|v| v.as_array()).cloned())
-        .ok_or_else(|| "AI 返回格式无效".to_string())?;
-    let has = |name: &str| {
-        anim_meta.animations.is_empty() || anim_meta.animations.iter().any(|n| n == name)
-    };
-    let lines: Vec<models::PetRemarkLine> = arr
-        .iter()
-        .filter_map(|item| {
-            let text = item.get("text")?.as_str()?.trim();
-            if text.is_empty() {
-                return None;
-            }
-            let animation = item
-                .get("animation")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && has(s));
-            Some(models::PetRemarkLine {
-                text: text.to_string(),
-                animation,
-            })
-        })
-        .collect();
-    if lines.is_empty() {
-        return Err("AI 未返回可用台词".into());
-    }
-    Ok(lines)
-}
 
 fn companion_session_start(st: &AppState) {
     if let Ok(db) = crate::db::lock_conn(&st.db) {
@@ -1475,6 +2265,26 @@ fn companion_session_stop(st: &AppState) {
     }
 }
 
+/// 桌宠编辑/移动调试日志（JSONL，位于 data_dir/logs/pet-movement.jsonl）
+pub fn append_movement_debug_logs(data_dir: &std::path::Path, lines: &[String]) -> Result<(), String> {
+    if lines.is_empty() {
+        return Ok(());
+    }
+    let dir = data_dir.join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let path = dir.join("pet-movement.jsonl");
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    for line in lines {
+        writeln!(file, "{line}").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1483,6 +2293,13 @@ mod tests {
     fn trim_remark_respects_chars() {
         let s = "一二三四五六七八九十";
         assert_eq!(trim_remark(s, 5), "一二三四五…");
+    }
+
+    #[test]
+    fn point_in_rect_works() {
+        assert!(point_in_rect(5, 5, 0, 0, 10, 10));
+        assert!(!point_in_rect(10, 5, 0, 0, 10, 10));
+        assert!(!point_in_rect(-1, 5, 0, 0, 10, 10));
     }
 
     #[test]

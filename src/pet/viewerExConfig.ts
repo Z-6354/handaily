@@ -71,6 +71,7 @@ export async function loadViewerExSpineConfig(
   pathPrefix: string,
   configFile?: string | null,
   resolveUrl?: (filename: string) => Promise<string>,
+  readViaIpc?: (filename: string) => Promise<string>,
 ): Promise<ViewerExLoadResult | null> {
   const base = pathPrefix.endsWith("/") ? pathPrefix : `${pathPrefix}/`;
   const candidates = configFile
@@ -81,8 +82,12 @@ export async function loadViewerExSpineConfig(
   for (const file of candidates) {
     try {
       const url = resolveUrl ? await resolveUrl(file) : `${base}${file}`;
-      const res = await fetch(url);
-      if (!res.ok) continue;
+      let res = await fetch(url).catch(() => null);
+      if ((!res || !res.ok) && readViaIpc) {
+        const blobUrl = await readViaIpc(file);
+        res = await fetch(blobUrl);
+      }
+      if (!res?.ok) continue;
       const json = (await res.json()) as unknown;
       const config = parseViewerExSpineConfig(json);
       return { ...assetPathsFromConfig(config), config };

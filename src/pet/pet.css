@@ -33,6 +33,8 @@ body {
 
 .pet-stage.edit-bounds-active {
   cursor: move;
+  align-items: flex-start;
+  justify-content: flex-start;
 }
 
 .pet-stage:active {
@@ -560,65 +562,65 @@ body {
 }
 
 .pet-edit-bounds-handle[data-edge="n"] {
-  top: -4px;
-  left: 12px;
-  right: 12px;
-  height: 8px;
+  top: -6px;
+  left: 0;
+  right: 0;
+  height: 12px;
   cursor: ns-resize;
 }
 
 .pet-edit-bounds-handle[data-edge="s"] {
-  bottom: -4px;
-  left: 12px;
-  right: 12px;
-  height: 8px;
+  bottom: -6px;
+  left: 0;
+  right: 0;
+  height: 12px;
   cursor: ns-resize;
 }
 
 .pet-edit-bounds-handle[data-edge="e"] {
-  top: 12px;
-  right: -4px;
-  bottom: 12px;
-  width: 8px;
+  top: 0;
+  right: -6px;
+  bottom: 0;
+  width: 12px;
   cursor: ew-resize;
 }
 
 .pet-edit-bounds-handle[data-edge="w"] {
-  top: 12px;
-  left: -4px;
-  bottom: 12px;
-  width: 8px;
+  top: 0;
+  left: -6px;
+  bottom: 0;
+  width: 12px;
   cursor: ew-resize;
 }
 
 .pet-edit-bounds-handle[data-edge="ne"] {
-  top: -4px;
-  right: -4px;
-  width: 14px;
-  height: 14px;
+  top: -6px;
+  right: -6px;
+  width: 18px;
+  height: 18px;
   cursor: nesw-resize;
 }
 
 .pet-edit-bounds-handle[data-edge="nw"] {
-  top: -4px;
-  left: -4px;
-  width: 14px;
-  height: 14px;
+  top: -6px;
+  left: -6px;
+  width: 18px;
+  height: 18px;
   cursor: nwse-resize;
 }
 
 .pet-edit-bounds-handle[data-edge="se"] {
-  right: -4px;
-  bottom: -4px;
-  width: 14px;
-  height: 14px;
+  right: -6px;
+  bottom: -6px;
+  width: 18px;
+  height: 18px;
   cursor: nwse-resize;
 }
 
 .pet-edit-bounds-handle[data-edge="sw"] {
-  left: -4px;
-  bottom: -4px;
-  width: 14px;
-  height: 14px;
+  left: -6px;
+  bottom: -6px;
+  width: 18px;
+  height: 18px;
   cursor: nesw-resize;
 }

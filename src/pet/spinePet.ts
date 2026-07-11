@@ -38,35 +38,53 @@ const ACTION_MIX_SEC = 0.15;
 /** 单轨模型：待机和一次性动作都在同一条 track 上播放 */
 const BASE_TRACK = 0;
 
+function shouldUseCrossOrigin(url: string): boolean {
+  if (!/^https?:\/\//i.test(url)) return false;
+  // Tauri asset 协议走同源，不设 crossOrigin 避免纹理加载失败
+  if (/asset\.(localhost|tauri\.localhost)/i.test(url)) return false;
+  return true;
+}
+
+function applyImageCrossOrigin(img: HTMLImageElement, url: string) {
+  if (shouldUseCrossOrigin(url)) {
+    img.crossOrigin = "anonymous";
+  } else {
+    img.removeAttribute("crossorigin");
+  }
+}
+
 async function loadTextureAtlas(
   resolveUrl: ResolveAssetUrl,
   atlasText: string,
   fallbackPng?: string,
+  readViaIpc?: (filename: string) => Promise<string>,
 ): Promise<TextureAtlas> {
   return new Promise((resolve, reject) => {
     new TextureAtlas(
       atlasText,
       (imagePath, loadTexture) => {
         const img = new Image();
-        img.crossOrigin = "anonymous";
-        void (async () => {
-          try {
-            img.onload = () => loadTexture(BaseTexture.from(img));
-            img.onerror = () => {
-              if (fallbackPng && imagePath !== fallbackPng) {
-                void resolveUrl(fallbackPng).then((url) => {
-                  img.onerror = () => reject(new Error(`纹理加载失败: ${imagePath}`));
-                  img.src = url;
-                });
-                return;
-              }
-              reject(new Error(`纹理加载失败: ${imagePath}`));
-            };
-            img.src = await resolveUrl(imagePath);
-          } catch (e) {
-            reject(e instanceof Error ? e : new Error(String(e)));
-          }
-        })();
+        const tryLoad = (url: string, allowIpcFallback: boolean) => {
+          applyImageCrossOrigin(img, url);
+          img.onload = () => loadTexture(BaseTexture.from(img));
+          img.onerror = () => {
+            if (allowIpcFallback && readViaIpc) {
+              void readViaIpc(imagePath)
+                .then((blobUrl) => tryLoad(blobUrl, false))
+                .catch(() => reject(new Error(`纹理加载失败: ${imagePath}`)));
+              return;
+            }
+            if (fallbackPng && imagePath !== fallbackPng) {
+              void resolveUrl(fallbackPng).then((fallbackUrl) => tryLoad(fallbackUrl, Boolean(readViaIpc)));
+              return;
+            }
+            reject(new Error(`纹理加载失败: ${imagePath}`));
+          };
+          img.src = url;
+        };
+        void resolveUrl(imagePath)
+          .then((url) => tryLoad(url, Boolean(readViaIpc)))
+          .catch((e) => reject(e instanceof Error ? e : new Error(String(e))));
       },
       (atlas) => {
         if (atlas) resolve(atlas);
@@ -102,6 +120,7 @@ export class SpinePet {
   private onRandomAction?: (animation: string) => void;
   private assets: PetAssetConfig;
   private resolveAssetUrl?: ResolveAssetUrl;
+  private readViaIpc?: (filename: string) => Promise<string>;
   private skipBootAnimation = false;
 
   constructor(
@@ -111,11 +130,13 @@ export class SpinePet {
       onTap?: (animation: string | null) => void;
       onRandomAction?: (animation: string) => void;
       resolveAssetUrl?: ResolveAssetUrl;
+      readViaIpc?: (filename: string) => Promise<string>;
     } & PetAnimationOptions,
   ) {
     this.canvas = canvas;
     this.assets = assets;
     this.resolveAssetUrl = options?.resolveAssetUrl;
+    this.readViaIpc = options?.readViaIpc;
     this.onTap = options?.onTap;
     this.onRandomAction = options?.onRandomAction;
     this.applyAnimationOptions(options);
@@ -210,26 +231,40 @@ export class SpinePet {
         Promise.resolve(
           `${this.assets.pathPrefix}${this.assets.pathPrefix.endsWith("/") ? "" : "/"}${filename}`,
         ));
+    const readViaIpc = this.readViaIpc;
     const { configFile } = this.assets;
     let skelFile = this.assets.skelFile;
     let atlasFile = this.assets.atlasFile;
     this.viewerExConfig = null;
 
+    const fetchText = async (filename: string) => {
+      const url = await resolveUrl(filename);
+      let res = await fetch(url).catch(() => null);
+      if ((!res || !res.ok) && readViaIpc) {
+        const blobUrl = await readViaIpc(filename);
+        res = await fetch(blobUrl);
+      }
+      if (!res?.ok) throw new Error(`资源加载失败: ${filename}`);
+      return res.text();
+    };
+
+    const fetchBinary = async (filename: string) => {
+      const url = await resolveUrl(filename);
+      let res = await fetch(url).catch(() => null);
+      if ((!res || !res.ok) && readViaIpc) {
+        const blobUrl = await readViaIpc(filename);
+        res = await fetch(blobUrl);
+      }
+      if (!res?.ok) throw new Error(`资源加载失败: ${filename}`);
+      return new Uint8Array(await res.arrayBuffer());
+    };
+
     const loadAtlasSkel = async (skel: string, atlas: string) =>
-      Promise.all([
-        fetch(await resolveUrl(atlas)).then((r) => {
-          if (!r.ok) throw new Error(`atlas 加载失败: ${atlas}`);
-          return r.text();
-        }),
-        fetch(await resolveUrl(skel)).then(async (r) => {
-          if (!r.ok) throw new Error(`skel 加载失败: ${skel}`);
-          return new Uint8Array(await r.arrayBuffer());
-        }),
-      ] as const);
+      Promise.all([fetchText(atlas), fetchBinary(skel)] as const);
 
     const defaultAssetsPromise = loadAtlasSkel(skelFile, atlasFile);
     const viewerExPromise = configFile
-      ? loadViewerExSpineConfig("", configFile, resolveUrl)
+      ? loadViewerExSpineConfig("", configFile, resolveUrl, readViaIpc)
       : Promise.resolve(null);
 
     const viewerEx = await viewerExPromise;
@@ -248,7 +283,12 @@ export class SpinePet {
       [atlasText, skelBuf] = await defaultAssetsPromise;
     }
 
-    const atlas = await loadTextureAtlas(resolveUrl, atlasText, this.assets.pngFile);
+    const atlas = await loadTextureAtlas(
+      resolveUrl,
+      atlasText,
+      this.assets.pngFile,
+      readViaIpc,
+    );
     const binary = new SkeletonBinary36(new AtlasAttachmentLoader(atlas));
     const skeletonData = binary.readSkeletonData(skelBuf);
 
@@ -544,6 +584,46 @@ export class SpinePet {
       this.fitSpineToCanvas();
     }
     this.app.render();
+  }
+
+  /** 编辑边界预览：canvas 尺寸变化时在 canvas 内平移 Spine，保持模型屏幕位置不变 */
+  resizeCanvasForEditResize(
+    newW: number,
+    newH: number,
+    prevW: number,
+    prevH: number,
+    moveNorth: boolean,
+    moveWest: boolean,
+    _stageScale = 1,
+  ) {
+    if (!this.spine || !this.app) return;
+    const w = Math.round(newW);
+    const h = Math.round(newH);
+    const dw = w - Math.round(prevW);
+    const dh = h - Math.round(prevH);
+    if (dw === 0 && dh === 0) return;
+    this.app.renderer.resize(w, h);
+    const scale = Math.max(0.01, _stageScale);
+    if (moveWest && dw !== 0) {
+      this.spine.position.x += dw / scale;
+    }
+    if (moveNorth && dh !== 0) {
+      this.spine.position.y += dh / scale;
+    }
+    this.app.render();
+  }
+
+  /** 退出编辑前：refit 并把 canvas 内 Spine 偏移折算进 stage offset（top-left 坐标系） */
+  refitAndConsumeInternalOffset(stageScale: number): { dx: number; dy: number } {
+    if (!this.spine || !this.app) return { dx: 0, dy: 0 };
+    const sx = this.spine.position.x;
+    const sy = this.spine.position.y;
+    this.fitSpineToCanvas();
+    const s = Math.max(0.01, stageScale);
+    const dx = Math.round((sx - this.spine.position.x) * s);
+    const dy = Math.round((sy - this.spine.position.y) * s);
+    this.app.render();
+    return { dx, dy };
   }
 
   private clearRandomTimer() {

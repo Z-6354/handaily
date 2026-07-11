@@ -4,12 +4,56 @@ import { LogicalSize, PhysicalPosition } from "@tauri-apps/api/dpi";
 
 import { listen } from "@tauri-apps/api/event";
 
-import { invoke } from "@tauri-apps/api/core";
+import { tauriInvoke as invoke, waitForTauriInternals } from "../lib/tauriInvoke";
 
 import "./pet.css";
 
 import { SpinePet, type PetAssetConfig } from "./spinePet";
-import { createPetAssetResolver, preloadModelAssets, type PetAssetResolver } from "./petAssetResolver";
+import {
+  createPetAssetResolver,
+  preloadModelAssets,
+  warmModelBundleCache,
+  type PetAssetResolver,
+} from "./petAssetResolver";
+import {
+  convertStageOffsetForOrigin,
+  isCursorOutsideWindow,
+} from "./petLayout";
+import {
+  initPetMovementLog,
+  petMovementLog,
+  petMovementLogThrottled,
+} from "./petMovementLog";
+
+const petWindow = getCurrentWindow();
+
+function movementLogFlags(): Record<string, unknown> {
+  return {
+    editBoundsMode,
+    editBoundsEnterPending,
+    resizeDragging,
+    offsetDragging,
+    resizeEdge,
+    exitEditBoundsInFlight,
+    ignoreCursorActive,
+    petMenuOpen,
+    stageOffsetX,
+    stageOffsetY,
+    stageScale,
+    canvasDisplayW,
+    canvasDisplayH,
+    suppressUntil: editBoundsSuppressUntil,
+  };
+}
+
+function movementCursor(me: MouseEvent): Record<string, number> {
+  return {
+    clientX: me.clientX,
+    clientY: me.clientY,
+    screenX: me.screenX,
+    screenY: me.screenY,
+  };
+}
 
 interface PetRemarkLine {
   text: string;
@@ -78,6 +122,7 @@ interface PetConfigPayload {
   window_height: number;
   offset_x: number;
   offset_y: number;
+  bubble_enabled: boolean;
 }
 
 
@@ -94,20 +139,11 @@ interface PetPoint {
   y: number;
 }
 
-interface CharacterSkinInfo {
-  id: string;
-  name: string;
-  model_id: string;
-  model_name: string;
-  active: boolean;
-}
-
-interface CharacterInfo {
-  id: string;
-  name: string;
-  active: boolean;
-  active_skin_id: string;
-  skins: CharacterSkinInfo[];
+interface PetWindowBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 const SCREEN_MARGIN = 8;
@@ -130,17 +166,6 @@ function clampWindowPosition(x: number, y: number, w: number, h: number): PetPoi
   };
 }
 
-function clampWindowBounds(
-  w: number,
-  h: number,
-  x: number,
-  y: number,
-): { w: number; h: number; x: number; y: number } {
-  const size = clampWindowSize(w, h);
-  const pos = clampWindowPosition(x, y, size.w, size.h);
-  return { w: size.w, h: size.h, x: pos.x, y: pos.y };
-}
-
 
 
 const rootMaybe = document.getElementById("pet-root");
@@ -157,8 +182,13 @@ dragPreview.className = "pet-drag-preview";
 dragPreview.innerHTML = `<span class="pet-drag-preview-hint">拖动中 · 松开保存</span>`;
 root.appendChild(dragPreview);
 
-function clearBootHint() {
-  bootHint.remove();
+function showBootHint() {
+  if (!bootHint.isConnected) root.appendChild(bootHint);
+  bootHint.hidden = false;
+}
+
+function hideBootHint() {
+  bootHint.hidden = true;
 }
 const stage = document.createElement("div");
 
@@ -198,8 +228,6 @@ const bubble = document.createElement("div");
 
 bubble.className = "pet-bubble";
 
-
-
 const editOverlay = document.createElement("div");
 
 editOverlay.className = "pet-edit-bounds";
@@ -219,107 +247,9 @@ const resizeHandles = editOverlay.querySelectorAll(".pet-edit-bounds-handle");
 
 
 
-const menu = document.createElement("div");
-
-menu.className = "pet-menu";
-menu.innerHTML = `
-  <div class="pet-menu-view" data-menu-view="main">
-    <div class="pet-menu-head">桌宠菜单</div>
-    <div class="pet-menu-body">
-    <button type="button" class="pet-menu-item" data-action="main">
-      <span class="pet-menu-icon" aria-hidden="true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-          <rect x="3" y="4" width="18" height="14" rx="2" />
-          <path d="M8 20h8" />
-        </svg>
-      </span>
-      <span class="pet-menu-text">打开小寒日报</span>
-    </button>
-    <button type="button" class="pet-menu-item" data-action="edit-bounds">
-      <span class="pet-menu-icon" aria-hidden="true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-          <path d="M4 8V4h4M20 8V4h-4M4 16v4h4M20 16v4h-4" />
-        </svg>
-      </span>
-      <span class="pet-menu-text">编辑范围</span>
-    </button>
-    <div class="pet-menu-divider" role="separator"></div>
-    <div class="pet-menu-row">
-      <span class="pet-menu-row-label">气泡台词</span>
-      <button type="button" class="pet-menu-switch" data-action="toggle-bubble" aria-pressed="true" aria-label="气泡台词开关">
-        <span class="pet-menu-switch-track"><span class="pet-menu-switch-thumb"></span></span>
-      </button>
-    </div>
-    <div class="pet-menu-divider" role="separator"></div>
-    <div class="pet-menu-submenu" data-submenu="skins">
-      <button type="button" class="pet-menu-item pet-menu-item--sub" data-action="submenu" data-submenu="skins">
-        <span class="pet-menu-icon" aria-hidden="true">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <path d="M12 3v3M8 6l2 2M16 6l-2 2" />
-            <circle cx="12" cy="13" r="5" />
-            <path d="M9 21h6" />
-          </svg>
-        </span>
-        <span class="pet-menu-text">切换皮肤</span>
-        <span class="pet-menu-chevron" aria-hidden="true">›</span>
-      </button>
-      <div class="pet-menu-flyout" data-flyout="skins" hidden>
-        <div class="pet-menu-flyout-title">选择皮肤</div>
-        <div class="pet-menu-sublist" data-menu-list="skins"></div>
-      </div>
-    </div>
-    <button type="button" class="pet-menu-item" data-action="open-characters-menu">
-        <span class="pet-menu-icon" aria-hidden="true">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-            <circle cx="12" cy="8" r="4" />
-            <path d="M6 20c0-3.3 2.7-6 6-6s6 2.7 6 6" />
-          </svg>
-        </span>
-        <span class="pet-menu-text">切换人物</span>
-        <span class="pet-menu-chevron" aria-hidden="true">›</span>
-      </button>
-    <div class="pet-menu-divider" role="separator"></div>
-    <button type="button" class="pet-menu-item pet-menu-item--danger" data-action="hide">
-      <span class="pet-menu-icon" aria-hidden="true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-          <path d="M3 3l18 18" />
-          <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" />
-          <path d="M9.9 5.1A9 9 0 0 1 12 5c4 0 7.5 2.7 8.8 6.5" />
-          <path d="M6.2 6.2C4.6 7.8 3.5 9.8 3 12c1.3 3.8 4.8 6.5 8.8 6.5 1.1 0 2.1-.2 3-.5" />
-        </svg>
-      </span>
-      <span class="pet-menu-text">隐藏桌宠</span>
-    </button>
-    <button type="button" class="pet-menu-item pet-menu-item--danger" data-action="quit">
-      <span class="pet-menu-icon" aria-hidden="true">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
-          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
-          <polyline points="16 17 21 12 16 7" />
-          <line x1="21" y1="12" x2="9" y2="12" />
-        </svg>
-      </span>
-      <span class="pet-menu-text">退出</span>
-    </button>
-    </div>
-  </div>
-  <div class="pet-menu-view" data-menu-view="characters" hidden>
-    <div class="pet-menu-head pet-menu-head--with-back">
-      <button type="button" class="pet-menu-back" data-action="menu-back" aria-label="返回">‹</button>
-      <span class="pet-menu-head-title">选择人物</span>
-    </div>
-    <div class="pet-menu-body">
-      <div class="pet-menu-sublist" data-menu-list="characters"></div>
-    </div>
-  </div>
-`;
-
-
-
 stage.append(canvasWrap, fallback);
 
-root.append(stage, bubble, editOverlay, menu);
-
-
+root.append(stage, bubble, editOverlay);
 
 let bubbleTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingBubble: { text: string; animation?: string | null } | null = null;
@@ -342,38 +272,83 @@ let dragAnchor = { winX: 0, winY: 0, screenX: 0, screenY: 0 };
 let pendingDragPos: PetPoint | null = null;
 
 let dragPositionRaf = 0;
+let dragWindowPhysW = 220;
+let dragWindowPhysH = 280;
 
 const CLICK_MAX_MS = 280;
 
 const DRAG_THRESHOLD = 10;
 
-let menuAutoCloseTimer: ReturnType<typeof setTimeout> | null = null;
+const DOUBLE_CLICK_MS = 500;
 
-let menuSkinsEl: HTMLElement | null = menu.querySelector('[data-menu-list="skins"]');
-let menuCharactersEl: HTMLElement | null = menu.querySelector('[data-menu-list="characters"]');
-let menuMainViewEl: HTMLElement | null = menu.querySelector('[data-menu-view="main"]');
-let menuCharactersViewEl: HTMLElement | null = menu.querySelector('[data-menu-view="characters"]');
-let menuBubbleSwitchEl: HTMLButtonElement | null = menu.querySelector('[data-action="toggle-bubble"]');
-let menuSwitchBusy = false;
-let openSubmenuId: string | null = null;
-
-const MENU_AUTO_CLOSE_MS = 8000;
-const FAVORITES_SETTING_KEY = "character_favorites";
-
-function parseFavoriteIds(raw: string | null | undefined): string[] {
-  if (!raw?.trim()) return [];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((id): id is string => typeof id === "string" && id.length > 0);
-  } catch {
-    return [];
-  }
-}
+const DOUBLE_CLICK_DIST = 14;
 
 let editBoundsMode = false;
 
+let editBoundsEnterPending = false;
+
+function shouldDeferClickThrough(): boolean {
+  return editBoundsMode || editBoundsEnterPending;
+}
+
+function resetPointerGestureState() {
+  pointerDown = false;
+  windowDragStarted = false;
+  windowDragAnchorReady = false;
+  offsetDragging = false;
+  resizeDragging = false;
+  pollLeftWasDown = false;
+  pollLeftDownAt = 0;
+  pollLeftDownClient = { x: 0, y: 0 };
+  prevRightMouseDown = false;
+  prevLeftMouseDown = false;
+  clickCaptureSuppressUntil = 0;
+  pendingResizeBounds = null;
+  endWindowDrag();
+}
+
+async function restoreNormalInteraction() {
+  resetPointerGestureState();
+  stopEditBoundsPoll();
+  cancelEditBoundsBlurExit();
+  stopClickThroughPoll();
+  clickThroughApplySerial += 1;
+  editBoundsEnterPending = false;
+  if (document.hidden || editBoundsMode) return;
+  petMovementLog("restore-interaction", movementLogFlags());
+  try {
+    ignoreCursorActive = true;
+    await applyClickThrough(false, true);
+    await syncClickThroughState();
+    ensureClickThroughPoll();
+    try {
+      await petWindow.setFocus();
+    } catch {
+      // ignore
+    }
+  } catch (err) {
+    console.error("restoreNormalInteraction failed", err);
+    ignoreCursorActive = true;
+    void applyClickThrough(false, true).then(() => {
+      ensureClickThroughPoll();
+      void syncClickThroughState();
+    });
+  }
+}
+
 let editBoundsSuppressUntil = 0;
+
+let editBoundsBlurTimer: ReturnType<typeof setTimeout> | null = null;
+
+let clickCaptureSuppressUntil = 0;
+
+let lastStageClickAt = 0;
+
+let lastStageClickX = 0;
+
+let lastStageClickY = 0;
+
+let lastMainOpenFromDoubleClickAt = 0;
 
 let canvasDisplayW = 220;
 
@@ -397,13 +372,19 @@ let resizeEdge: ResizeEdge = "se";
 
 let resizeStart = { x: 0, y: 0, w: 0, h: 0, posX: 0, posY: 0 };
 
-let pendingResizeBounds: { w: number; h: number; x?: number; y?: number } | null = null;
+type ResizeBoundsPayload = { w: number; h: number; x?: number; y?: number };
+
+let pendingResizeBounds: ResizeBoundsPayload | null = null;
 
 let resizeApplySerial: Promise<void> = Promise.resolve();
+
+let exitEditBoundsInFlight = false;
 
 let resizeRafId = 0;
 
 let lastResizeKey = "";
+
+let editResizeScaleFactor = 1;
 
 const MIN_W = 160;
 
@@ -413,11 +394,26 @@ const MIN_H = 200;
 
 const MAX_H = 600;
 
-const petWindow = getCurrentWindow();
 let ignoreCursorActive = false;
 let clickThroughPoll = 0;
 let clickThroughInterval = 0;
-const CLICK_THROUGH_POLL_MS = 100;
+const CLICK_THROUGH_POLL_MS = 80;
+
+let prevRightMouseDown = false;
+let prevLeftMouseDown = false;
+let pollLeftWasDown = false;
+let pollLeftDownAt = 0;
+let pollLeftDownClient = { x: 0, y: 0 };
+let rightClickMenuLock = false;
+let editBoundsPollLeftDown = false;
+/** 进入编辑后需先松开菜单点击，避免误触发 poll-outside */
+let editBoundsAwaitMouseUp = false;
+const EDIT_EDGE_HIT_PX = 14;
+let petMenuOpen = false;
+let menuCloseSuppressUntil = 0;
+let cachedWinPos: { x: number; y: number } | null = null;
+let lastDispatchedClickAt = 0;
+let appExiting = false;
 
 function collectInteractiveRects(): DOMRect[] {
   const rects: DOMRect[] = [];
@@ -429,7 +425,6 @@ function collectInteractiveRects(): DOMRect[] {
     if (r.width < 2 && r.height < 2) return;
     rects.push(new DOMRect(r.left - pad, r.top - pad, r.width + pad * 2, r.height + pad * 2));
   };
-  // 角色区域：优先用 Spine 实际包围盒，避免整窗透明边距挡桌面
   const charRect = pet?.getCharacterScreenRect(12);
   if (charRect) {
     rects.push(charRect);
@@ -438,8 +433,6 @@ function collectInteractiveRects(): DOMRect[] {
     if (fallback.style.display === "block") add(fallback, 6);
   }
   if (bubble.classList.contains("visible")) add(bubble, 4);
-  if (menu.classList.contains("open")) add(menu, 0);
-  if (editOverlay.classList.contains("active")) add(editOverlay, 0);
   add(document.getElementById("pet-load-error"), 0);
   return rects;
 }
@@ -456,18 +449,146 @@ function mustCapturePointer(): boolean {
     windowDragStarted ||
     resizeDragging ||
     offsetDragging ||
-    menu.classList.contains("open") ||
-    editBoundsMode
+    exitEditBoundsInFlight ||
+    editBoundsEnterPending ||
+    shouldDeferClickThrough() ||
+    Date.now() < clickCaptureSuppressUntil
   );
 }
 
-async function applyClickThrough(ignore: boolean) {
-  if (ignore === ignoreCursorActive) return;
+function suppressClickCapture(ms: number) {
+  clickCaptureSuppressUntil = Math.max(clickCaptureSuppressUntil, Date.now() + ms);
+}
+
+function consumeStageDoubleClick(clientX: number, clientY: number): boolean {
+  const now = Date.now();
+  const isDouble =
+    now - lastStageClickAt <= DOUBLE_CLICK_MS &&
+    Math.hypot(clientX - lastStageClickX, clientY - lastStageClickY) <= DOUBLE_CLICK_DIST;
+  lastStageClickAt = now;
+  lastStageClickX = clientX;
+  lastStageClickY = clientY;
+  return isDouble;
+}
+
+async function openMainFromDoubleClick() {
+  const now = Date.now();
+  if (now - lastMainOpenFromDoubleClickAt < 400) return;
+  lastMainOpenFromDoubleClickAt = now;
+  lastDispatchedClickAt = now;
+  suppressClickCapture(DOUBLE_CLICK_MS);
+  pointerDown = false;
+  windowDragStarted = false;
+  windowDragAnchorReady = false;
+  endWindowDrag();
+  try {
+    await invoke("pet_open_main", { page: null });
+  } catch (err) {
+    console.error("双击打开主窗口失败", err);
+  }
+}
+
+function dispatchStageClick(clientX: number, clientY: number) {
+  const now = Date.now();
+  const completingDouble =
+    now - lastStageClickAt <= DOUBLE_CLICK_MS &&
+    Math.hypot(clientX - lastStageClickX, clientY - lastStageClickY) <= DOUBLE_CLICK_DIST;
+  if (!completingDouble && now - lastDispatchedClickAt < 80) return;
+  lastDispatchedClickAt = now;
+  if (consumeStageDoubleClick(clientX, clientY)) {
+    void openMainFromDoubleClick();
+  } else {
+    pet?.handleClick();
+  }
+}
+
+async function trackPollLeftClickWhenIgnored(
+  pointer: { x: number; y: number },
+  screen: { x: number; y: number },
+) {
+  let down = false;
+  try {
+    down = await invoke<boolean>("pet_is_left_mouse_down");
+  } catch {
+    return;
+  }
+
+  if (!ignoreCursorActive || shouldDeferClickThrough() || petMenuOpen || rightClickMenuLock || mainWindowCovering) {
+    pollLeftWasDown = down;
+    return;
+  }
+
+  const edgeDown = down && !pollLeftWasDown;
+  const edgeUp = !down && pollLeftWasDown;
+
+  if (edgeDown && hitInteractive(pointer.x, pointer.y)) {
+    suppressClickCapture(DOUBLE_CLICK_MS);
+    pollLeftDownAt = Date.now();
+    pollLeftDownClient = { x: pointer.x, y: pointer.y };
+    pointerDown = true;
+    windowDragStarted = false;
+    windowDragAnchorReady = false;
+    pointerStart = {
+      x: pointer.x,
+      y: pointer.y,
+      screenX: screen.x,
+      screenY: screen.y,
+      time: pollLeftDownAt,
+    };
+    void applyClickThrough(false, true);
+    void refreshDragWindowSize();
+    void readWindowBoundsPhysical().then((bounds) => {
+      cachedWinPos = { x: bounds.x, y: bounds.y };
+    });
+  }
+
+  if (edgeUp && pollLeftWasDown) {
+    const elapsed = Date.now() - pollLeftDownAt;
+    const dist = Math.hypot(pointer.x - pollLeftDownClient.x, pointer.y - pollLeftDownClient.y);
+    const isClick =
+      pointerDown &&
+      elapsed <= CLICK_MAX_MS &&
+      dist < DRAG_THRESHOLD &&
+      hitInteractive(pollLeftDownClient.x, pollLeftDownClient.y);
+
+    if (isClick) {
+      if (windowDragStarted) {
+        endWindowDrag();
+      } else {
+        dispatchStageClick(pointer.x, pointer.y);
+      }
+      windowDragStarted = false;
+      windowDragAnchorReady = false;
+    } else if (windowDragStarted) {
+      endWindowDrag();
+      void savePosition();
+      windowDragStarted = false;
+      windowDragAnchorReady = false;
+    }
+    pointerDown = false;
+  }
+
+  pollLeftWasDown = down;
+}
+
+let clickThroughApplySerial = 0;
+
+async function applyClickThrough(ignore: boolean, force = false) {
+  if (ignore && mustCapturePointer()) return;
+  if (!force && ignore === ignoreCursorActive) return;
+  const token = ++clickThroughApplySerial;
   try {
     await petWindow.setIgnoreCursorEvents(ignore);
+    if (token !== clickThroughApplySerial) return;
     ignoreCursorActive = ignore;
-  } catch {
-    // 权限或平台不支持时静默降级
+    petMovementLogThrottled("click-through", "click-through", {
+      ignore,
+      force,
+      ...movementLogFlags(),
+    });
+  } catch (err) {
+    console.error("applyClickThrough failed", err);
+    petMovementLog("click-through", { ignore, force, error: String(err), ...movementLogFlags() });
   }
 }
 
@@ -482,24 +603,89 @@ function stopClickThroughPoll() {
   }
 }
 
-function scheduleClickThroughPoll(ignore: boolean) {
+function ensureClickThroughPoll() {
+  if (document.hidden) return;
   stopClickThroughPoll();
-  if (!ignore || document.hidden) return;
-  clickThroughPoll = requestAnimationFrame(() => {
-    clickThroughPoll = 0;
-    void syncClickThroughState();
-  });
-  // 穿透时 WebView 收不到 mousemove，需定时用屏幕坐标检测是否进入角色区
   clickThroughInterval = window.setInterval(() => {
-    if (document.hidden || mustCapturePointer()) return;
-    void syncClickThroughState();
+    if (document.hidden) return;
+    void runClickThroughPollTick();
   }, CLICK_THROUGH_POLL_MS);
+}
+
+async function dismissMenuOnOutsideLeftClick() {
+  if (!petMenuOpen || rightClickMenuLock) return;
+  let down = false;
+  let overMenu = false;
+  try {
+    const poll = await invoke<{ left_down: boolean; menu_contains_cursor: boolean }>(
+      "pet_poll_menu_dismiss",
+    );
+    down = poll.left_down;
+    overMenu = poll.menu_contains_cursor;
+  } catch {
+    return;
+  }
+  const edgeDown = down && !prevLeftMouseDown;
+  const edgeUp = !down && prevLeftMouseDown;
+  prevLeftMouseDown = down;
+  // 按下时在菜单内：不处理（避免在 click 到达菜单 WebView 前误关菜单）
+  if (edgeDown) return;
+  // 仅在松开且光标不在菜单上时关闭
+  if (!edgeUp || overMenu) return;
+  try {
+    await invoke("pet_menu_hide");
+  } catch {
+    // ignore
+  }
+}
+
+async function runClickThroughPollTick() {
+  if (editBoundsMode) {
+    await runEditBoundsPollTick();
+    return;
+  }
+  if (shouldDeferClickThrough() || mustCapturePointer()) return;
+
+  if (petMenuOpen) {
+    await dismissMenuOnOutsideLeftClick();
+  } else {
+    prevLeftMouseDown = false;
+  }
+
+  let pointer: { x: number; y: number } | undefined;
+  let screen: { x: number; y: number } | undefined;
+  const client = await cursorClientLogical();
+  if (client) {
+    pointer = { x: client.x, y: client.y };
+    screen = { x: client.screen.x, y: client.screen.y };
+  } else {
+    return;
+  }
+
+  await syncClickThroughState(pointer);
+  await trackPollLeftClickWhenIgnored(pointer, screen);
+
+  if (petMenuOpen || rightClickMenuLock || shouldDeferClickThrough()) {
+    prevRightMouseDown = false;
+    return;
+  }
+
+  let rightDown = false;
+  try {
+    rightDown = await invoke<boolean>("pet_is_right_mouse_down");
+  } catch {
+    return;
+  }
+  const rightEdge = rightDown && !prevRightMouseDown;
+  prevRightMouseDown = rightDown;
+  if (!rightEdge || !hitInteractive(pointer.x, pointer.y)) return;
+  await applyClickThrough(false, true);
+  await openPetMenu();
 }
 
 async function syncClickThroughState(pointer?: { x: number; y: number }) {
   if (mustCapturePointer()) {
-    scheduleClickThroughPoll(false);
-    await applyClickThrough(false);
+    await applyClickThrough(false, true);
     return;
   }
   let x: number;
@@ -508,38 +694,64 @@ async function syncClickThroughState(pointer?: { x: number; y: number }) {
     x = pointer.x;
     y = pointer.y;
   } else {
-    const [cursor, pos, sf] = await Promise.all([
-      cursorPosition(),
-      petWindow.outerPosition(),
-      petWindow.scaleFactor(),
-    ]);
-    x = (cursor.x - pos.x) / sf;
-    y = (cursor.y - pos.y) / sf;
+    const client = await cursorClientLogical();
+    if (!client) return;
+    x = client.x;
+    y = client.y;
   }
   const ignore = !hitInteractive(x, y);
   await applyClickThrough(ignore);
-  scheduleClickThroughPoll(ignore);
 }
 
 function startClickThrough() {
-  if (document.hidden) {
+  if (document.hidden || shouldDeferClickThrough()) {
     stopClickThroughPoll();
     return;
   }
+  ensureClickThroughPoll();
   void syncClickThroughState();
 }
 
 function stopClickThrough() {
   stopClickThroughPoll();
-  void applyClickThrough(false);
+  void applyClickThrough(false, true);
+}
+
+async function ensureClickThroughDisabled() {
+  stopClickThroughPoll();
+  clickThroughApplySerial += 1;
+  ignoreCursorActive = true;
+  await applyClickThrough(false, true);
+}
+
+function isPointOnEditHandle(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  return target.closest(".pet-edit-bounds-handle") != null;
+}
+
+function hitTestEditEdge(clientX: number, clientY: number): ResizeEdge | null {
+  const w = root.clientWidth;
+  const h = root.clientHeight;
+  if (w < 1 || h < 1) return null;
+  const nearL = clientX <= EDIT_EDGE_HIT_PX;
+  const nearR = clientX >= w - EDIT_EDGE_HIT_PX;
+  const nearT = clientY <= EDIT_EDGE_HIT_PX;
+  const nearB = clientY >= h - EDIT_EDGE_HIT_PX;
+  if (nearT && nearL) return "nw";
+  if (nearT && nearR) return "ne";
+  if (nearB && nearL) return "sw";
+  if (nearB && nearR) return "se";
+  if (nearT) return "n";
+  if (nearB) return "s";
+  if (nearL) return "w";
+  if (nearR) return "e";
+  return null;
 }
 
 function isInsideEditArea(target: EventTarget | null): boolean {
-
   if (!(target instanceof Node)) return false;
-
+  if (isPointOnEditHandle(target)) return true;
   return editOverlay.contains(target) || stage.contains(target);
-
 }
 
 
@@ -565,6 +777,12 @@ function assetConfigFromPayload(cfg: PetConfigPayload): PetAssetConfig {
 
 function positionBubble() {
   if (!root) return;
+  if (editBoundsMode) {
+    bubble.style.top = "6px";
+    bubble.style.left = "6px";
+    bubble.style.right = "auto";
+    return;
+  }
   const pad = 6;
   const gap = 8;
   const rootRect = root.getBoundingClientRect();
@@ -646,21 +864,20 @@ function showBubble(text: string, animation?: string | null) {
   if (bubbleTimer) clearTimeout(bubbleTimer);
   bubbleTimer = setTimeout(() => {
     bubble.classList.remove("visible");
-    startClickThrough();
+    if (!editBoundsMode) startClickThrough();
   }, 8000);
 
   if (animation && pet) {
     pet.playAnimation(animation, false);
   }
-  startClickThrough();
+  if (!editBoundsMode) startClickThrough();
 }
 
 
 
-function syncBubbleToggleUI() {
-  if (!menuBubbleSwitchEl) return;
-  menuBubbleSwitchEl.classList.toggle("is-on", bubbleEnabled);
-  menuBubbleSwitchEl.setAttribute("aria-pressed", bubbleEnabled ? "true" : "false");
+function applyBubbleEnabledFromConfig(enabled: boolean | undefined) {
+  if (typeof enabled !== "boolean") return;
+  bubbleEnabled = enabled;
 }
 
 async function loadBubbleEnabled() {
@@ -669,71 +886,6 @@ async function loadBubbleEnabled() {
   } catch {
     bubbleEnabled = true;
   }
-  syncBubbleToggleUI();
-}
-
-async function setBubbleEnabled(enabled: boolean) {
-  bubbleEnabled = enabled;
-  try {
-    await invoke("pet_set_bubble_enabled", { enabled });
-  } catch (e) {
-    console.error("保存气泡开关失败", e);
-    showPetLoadError(e);
-    return;
-  }
-  syncBubbleToggleUI();
-  if (!enabled) clearBubble();
-}
-
-function setMenuView(view: "main" | "characters") {
-  menuMainViewEl?.toggleAttribute("hidden", view !== "main");
-  menuCharactersViewEl?.toggleAttribute("hidden", view !== "characters");
-  if (view === "characters") {
-    closeAllSubmenus();
-    void refreshPetMenuPickers();
-  }
-}
-
-function resetMenuView() {
-  setMenuView("main");
-}
-
-function closeAllSubmenus() {
-  openSubmenuId = null;
-  menu.querySelectorAll(".pet-menu-submenu.is-open").forEach((el) => {
-    el.classList.remove("is-open");
-  });
-  menu.querySelectorAll(".pet-menu-flyout").forEach((el) => {
-    (el as HTMLElement).hidden = true;
-  });
-}
-
-function positionSubmenuFlyout(submenuId: string) {
-  const wrap = menu.querySelector(`.pet-menu-submenu[data-submenu="${submenuId}"]`);
-  const flyout = wrap?.querySelector(".pet-menu-flyout") as HTMLElement | null;
-  if (!wrap || !flyout) return;
-  flyout.classList.remove("pet-menu-flyout--left");
-  const menuRect = menu.getBoundingClientRect();
-  const flyoutW = flyout.offsetWidth || 168;
-  if (menuRect.right + flyoutW > window.innerWidth - 8) {
-    flyout.classList.add("pet-menu-flyout--left");
-  }
-}
-
-function toggleSubmenu(submenuId: string | null) {
-  if (openSubmenuId === submenuId) {
-    closeAllSubmenus();
-    return;
-  }
-  closeAllSubmenus();
-  if (!submenuId) return;
-  const wrap = menu.querySelector(`.pet-menu-submenu[data-submenu="${submenuId}"]`);
-  const flyout = wrap?.querySelector(".pet-menu-flyout") as HTMLElement | null;
-  if (!wrap || !flyout) return;
-  openSubmenuId = submenuId;
-  wrap.classList.add("is-open");
-  flyout.hidden = false;
-  positionSubmenuFlyout(submenuId);
 }
 
 async function loadConfig(): Promise<PetConfigPayload> {
@@ -750,16 +902,204 @@ async function setWindowSizeOnly(w: number, h: number) {
 
 }
 
-
-
-async function setWindowBoundsOnly(w: number, h: number, x: number, y: number) {
-  const win = getCurrentWindow();
-  const b = clampWindowBounds(w, h, x, y);
-  await win.setSize(new LogicalSize(b.w, b.h));
-  await win.setPosition(new PhysicalPosition(b.x, b.y));
+function clampWindowSizePhysical(w: number, h: number, sf: number) {
+  const minW = Math.round(MIN_W * sf);
+  const maxW = Math.round(MAX_W * sf);
+  const minH = Math.round(MIN_H * sf);
+  const maxH = Math.round(MAX_H * sf);
+  return {
+    w: Math.max(minW, Math.min(maxW, Math.round(w))),
+    h: Math.max(minH, Math.min(maxH, Math.round(h))),
+  };
 }
 
+async function readWindowBoundsPhysical(): Promise<PetWindowBounds> {
+  return invoke<PetWindowBounds>("pet_get_window_bounds");
+}
 
+async function readWindowBounds(): Promise<ResizeBoundsPayload> {
+  const [bounds, sf] = await Promise.all([
+    readWindowBoundsPhysical(),
+    getCurrentWindow().scaleFactor(),
+  ]);
+  return {
+    w: bounds.width / sf,
+    h: bounds.height / sf,
+    x: bounds.x,
+    y: bounds.y,
+  };
+}
+
+/** 屏幕光标 → 窗口内逻辑坐标（与 frame HWND 对齐，避免 outerPosition 偏差） */
+async function cursorClientLogical(): Promise<{ x: number; y: number; screen: PetPoint } | null> {
+  try {
+    const [cursor, bounds, sf] = await Promise.all([
+      cursorPosition(),
+      readWindowBoundsPhysical(),
+      petWindow.scaleFactor(),
+    ]);
+    return {
+      x: (cursor.x - bounds.x) / sf,
+      y: (cursor.y - bounds.y) / sf,
+      screen: { x: cursor.x, y: cursor.y },
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function applyPetWindowBounds(
+  bounds: { w: number; h: number; x: number; y: number },
+  edge: ResizeEdge,
+) {
+  const moveX = edge.includes("w");
+  const moveY = edge.includes("n");
+  const clamped = clampWindowSizePhysical(bounds.w, bounds.h, editResizeScaleFactor);
+  const pos = clampWindowPosition(bounds.x, bounds.y, clamped.w, clamped.h);
+  await invoke("pet_set_window_bounds", {
+    x: pos.x,
+    y: pos.y,
+    width: clamped.w,
+    height: clamped.h,
+    move_x: moveX,
+    move_y: moveY,
+  });
+}
+
+function resizeBoundsKey(bounds: ResizeBoundsPayload) {
+  return `${Math.round(bounds.w)}x${Math.round(bounds.h)}@${bounds.x ?? ""},${bounds.y ?? ""}`;
+}
+
+function applyEditResizeCanvasSync(
+  logW: number,
+  logH: number,
+  prevW: number,
+  prevH: number,
+  edge: ResizeEdge,
+) {
+  const moveNorth = edge.includes("n");
+  const moveWest = edge.includes("w");
+  canvasDisplayW = logW;
+  canvasDisplayH = logH;
+  applyCanvasDisplaySize();
+  if (pet) {
+    pet.resizeCanvasForEditResize(
+      logW,
+      logH,
+      prevW,
+      prevH,
+      moveNorth,
+      moveWest,
+      stageScale,
+    );
+  } else {
+    ensureCanvasAttached();
+    canvas.width = logW;
+    canvas.height = logH;
+  }
+}
+
+function scheduleEditResize(bounds: ResizeBoundsPayload) {
+  pendingResizeBounds = bounds;
+  if (resizeRafId) return;
+  resizeRafId = requestAnimationFrame(() => {
+    resizeRafId = 0;
+    const next = pendingResizeBounds;
+    if (!next || !resizeDragging) return;
+    const key = resizeBoundsKey(next);
+    if (key === lastResizeKey) return;
+    lastResizeKey = key;
+    const edge = resizeEdge;
+    resizeApplySerial = resizeApplySerial
+      .then(async () => {
+        const sf = editResizeScaleFactor || (await getCurrentWindow().scaleFactor());
+        const prevW = canvasDisplayW;
+        const prevH = canvasDisplayH;
+        const logW = Math.max(MIN_W, Math.round(next.w / sf));
+        const logH = Math.max(MIN_H, Math.round(next.h / sf));
+
+        if (next.x !== undefined && next.y !== undefined) {
+          await applyPetWindowBounds(
+            { w: next.w, h: next.h, x: next.x, y: next.y },
+            edge,
+          );
+        } else {
+          await setWindowSizeOnly(logW, logH);
+        }
+
+        applyEditResizeCanvasSync(logW, logH, prevW, prevH, edge);
+      })
+      .catch((err) => {
+        console.error("edit resize apply failed", err);
+      });
+  });
+}
+
+async function commitEditResize(bounds: ResizeBoundsPayload, edge: ResizeEdge = resizeEdge) {
+  await resizeApplySerial;
+  const sf = editResizeScaleFactor || (await getCurrentWindow().scaleFactor());
+  const prevW = canvasDisplayW;
+  const prevH = canvasDisplayH;
+  const logW = Math.max(MIN_W, Math.round(bounds.w / sf));
+  const logH = Math.max(MIN_H, Math.round(bounds.h / sf));
+  if (bounds.x !== undefined && bounds.y !== undefined) {
+    await applyPetWindowBounds(
+      { w: bounds.w, h: bounds.h, x: bounds.x, y: bounds.y },
+      edge,
+    );
+    if (edge.includes("n") || edge.includes("w")) {
+      void savePosition();
+    }
+  } else {
+    await setWindowSizeOnly(logW, logH);
+  }
+  if (logW !== prevW || logH !== prevH) {
+    applyEditResizeCanvasSync(logW, logH, prevW, prevH, edge);
+  } else {
+    syncCanvasToWindow(logW, logH, false);
+  }
+  applyStageTransform();
+  suppressEditBoundsExit(800);
+}
+
+function computeResizeBounds(mx: number, my: number): ResizeBoundsPayload {
+  const edge = resizeEdge;
+  const dx = mx - resizeStart.x;
+  const dy = my - resizeStart.y;
+  let w = resizeStart.w;
+  let h = resizeStart.h;
+  let x = resizeStart.posX;
+  let y = resizeStart.posY;
+  if (edge.includes("e")) w = resizeStart.w + dx;
+  if (edge.includes("w")) {
+    w = resizeStart.w - dx;
+    x = resizeStart.posX + dx;
+  }
+  if (edge.includes("s")) h = resizeStart.h + dy;
+  if (edge.includes("n")) {
+    h = resizeStart.h - dy;
+    y = resizeStart.posY + dy;
+  }
+  const clamped = clampWindowSizePhysical(w, h, editResizeScaleFactor);
+  if (edge.includes("w")) x = resizeStart.posX + (resizeStart.w - clamped.w);
+  if (edge.includes("n")) y = resizeStart.posY + (resizeStart.h - clamped.h);
+  const pos = clampWindowPosition(x, y, clamped.w, clamped.h);
+  return {
+    w: clamped.w,
+    h: clamped.h,
+    x: pos.x,
+    y: pos.y,
+  };
+}
+
+async function syncCanvasFromWindow(refitCanvas = false) {
+  if (!pet) return;
+  const bounds = await readWindowBounds();
+  const w = Math.max(MIN_W, bounds.w);
+  const h = Math.max(MIN_H, bounds.h);
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return;
+  syncCanvasToWindow(w, h, refitCanvas);
+}
 
 async function applyWindowSize(w: number, h: number, refitCanvas = false) {
 
@@ -773,9 +1113,9 @@ async function applyWindowSize(w: number, h: number, refitCanvas = false) {
 
 function syncCanvasToWindow(w: number, h: number, refitCanvas = false) {
 
-  canvasDisplayW = Math.round(w);
+  canvasDisplayW = Math.max(MIN_W, Math.round(w));
 
-  canvasDisplayH = Math.round(h);
+  canvasDisplayH = Math.max(MIN_H, Math.round(h));
 
   applyCanvasDisplaySize();
 
@@ -798,209 +1138,131 @@ function syncCanvasToWindow(w: number, h: number, refitCanvas = false) {
 
 
 function applyCanvasDisplaySize() {
-
+  if (editBoundsMode) {
+    canvasWrap.style.width = "100%";
+    canvasWrap.style.height = "100%";
+    return;
+  }
   canvasWrap.style.width = `${canvasDisplayW}px`;
-
   canvasWrap.style.height = `${canvasDisplayH}px`;
-
 }
-
-
 
 function suppressEditBoundsExit(ms = 400) {
-
-  editBoundsSuppressUntil = Date.now() + ms;
-
+  editBoundsSuppressUntil = Math.max(editBoundsSuppressUntil, Date.now() + ms);
 }
 
-
-
-function lockCanvasDisplaySize() {
-
-  applyCanvasDisplaySize();
-
+async function isCursorOutsidePetWindow(): Promise<boolean> {
+  const [cursor, bounds] = await Promise.all([
+    cursorPosition(),
+    readWindowBoundsPhysical(),
+  ]);
+  return isCursorOutsideWindow(cursor.x, cursor.y, bounds, 12);
 }
 
+async function runEditBoundsPollTick() {
+  if (!editBoundsMode) return;
+  if (editBoundsEnterPending) return;
 
+  let down = false;
+  try {
+    down = await invoke<boolean>("pet_is_left_mouse_down");
+  } catch {
+    return;
+  }
 
-function unlockCanvasDisplaySize() {
+  if (!down) {
+    editBoundsAwaitMouseUp = false;
+    if (resizeDragging && pendingResizeBounds) {
+      const bounds = pendingResizeBounds;
+      const edge = resizeEdge;
+      pendingResizeBounds = null;
+      resizeDragging = false;
+      root.classList.remove("edit-bounds-resizing");
+      void commitEditResize(bounds, edge);
+      suppressEditBoundsExit(800);
+    } else if (offsetDragging) {
+      clampStageOffset();
+      applyStageTransform();
+      offsetDragging = false;
+      resizeDragging = false;
+    } else if (resizeDragging) {
+      resizeDragging = false;
+      root.classList.remove("edit-bounds-resizing");
+    }
+  }
 
-  applyCanvasDisplaySize();
+  const edgeDown = down && !editBoundsPollLeftDown;
+  editBoundsPollLeftDown = down;
 
+  if (Date.now() < editBoundsSuppressUntil) return;
+  if (Date.now() < menuCloseSuppressUntil) return;
+  if (editBoundsAwaitMouseUp) return;
+  if (offsetDragging || resizeDragging || exitEditBoundsInFlight) return;
+  if (!edgeDown) return;
+
+  try {
+    if (await isCursorOutsidePetWindow()) {
+      petMovementLog("outside-check", { outside: true, ...movementLogFlags() });
+      void exitEditBounds("poll-outside");
+    }
+  } catch (err) {
+    petMovementLog("outside-check", { outside: "error", error: String(err), ...movementLogFlags() });
+  }
+}
+
+function startEditBoundsPoll() {
+  editBoundsPollLeftDown = false;
+  ensureClickThroughPoll();
+}
+
+function stopEditBoundsPoll() {
+  editBoundsPollLeftDown = false;
+}
+
+function cancelEditBoundsBlurExit() {
+  if (editBoundsBlurTimer) {
+    petMovementLog("blur-exit-cancel", movementLogFlags());
+    clearTimeout(editBoundsBlurTimer);
+    editBoundsBlurTimer = null;
+  }
 }
 
 
 
 function resetEditOverlayLayout() {
-
   editOverlay.style.inset = "";
-
   editOverlay.style.width = "";
-
   editOverlay.style.height = "";
-
   editOverlay.style.left = "";
-
   editOverlay.style.right = "";
-
   editOverlay.style.top = "";
-
   editOverlay.style.bottom = "";
-
+  root.classList.remove("edit-bounds-resizing");
 }
 
-
-
-function resizeBoundsKey(bounds: { w: number; h: number; x?: number; y?: number }) {
-
-  return `${Math.round(bounds.w)}x${Math.round(bounds.h)}@${bounds.x ?? ""},${bounds.y ?? ""}`;
-
-}
-
-
-
-function scheduleEditResize(bounds: { w: number; h: number; x?: number; y?: number }) {
-
-  pendingResizeBounds = bounds;
-
-  if (resizeRafId) return;
-
-  resizeRafId = requestAnimationFrame(() => {
-
-    resizeRafId = 0;
-
-    const next = pendingResizeBounds;
-
-    if (!next || !resizeDragging) return;
-
-    const key = resizeBoundsKey(next);
-
-    if (key === lastResizeKey) return;
-
-    lastResizeKey = key;
-
-    resizeApplySerial = resizeApplySerial
-
-      .then(async () => {
-
-        if (next.x !== undefined && next.y !== undefined) {
-
-          await setWindowBoundsOnly(next.w, next.h, next.x, next.y);
-
-        } else {
-
-          await setWindowSizeOnly(next.w, next.h);
-
-        }
-
-      })
-
-      .catch(() => {});
-
+async function persistLayoutSnapshot() {
+  const bounds = await readWindowBounds();
+  const phys = await readWindowBoundsPhysical();
+  const saveW = Math.max(MIN_W, bounds.w);
+  const saveH = Math.max(MIN_H, bounds.h);
+  const offset = stageOffsetForPersist();
+  await invoke("pet_save_layout", {
+    width: saveW,
+    height: saveH,
+    scale: stageScale,
+    offsetX: offset.x,
+    offsetY: offset.y,
+    positionWinWidth: phys.width,
+    positionWinHeight: phys.height,
   });
-
 }
 
-
-
-async function commitEditResize(bounds: { w: number; h: number; x?: number; y?: number }) {
-
-  await resizeApplySerial;
-
-  if (bounds.x !== undefined && bounds.y !== undefined) {
-
-    await setWindowBoundsOnly(bounds.w, bounds.h, bounds.x, bounds.y);
-
-    await savePosition();
-
-  } else {
-
-    await setWindowSizeOnly(bounds.w, bounds.h);
-
+async function persistLayoutSnapshotSafe(context: string) {
+  try {
+    await persistLayoutSnapshot();
+  } catch (err) {
+    console.error(`layout save failed (${context})`, err);
   }
-
-  unlockCanvasDisplaySize();
-
-  applyStageTransform();
-
-}
-
-
-
-function clampWindowSize(w: number, h: number) {
-
-  return {
-
-    w: Math.max(MIN_W, Math.min(MAX_W, w)),
-
-    h: Math.max(MIN_H, Math.min(MAX_H, h)),
-
-  };
-
-}
-
-
-
-function computeResizeBounds(mx: number, my: number) {
-
-  const dx = mx - resizeStart.x;
-
-  const dy = my - resizeStart.y;
-
-  let w = resizeStart.w;
-
-  let h = resizeStart.h;
-
-  let x = resizeStart.posX;
-
-  let y = resizeStart.posY;
-
-  const edge = resizeEdge;
-
-  if (edge.includes("e")) {
-
-    w = resizeStart.w + dx;
-
-  }
-
-  if (edge.includes("w")) {
-
-    w = resizeStart.w - dx;
-
-    x = resizeStart.posX + dx;
-
-  }
-
-  if (edge.includes("s")) {
-
-    h = resizeStart.h + dy;
-
-  }
-
-  if (edge.includes("n")) {
-
-    h = resizeStart.h - dy;
-
-    y = resizeStart.posY + dy;
-
-  }
-
-  const clamped = clampWindowSize(w, h);
-
-  if (edge.includes("w")) {
-
-    x = resizeStart.posX + (resizeStart.w - clamped.w);
-
-  }
-
-  if (edge.includes("n")) {
-
-    y = resizeStart.posY + (resizeStart.h - clamped.h);
-
-  }
-
-  return clampWindowBounds(clamped.w, clamped.h, x, y);
-
 }
 
 
@@ -1027,15 +1289,10 @@ async function syncAnimations(
 
 
 function clampStageOffset() {
-
   const maxX = Math.max(60, Math.round(canvasDisplayW * 0.45));
-
   const maxY = Math.max(48, Math.round(canvasDisplayH * 0.45));
-
   stageOffsetX = Math.max(-maxX, Math.min(maxX, stageOffsetX));
-
   stageOffsetY = Math.max(-maxY, Math.min(maxY, stageOffsetY));
-
 }
 
 
@@ -1050,39 +1307,94 @@ function ensureCanvasAttached() {
 
 }
 
+function releaseCanvasGlContext() {
+  try {
+    const gl =
+      canvas.getContext("webgl2") ??
+      canvas.getContext("webgl") ??
+      canvas.getContext("experimental-webgl");
+    if (gl && gl instanceof WebGLRenderingContext) {
+      gl.getExtension("WEBGL_lose_context")?.loseContext();
+    }
+  } catch {
+    // ignore
+  }
+}
 
+function disposePetForExit() {
+  if (appExiting) return;
+  appExiting = true;
+  stopClickThroughPoll();
+  stopEditBoundsPoll();
+  cancelEditBoundsBlurExit();
+  clearBubble();
+  if (resizeRafId) {
+    cancelAnimationFrame(resizeRafId);
+    resizeRafId = 0;
+  }
+  if (dragPositionRaf) {
+    cancelAnimationFrame(dragPositionRaf);
+    dragPositionRaf = 0;
+  }
+  pendingDragPos = null;
+  pointerDown = false;
+  windowDragStarted = false;
+  windowDragAnchorReady = false;
+  pet?.dispose();
+  pet = null;
+  petAssetResolver?.dispose();
+  petAssetResolver = null;
+  releaseCanvasGlContext();
+  petEventUnlisten?.();
+}
 
-function applyStageTransform() {
-
-  stage.style.transformOrigin = "bottom center";
-
-  stage.style.transform = `translate(${stageOffsetX}px, ${stageOffsetY}px) scale(${stageScale})`;
-
+async function isPetWindowVisible(): Promise<boolean> {
+  if (!document.hidden) return true;
+  try {
+    return await getCurrentWindow().isVisible();
+  } catch {
+    return false;
+  }
 }
 
 
 
-async function waitUntilVisibleForLoad(): Promise<void> {
+function applyStageTransform() {
+  stage.style.transformOrigin = editBoundsMode ? "top left" : "bottom center";
+  stage.style.transform = `translate(${stageOffsetX}px, ${stageOffsetY}px) scale(${stageScale})`;
+}
+
+function stageOffsetForPersist(): { x: number; y: number } {
+  if (editBoundsMode) {
+    return convertStageOffsetForOrigin(
+      stageOffsetX,
+      stageOffsetY,
+      stageScale,
+      canvasDisplayW,
+      canvasDisplayH,
+      "top-left",
+      "bottom-center",
+    );
+  }
+  return { x: stageOffsetX, y: stageOffsetY };
+}
+
+
+
+async function waitUntilVisibleForLoad(maxWaitMs = 1200): Promise<void> {
   if (!document.hidden) {
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
-    });
+    await awaitAnimationFrames(2);
     return;
   }
-  await new Promise<void>((resolve) => {
-    const done = () => {
-      document.removeEventListener("visibilitychange", onVis);
-      resolve();
-    };
-    const onVis = () => {
-      if (!document.hidden) {
-        void new Promise<void>((r) => {
-          requestAnimationFrame(() => requestAnimationFrame(() => r()));
-        }).then(done);
-      }
-    };
-    document.addEventListener("visibilitychange", onVis);
-  });
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    if (await isPetWindowVisible()) {
+      await awaitAnimationFrames(2);
+      return;
+    }
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 50));
+  }
+  await awaitAnimationFrames(2);
 }
 
 function awaitAnimationFrames(count: number): Promise<void> {
@@ -1099,11 +1411,9 @@ function awaitAnimationFrames(count: number): Promise<void> {
 }
 
 async function applyStageScale(scale: number) {
-
-  stageScale = Math.max(0.4, Math.min(1.5, scale));
-
+  stageScale = Math.round(Math.max(0.4, Math.min(1.5, scale)) * 100) / 100;
+  clampStageOffset();
   applyStageTransform();
-
 }
 
 
@@ -1114,6 +1424,7 @@ function applyStageOffset(x: number, y: number) {
 
   stageOffsetY = Math.round(y);
 
+  clampStageOffset();
   applyStageTransform();
 
 }
@@ -1122,10 +1433,12 @@ function applyStageOffset(x: number, y: number) {
 
 async function initSpine(
   cfg: PetConfigPayload,
-  opts?: { skipBoot?: boolean; skipVisibilityWait?: boolean },
+  opts?: { skipBoot?: boolean; skipVisibilityWait?: boolean; hotReload?: boolean; forceGlTeardown?: boolean },
 ): Promise<boolean> {
 
   const skipBoot = opts?.skipBoot ?? false;
+  const hotReload = opts?.hotReload ?? false;
+  const forceGlTeardown = opts?.forceGlTeardown ?? false;
 
   stageScale = cfg.scale || 0.8;
 
@@ -1138,24 +1451,75 @@ async function initSpine(
   petAssetResolver?.dispose();
   petAssetResolver = createPetAssetResolver(cfg);
   const assets = assetConfigFromPayload(cfg);
-  const [, fallbackUrl] = await Promise.all([
-    preloadModelAssets(cfg.model_id, modelAssetFilenames(cfg), cfg.use_file_src),
-    petAssetResolver.urlFor(cfg.png_file),
-  ]);
+  const assetFiles = [...modelAssetFilenames(cfg), cfg.png_file].filter(Boolean);
+  const hadPet = pet !== null;
+  let fallbackUrl: string;
+  if (cfg.use_file_src) {
+    const warmPromise = warmModelBundleCache(cfg.model_id, assetFiles);
+    fallbackUrl = await Promise.all([
+      warmPromise,
+      petAssetResolver.urlFor(cfg.png_file),
+    ]).then(([, url]) => url);
+  } else {
+    void preloadModelAssets(cfg.model_id, assetFiles, false, cfg.asset_base);
+    fallbackUrl = await petAssetResolver.urlFor(cfg.png_file);
+  }
   lastFallbackSrc = fallbackUrl;
   fallback.src = fallbackUrl;
 
-  const nextW = cfg.window_width || 240;
-  const nextH = cfg.window_height || 320;
-  if (nextW !== canvasDisplayW || nextH !== canvasDisplayH) {
+  let nextW = Math.max(MIN_W, cfg.window_width || 240);
+  let nextH = Math.max(MIN_H, cfg.window_height || 320);
+  if (skipBoot && !hotReload) {
+    try {
+      const frameBounds = await readWindowBounds();
+      if (Number.isFinite(frameBounds.w) && frameBounds.w >= MIN_W) {
+        nextW = Math.max(MIN_W, frameBounds.w);
+      }
+      if (Number.isFinite(frameBounds.h) && frameBounds.h >= MIN_H) {
+        nextH = Math.max(MIN_H, frameBounds.h);
+      }
+    } catch {
+      // 使用 DB 尺寸
+    }
+  } else if (hotReload) {
+    nextW = Math.max(MIN_W, canvasDisplayW);
+    nextH = Math.max(MIN_H, canvasDisplayH);
+  }
+  const sizeChanged = nextW !== canvasDisplayW || nextH !== canvasDisplayH;
+  if (sizeChanged) {
     await applyWindowSize(nextW, nextH);
   }
 
-  canvasWrap.style.visibility = "hidden";
-  pet?.dispose();
-  pet = null;
-  await awaitAnimationFrames(1);
-  ensureCanvasAttached();
+  if (hotReload) {
+    await awaitAnimationFrames(1);
+    ensureCanvasAttached();
+    if (canvas.width !== canvasDisplayW || canvas.height !== canvasDisplayH) {
+      canvas.width = canvasDisplayW;
+      canvas.height = canvasDisplayH;
+    }
+  } else if (!hadPet && !forceGlTeardown) {
+    if (!skipBoot) showBootHint();
+    canvasWrap.style.visibility = "hidden";
+    fallback.style.display = "none";
+    ensureCanvasAttached();
+    if (canvas.width !== canvasDisplayW || canvas.height !== canvasDisplayH) {
+      canvas.width = canvasDisplayW;
+      canvas.height = canvasDisplayH;
+    }
+  } else {
+    canvasWrap.style.visibility = "hidden";
+    fallback.style.display = "none";
+    showBootHint();
+    pet?.dispose();
+    pet = null;
+    releaseCanvasGlContext();
+    canvas.width = 0;
+    canvas.height = 0;
+    await awaitAnimationFrames(2);
+    ensureCanvasAttached();
+    canvas.width = canvasDisplayW;
+    canvas.height = canvasDisplayH;
+  }
 
   if (!opts?.skipVisibilityWait) {
     await waitUntilVisibleForLoad();
@@ -1180,14 +1544,15 @@ async function initSpine(
 
 
   try {
-
-    canvasWrap.style.display = "block";
-
-    fallback.style.display = "none";
+    if (hotReload && pet) {
+      pet.dispose();
+      pet = null;
+    }
 
     pet = new SpinePet(canvas, assets, {
       resolveAssetUrl: petAssetResolver.urlFor,
-      skipBootAnimation: skipBoot,
+      readViaIpc: petAssetResolver.readViaIpc,
+      skipBootAnimation: true,
       ...animOptions,
       onTap: (animation) => {
         if (!animation) return;
@@ -1198,7 +1563,10 @@ async function initSpine(
 
     const names = await pet.start();
 
-   pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
+    canvasWrap.style.display = "block";
+    fallback.style.display = "none";
+
+   pet.resizeCanvas(canvasDisplayW, canvasDisplayH, !hotReload);
 
     pet.configureAnimations({
       idleAnimation: cfg.idle_animation,
@@ -1226,7 +1594,11 @@ async function initSpine(
     }
 
     canvasWrap.style.visibility = "visible";
-    startClickThrough();
+    hideBootHint();
+    clearPetLoadError();
+    if (!hotReload) {
+      startClickThrough();
+    }
 
     if (names.length > 0) {
       void syncAnimations(cfg.model_id, names, cfg.idle_animation).then((meta) => {
@@ -1247,12 +1619,20 @@ async function initSpine(
     }
     return true;
 
-  } catch {
-    // Spine 不可用时由静态图兜底
+  } catch (err) {
+    console.error("Spine 初始化失败", err);
+    pet?.dispose();
+    pet = null;
+    if (hotReload) {
+      hideBootHint();
+      return false;
+    }
+    releaseCanvasGlContext();
     canvasWrap.style.visibility = "visible";
     canvasWrap.style.display = "none";
 
     fallback.style.display = "block";
+    hideBootHint();
 
     applyStageTransform();
     startClickThrough();
@@ -1266,9 +1646,14 @@ async function initSpine(
 
 let reloadSerial: Promise<void> = Promise.resolve();
 let reloadInProgress = false;
+let reloadEverStarted = false;
 let resumeInFlight = false;
 let lastResumeAt = 0;
 const RESUME_DEBOUNCE_MS = 250;
+
+function clearPetLoadError() {
+  document.getElementById("pet-load-error")?.remove();
+}
 
 function showPetLoadError(err: unknown) {
   let banner = document.getElementById("pet-load-error");
@@ -1296,8 +1681,14 @@ function showPetLoadError(err: unknown) {
 }
 
 async function resumePetFromHidden() {
-  if (reloadInProgress || mainWindowCovering) return;
+  if (mainWindowCovering) return;
   if (Date.now() < suppressVisibilityUntil) return;
+  if (reloadInProgress) {
+    void reloadSerial.then(() => {
+      if (!document.hidden && !mainWindowCovering) void resumePetFromHidden();
+    });
+    return;
+  }
   const now = Date.now();
   if (resumeInFlight || now - lastResumeAt < RESUME_DEBOUNCE_MS) return;
   resumeInFlight = true;
@@ -1309,7 +1700,7 @@ async function resumePetFromHidden() {
       return;
     }
     pet.setRenderPaused(false);
-    pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
+    await syncCanvasFromWindow(false);
     applyStageTransform();
   } finally {
     resumeInFlight = false;
@@ -1318,24 +1709,43 @@ async function resumePetFromHidden() {
 
 async function reloadPet() {
 
+  if (appExiting) return;
+
+  if (editBoundsMode) {
+    await exitEditBounds();
+  }
+
   reloadSerial = reloadSerial.then(async () => {
     reloadInProgress = true;
+    reloadEverStarted = true;
     const skipBoot = pet !== null;
+    if (!skipBoot) showBootHint();
     try {
-      await invoke("pet_clear_spine_ready");
-
-      await waitUntilVisibleForLoad();
-
-      const cfg = await loadConfig();
-
-      await Promise.all([
+      const [, cfg] = await Promise.all([
         refreshScreenBounds(),
-        initSpine(cfg, { skipBoot, skipVisibilityWait: true }),
+        loadConfig(),
       ]);
+      applyBubbleEnabledFromConfig(cfg.bubble_enabled);
 
-      clearBootHint();
-      if (pet) {
+      let ok = false;
+      if (skipBoot) {
+        ok = await initSpine(cfg, { skipBoot: true, skipVisibilityWait: true, hotReload: true });
+      }
+      if (!ok) {
+        await awaitAnimationFrames(1);
+        ok = await initSpine(cfg, {
+          skipBoot: true,
+          skipVisibilityWait: true,
+          hotReload: false,
+          forceGlTeardown: skipBoot,
+        });
+      }
+
+      if (ok && pet) {
         await invoke("pet_mark_spine_ready");
+        clearPetLoadError();
+      } else if (!ok) {
+        showPetLoadError(new Error("Spine 模型加载失败，已显示静态图"));
       }
     } catch (e) {
 
@@ -1350,10 +1760,10 @@ async function reloadPet() {
       applyStageTransform();
 
       showPetLoadError(e);
-
-      clearBootHint();
     } finally {
+      hideBootHint();
       reloadInProgress = false;
+      void restoreNormalInteraction();
     }
 
   });
@@ -1366,37 +1776,62 @@ async function reloadPet() {
 let suppressVisibilityUntil = 0;
 let mainWindowCovering = false;
 
-void listen<number>("pet-main-opening", (ev) => {
-  mainWindowCovering = true;
-  suppressVisibilityUntil = Date.now() + (ev.payload ?? 1500);
-  pet?.setRenderPaused(true);
+const tauriReady = waitForTauriInternals();
+
+void tauriReady.then(() => {
+  void listen("pet-app-exiting", () => {
+    disposePetForExit();
+  });
+
+  void listen<number>("pet-main-opening", (ev) => {
+    mainWindowCovering = true;
+    suppressVisibilityUntil = Date.now() + (ev.payload ?? 1500);
+    pet?.setRenderPaused(true);
+  });
+
+  void listen("pet-main-closed", () => {
+    mainWindowCovering = false;
+    suppressVisibilityUntil = Date.now() + 400;
+    if (pet) {
+      pet.setRenderPaused(false);
+      void syncCanvasFromWindow(false).then(() => {
+        applyStageTransform();
+        startClickThrough();
+      });
+      return;
+    }
+    void resumePetFromHidden();
+  });
+
+  void listen("pet-hidden", () => {
+    mainWindowCovering = false;
+    petMenuOpen = false;
+    pendingBubble = null;
+    stopClickThrough();
+    pet?.setRenderPaused(true);
+    if (editBoundsMode) {
+      void abandonEditBoundsOnHidden();
+    }
+  });
 });
 
-void listen("pet-main-closed", () => {
-  mainWindowCovering = false;
-  suppressVisibilityUntil = Date.now() + 400;
-  if (pet) {
-    pet.setRenderPaused(false);
-    pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
-    applyStageTransform();
-    startClickThrough();
-    return;
-  }
-  void resumePetFromHidden();
-});
+const petReloadUnlistenPromise = tauriReady.then(() =>
+  listen("pet-reload", () => {
+    void reloadPet();
+  }),
+);
 
-const petReloadUnlistenPromise = listen("pet-reload", () => {
-  void reloadPet();
-});
-
-const petResumeUnlistenPromise = listen("pet-resume", () => {
-  void resumePetFromHidden();
-});
+const petResumeUnlistenPromise = tauriReady.then(() =>
+  listen("pet-resume", () => {
+    void resumePetFromHidden();
+  }),
+);
 
 async function refreshPetAnimations() {
   if (!pet) return;
   try {
     const cfg = await loadConfig();
+    applyBubbleEnabledFromConfig(cfg.bubble_enabled);
     pet.configureAnimations({
       idleAnimation: cfg.idle_animation,
       clickAnimation: cfg.click_animation,
@@ -1417,15 +1852,48 @@ async function refreshPetAnimations() {
 
 async function savePosition() {
   try {
-    const win = getCurrentWindow();
-    const pos = await win.outerPosition();
-    const saved = await invoke<PetPoint>("pet_save_position", { x: pos.x, y: pos.y });
-    if (saved.x !== pos.x || saved.y !== pos.y) {
-      await win.setPosition(new PhysicalPosition(saved.x, saved.y));
+    const bounds = await readWindowBoundsPhysical();
+    const saved = await invoke<PetPoint>("pet_save_position", {
+      x: bounds.x,
+      y: bounds.y,
+      win_width: bounds.width,
+      win_height: bounds.height,
+    });
+    if (saved.x !== bounds.x || saved.y !== bounds.y) {
+      await getCurrentWindow().setPosition(new PhysicalPosition(saved.x, saved.y));
     }
-  } catch {
-    // ignore
+    cachedWinPos = { x: saved.x, y: saved.y };
+  } catch (err) {
+    console.error("savePosition failed", err);
   }
+}
+
+async function refreshDragWindowSize() {
+  try {
+    const bounds = await readWindowBoundsPhysical();
+    dragWindowPhysW = bounds.width;
+    dragWindowPhysH = bounds.height;
+  } catch {
+    // keep previous
+  }
+}
+
+function beginOffsetDrag(clientX: number, clientY: number) {
+  if (exitEditBoundsInFlight || editBoundsEnterPending) return;
+  suppressEditBoundsExit(600);
+  offsetDragging = true;
+  void applyClickThrough(false, true);
+  offsetDragStart = {
+    x: clientX,
+    y: clientY,
+    ox: stageOffsetX,
+    oy: stageOffsetY,
+  };
+  petMovementLog("offset-start", {
+    ...movementLogFlags(),
+    offsetDragStart,
+    client: { x: clientX, y: clientY },
+  });
 }
 
 function setWindowDragPreview(active: boolean) {
@@ -1434,17 +1902,32 @@ function setWindowDragPreview(active: boolean) {
 }
 
 async function beginWindowDrag(screenX: number, screenY: number) {
-  if (windowDragStarted) return;
+  if (windowDragStarted && windowDragAnchorReady) return;
+  if (!screenBounds) void refreshScreenBounds();
   windowDragStarted = true;
-  try {
-    const pos = await getCurrentWindow().outerPosition();
-    dragAnchor = { winX: pos.x, winY: pos.y, screenX, screenY };
+  void refreshDragWindowSize();
+  let previewStarted = false;
+  const applyAnchor = (winX: number, winY: number) => {
+    dragAnchor = { winX, winY, screenX, screenY };
     windowDragAnchorReady = true;
-   setWindowDragPreview(true);
-   pet?.playDrag();
- } catch {
-   windowDragStarted = false;
-   windowDragAnchorReady = false;
+    if (!previewStarted) {
+      previewStarted = true;
+      setWindowDragPreview(true);
+      pet?.playDrag();
+    }
+  };
+  if (cachedWinPos) {
+    applyAnchor(cachedWinPos.x, cachedWinPos.y);
+  }
+  try {
+    const bounds = await readWindowBoundsPhysical();
+    cachedWinPos = { x: bounds.x, y: bounds.y };
+    applyAnchor(bounds.x, bounds.y);
+  } catch {
+    if (!windowDragAnchorReady) {
+      windowDragStarted = false;
+      setWindowDragPreview(false);
+    }
   }
 }
 
@@ -1473,117 +1956,6 @@ function endWindowDrag() {
 
 
 
-function positionMenu(clientX: number, clientY: number) {
-  menu.style.left = `${clientX}px`;
-  menu.style.top = `${clientY}px`;
-  requestAnimationFrame(() => {
-    const rect = menu.getBoundingClientRect();
-    const pad = 8;
-    let x = clientX;
-    let y = clientY;
-    if (rect.right > window.innerWidth - pad) {
-      x -= rect.right - window.innerWidth + pad;
-    }
-    if (rect.bottom > window.innerHeight - pad) {
-      y -= rect.bottom - window.innerHeight + pad;
-    }
-    if (x < pad) x = pad;
-    if (y < pad) y = pad;
-    menu.style.left = `${x}px`;
-    menu.style.top = `${y}px`;
-  });
-}
-
-function renderMenuSublist(
-  container: HTMLElement | null,
-  items: { id: string; label: string; active: boolean }[],
-  kind: "character" | "skin",
-) {
-  if (!container) return;
-  container.innerHTML = "";
-  if (items.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "pet-menu-subempty";
-    empty.textContent =
-      kind === "character"
-        ? "暂无收藏人物，请在主窗口人物列表中收藏"
-        : "暂无选项";
-    container.appendChild(empty);
-    return;
-  }
-  for (const item of items) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = `pet-menu-subitem${item.active ? " is-active" : ""}`;
-    btn.dataset.action = kind === "skin" ? "switch-skin" : "switch-character";
-    btn.dataset.id = item.id;
-    btn.textContent = item.label;
-    btn.disabled = item.active || menuSwitchBusy;
-    container.appendChild(btn);
-  }
-}
-
-async function refreshPetMenuPickers() {
-  try {
-    const [characters, favoritesRaw] = await Promise.all([
-      invoke<CharacterInfo[]>("characters_list"),
-      invoke<string | null>("settings_get", { key: FAVORITES_SETTING_KEY }),
-    ]);
-    await loadBubbleEnabled();
-    const active = characters.find((c) => c.active) ?? characters[0];
-    renderMenuSublist(
-      menuSkinsEl,
-      (active?.skins ?? []).map((s) => ({
-        id: s.id,
-        label: s.name,
-        active: s.active,
-      })),
-      "skin",
-    );
-    const favoriteIds = new Set(parseFavoriteIds(favoritesRaw));
-    const favoriteCharacters = characters.filter((c) => favoriteIds.has(c.id));
-    renderMenuSublist(
-      menuCharactersEl,
-      favoriteCharacters.map((c) => ({
-        id: c.id,
-        label: c.name,
-        active: c.active,
-      })),
-      "character",
-    );
-  } catch (e) {
-    console.error("桌宠菜单加载选项失败", e);
-    renderMenuSublist(menuSkinsEl, [], "skin");
-    renderMenuSublist(menuCharactersEl, [], "character");
-  }
-}
-
-function toggleMenu(open?: boolean, clientX?: number, clientY?: number) {
-  const next = open ?? !menu.classList.contains("open");
-  menu.classList.toggle("open", next);
-  if (!next) {
-    closeAllSubmenus();
-    resetMenuView();
-  }
-  if (menuAutoCloseTimer) {
-    clearTimeout(menuAutoCloseTimer);
-    menuAutoCloseTimer = null;
-  }
-  if (next) {
-    positionMenu(
-      clientX ?? Math.round(window.innerWidth * 0.5),
-      clientY ?? Math.round(window.innerHeight * 0.4),
-    );
-    void refreshPetMenuPickers();
-    menuAutoCloseTimer = setTimeout(() => {
-      menu.classList.remove("open");
-      menuAutoCloseTimer = null;
-      startClickThrough();
-    }, MENU_AUTO_CLOSE_MS);
-  }
-  startClickThrough();
-}
-
 function setEditBoundsMode(on: boolean) {
 
   editBoundsMode = on;
@@ -1592,25 +1964,14 @@ function setEditBoundsMode(on: boolean) {
 
   stage.classList.toggle("edit-bounds-active", on);
 
-  const editBtn = menu.querySelector('[data-action="edit-bounds"]');
-
-  if (editBtn) {
-    editBtn.classList.toggle("pet-menu-item--active", on);
-    const label = editBtn.querySelector(".pet-menu-text");
-    if (label) {
-      label.textContent = on ? "完成编辑" : "编辑范围";
-    }
-  }
+  applyCanvasDisplaySize();
 
   if (!on) {
 
     offsetDragging = false;
 
     resizeDragging = false;
-
     pendingResizeBounds = null;
-
-    lastResizeKey = "";
 
     if (resizeRafId) {
 
@@ -1620,82 +1981,236 @@ function setEditBoundsMode(on: boolean) {
 
     }
 
-    unlockCanvasDisplaySize();
-
     resetEditOverlayLayout();
+    stopEditBoundsPoll();
+    applyStageTransform();
+
+    return;
 
   }
 
-  startClickThrough();
+  stopClickThrough();
+  cancelEditBoundsBlurExit();
 
 }
 
 
+
+async function waitForExitEditIdle(maxMs = 4000): Promise<boolean> {
+  const deadline = Date.now() + maxMs;
+  while (exitEditBoundsInFlight && Date.now() < deadline) {
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 40));
+  }
+  return !exitEditBoundsInFlight;
+}
 
 async function enterEditBounds() {
-
-  suppressEditBoundsExit();
-
-  menu.classList.remove("open");
-
-  resetEditOverlayLayout();
-
-  setEditBoundsMode(true);
-
-  pet?.setRenderPaused(false);
-
-  applyCanvasDisplaySize();
-
-}
-
-
-
-async function exitEditBounds() {
-
-  if (!editBoundsMode) return;
-
-  suppressEditBoundsExit();
-
-  setEditBoundsMode(false);
-
-  menu.classList.remove("open");
+  if (editBoundsMode || editBoundsEnterPending || reloadInProgress) return;
+  if (exitEditBoundsInFlight) {
+    petMovementLog("enter-blocked", { detail: "exit-in-flight", ...movementLogFlags() });
+    const idle = await waitForExitEditIdle();
+    if (!idle || editBoundsMode) return;
+  }
+  editBoundsEnterPending = true;
+  const enterT0 = performance.now();
+  petMovementLog("enter-edit", { phase: "start", ...movementLogFlags() });
+  cancelEditBoundsBlurExit();
+  suppressEditBoundsExit(800);
+  editBoundsAwaitMouseUp = true;
 
   try {
-
-    const win = getCurrentWindow();
-
-    const size = await win.innerSize();
-
-    const scale = await win.scaleFactor();
-
-    const w = size.width / scale;
-
-    const h = size.height / scale;
-
-    await invoke("pet_save_layout", {
-
-      width: w,
-
-      height: h,
-
-      scale: stageScale,
-
-      offsetX: stageOffsetX,
-
-      offsetY: stageOffsetY,
-
+    await ensureClickThroughDisabled();
+    if (!screenBounds) {
+      await refreshScreenBounds();
+    }
+    petMovementLog("enter-edit", {
+      phase: "ipc-done",
+      ms: Math.round(performance.now() - enterT0),
+      ...movementLogFlags(),
     });
 
     resetEditOverlayLayout();
+    if (resizeDragging) {
+      await resizeApplySerial;
+    } else {
+      resizeApplySerial = Promise.resolve();
+    }
+    resizeDragging = false;
+    offsetDragging = false;
+    pendingResizeBounds = null;
+    lastResizeKey = "";
 
+    await syncCanvasFromWindow(false);
+
+    const cfg = await loadConfig();
+    stageScale = cfg.scale || 0.8;
+
+    setEditBoundsMode(true);
+
+    const converted = convertStageOffsetForOrigin(
+      cfg.offset_x ?? 0,
+      cfg.offset_y ?? 0,
+      stageScale,
+      canvasDisplayW,
+      canvasDisplayH,
+      "bottom-center",
+      "top-left",
+    );
+    stageOffsetX = converted.x;
+    stageOffsetY = converted.y;
+
+    if (pet) {
+      pet.resizeCanvas(canvasDisplayW, canvasDisplayH, true);
+    }
+    clampStageOffset();
     applyStageTransform();
+    startEditBoundsPoll();
 
+    void petWindow.setFocus().catch(() => {});
+    suppressEditBoundsExit(3500);
+    pet?.setRenderPaused(false);
+    petMovementLog("enter-edit", {
+      phase: "ready",
+      ms: Math.round(performance.now() - enterT0),
+      ...movementLogFlags(),
+    });
+  } catch (err) {
+    console.error("enterEditBounds failed", err);
+    petMovementLog("enter-edit-fail", {
+      error: String(err),
+      ms: Math.round(performance.now() - enterT0),
+      ...movementLogFlags(),
+    });
+    try {
+      const cfg = await loadConfig();
+      stageScale = cfg.scale || 0.8;
+      stageOffsetX = cfg.offset_x ?? 0;
+      stageOffsetY = cfg.offset_y ?? 0;
+      clampStageOffset();
+    } catch {
+      // 恢复失败时仍退出编辑模式
+    }
+    setEditBoundsMode(false);
+    applyStageTransform();
+    void restoreNormalInteraction();
+  } finally {
+    editBoundsEnterPending = false;
+  }
+}
+
+
+
+async function abandonEditBoundsOnHidden() {
+  if (!editBoundsMode) return;
+  stopEditBoundsPoll();
+  cancelEditBoundsBlurExit();
+  offsetDragging = false;
+  resizeDragging = false;
+  pendingResizeBounds = null;
+  if (resizeRafId) {
+    cancelAnimationFrame(resizeRafId);
+    resizeRafId = 0;
+  }
+  await resizeApplySerial;
+  if (pet) {
+    const baked = pet.refitAndConsumeInternalOffset(stageScale);
+    stageOffsetX += baked.dx;
+    stageOffsetY += baked.dy;
+  }
+  const normalOffset = convertStageOffsetForOrigin(
+    stageOffsetX,
+    stageOffsetY,
+    stageScale,
+    canvasDisplayW,
+    canvasDisplayH,
+    "top-left",
+    "bottom-center",
+  );
+  stageOffsetX = normalOffset.x;
+  stageOffsetY = normalOffset.y;
+  setEditBoundsMode(false);
+  resetEditOverlayLayout();
+  try {
+    await persistLayoutSnapshotSafe("pet-hidden");
+  } finally {
+    await restoreNormalInteraction();
+  }
+}
+
+
+
+async function exitEditBounds(reason = "unknown") {
+  if (!editBoundsMode) {
+    petMovementLog("exit-blocked", { reason, detail: "not-in-edit-mode", ...movementLogFlags() });
+    return;
+  }
+  if (editBoundsEnterPending) {
+    petMovementLog("exit-blocked", { reason, detail: "enter-pending", ...movementLogFlags() });
+    return;
+  }
+  if (exitEditBoundsInFlight) {
+    petMovementLog("exit-blocked", { reason, detail: "in-flight", ...movementLogFlags() });
+    return;
+  }
+
+  petMovementLog("exit-attempt", { reason, ...movementLogFlags() });
+  exitEditBoundsInFlight = true;
+
+  await resizeApplySerial;
+
+  const pendingCommit = pendingResizeBounds;
+  const pendingEdge = resizeEdge;
+
+  cancelEditBoundsBlurExit();
+  stopEditBoundsPoll();
+  offsetDragging = false;
+  resizeDragging = false;
+  pendingResizeBounds = null;
+  lastResizeKey = "";
+  resetEditOverlayLayout();
+
+  pet?.setRenderPaused(false);
+  suppressEditBoundsExit(800);
+
+  try {
+    if (pendingCommit) {
+      await commitEditResize(pendingCommit, pendingEdge);
+    }
+    if (pet) {
+      const baked = pet.refitAndConsumeInternalOffset(stageScale);
+      stageOffsetX += baked.dx;
+      stageOffsetY += baked.dy;
+    }
+    const normalOffset = convertStageOffsetForOrigin(
+      stageOffsetX,
+      stageOffsetY,
+      stageScale,
+      canvasDisplayW,
+      canvasDisplayH,
+      "top-left",
+      "bottom-center",
+    );
+    stageOffsetX = normalOffset.x;
+    stageOffsetY = normalOffset.y;
+    setEditBoundsMode(false);
+    await syncCanvasFromWindow(false);
+    resetEditOverlayLayout();
+    clampStageOffset();
+    applyStageTransform();
     applyCanvasDisplaySize();
-
+    await persistLayoutSnapshot();
     await savePosition();
-
-  } catch {
-    // 保存失败时忽略，下次拖动会重试
+  } catch (err) {
+    console.error("exitEditBounds failed", err);
+    petMovementLog("exit-error", { reason, error: String(err), ...movementLogFlags() });
+    setEditBoundsMode(false);
+    applyCanvasDisplaySize();
+    clampStageOffset();
+    applyStageTransform();
+  } finally {
+    exitEditBoundsInFlight = false;
+    petMovementLog("exit-done", { reason, ...movementLogFlags() });
+    void restoreNormalInteraction();
   }
 
 }
@@ -1704,7 +2219,7 @@ async function exitEditBounds() {
 
 resizeHandles.forEach((handle) => {
 
-  handle.addEventListener("mousedown", async (e: Event) => {
+  handle.addEventListener("mousedown", (e: Event) => {
 
     const me = e as MouseEvent;
 
@@ -1714,53 +2229,57 @@ resizeHandles.forEach((handle) => {
 
     e.stopPropagation();
 
+    suppressEditBoundsExit(1200);
+    offsetDragging = false;
+
     const edge = handle.getAttribute("data-edge") as ResizeEdge | null;
 
     if (!edge) return;
 
-    resizeEdge = edge;
+    void beginResizeDrag(me, edge);
 
-    resizeDragging = true;
-
-    pendingResizeBounds = null;
-
-    lastResizeKey = "";
-
-    lockCanvasDisplaySize();
-
-    pet?.setRenderPaused(true);
-
-    const win = getCurrentWindow();
-
-    const [size, sf, pos] = await Promise.all([
-
-      win.innerSize(),
-
-      win.scaleFactor(),
-
-      win.outerPosition(),
-
-    ]);
-
-    resizeStart = {
-
-      x: me.screenX,
-
-      y: me.screenY,
-
-      w: size.width / sf,
-
-      h: size.height / sf,
-
-      posX: pos.x,
-
-      posY: pos.y,
-
-    };
-
-  });
+  }, true);
 
 });
+
+async function beginResizeDrag(me: MouseEvent, edge: ResizeEdge) {
+  if (exitEditBoundsInFlight || editBoundsEnterPending) return;
+  resizeEdge = edge;
+  pendingResizeBounds = null;
+  lastResizeKey = "";
+  offsetDragging = false;
+  suppressEditBoundsExit(1200);
+  root.classList.add("edit-bounds-resizing");
+  resizeDragging = true;
+
+  try {
+    const [bounds, sf] = await Promise.all([
+      readWindowBoundsPhysical(),
+      getCurrentWindow().scaleFactor(),
+    ]);
+    editResizeScaleFactor = sf;
+    resizeStart = {
+      x: me.screenX,
+      y: me.screenY,
+      w: bounds.width,
+      h: bounds.height,
+      posX: bounds.x,
+      posY: bounds.y,
+    };
+    petMovementLog("resize-start", {
+      edge,
+      cursor: movementCursor(me),
+      resizeStart,
+      scaleFactor: editResizeScaleFactor,
+      ...movementLogFlags(),
+    });
+  } catch (err) {
+    console.error("beginResizeDrag failed", err);
+    petMovementLog("resize-end", { edge, error: String(err), aborted: true, ...movementLogFlags() });
+    resizeDragging = false;
+    root.classList.remove("edit-bounds-resizing");
+  }
+}
 
 
 
@@ -1790,8 +2309,8 @@ window.addEventListener("mousemove", (e: Event) => {
     const clamped = clampWindowPosition(
       dragAnchor.winX + dx,
       dragAnchor.winY + dy,
-      canvasDisplayW,
-      canvasDisplayH,
+      dragWindowPhysW,
+      dragWindowPhysH,
     );
 
     scheduleDragPosition(clamped.x, clamped.y);
@@ -1799,21 +2318,21 @@ window.addEventListener("mousemove", (e: Event) => {
   }
 
   if (resizeDragging) {
-
     const bounds = computeResizeBounds(me.screenX, me.screenY);
-
-    pendingResizeBounds =
-
-      resizeEdge.includes("n") || resizeEdge.includes("w")
-
-        ? { w: bounds.w, h: bounds.h, x: bounds.x, y: bounds.y }
-
-        : { w: bounds.w, h: bounds.h };
-
+    pendingResizeBounds = {
+      w: bounds.w,
+      h: bounds.h,
+      x: bounds.x,
+      y: bounds.y,
+    };
+    petMovementLogThrottled(`resize-${resizeEdge}`, "resize-move", {
+      ...movementLogFlags(),
+      cursor: movementCursor(me),
+      bounds: pendingResizeBounds,
+      resizeStart,
+    });
     scheduleEditResize(pendingResizeBounds);
-
     return;
-
   }
 
   if (offsetDragging) {
@@ -1829,6 +2348,13 @@ window.addEventListener("mousemove", (e: Event) => {
       offsetDragStart.oy + dy,
 
     );
+    petMovementLogThrottled("offset-drag", "offset-move", {
+      dx,
+      dy,
+      stageOffsetX,
+      stageOffsetY,
+      ...movementLogFlags(),
+    });
 
   }
 
@@ -1840,8 +2366,11 @@ window.addEventListener("mousemove", (e: Event) => {
 
 
 
-window.addEventListener("mouseup", (e: Event) => {
-  const me = e as MouseEvent;
+document.addEventListener("mouseup", (e: Event) => {
+  handlePointerUp(e as MouseEvent);
+}, true);
+
+function handlePointerUp(me: MouseEvent) {
 
   if (pointerDown && !editBoundsMode && me.button === 0) {
 
@@ -1865,7 +2394,7 @@ window.addEventListener("mouseup", (e: Event) => {
 
       }
 
-      pet?.handleClick();
+      dispatchStageClick(me.clientX, me.clientY);
 
     } else if (windowDragStarted) {
 
@@ -1882,93 +2411,88 @@ window.addEventListener("mouseup", (e: Event) => {
   }
 
   if (resizeDragging && me.button === 0) {
-
     resizeDragging = false;
-
-    pet?.setRenderPaused(false);
-
+    root.classList.remove("edit-bounds-resizing");
     const bounds = pendingResizeBounds;
-
+    const edge = resizeEdge;
     pendingResizeBounds = null;
-
+    petMovementLog("resize-end", { edge, bounds, commit: !!bounds, ...movementLogFlags() });
     if (bounds) {
-
-      void commitEditResize(bounds);
-
+      void commitEditResize(bounds, edge);
+      suppressEditBoundsExit(800);
     } else {
-
-      unlockCanvasDisplaySize();
-
       resetEditOverlayLayout();
-
     }
+    return;
+  }
 
+  if (offsetDragging && me.button === 0) {
+    clampStageOffset();
+    applyStageTransform();
+    petMovementLog("offset-end", {
+      stageOffsetX,
+      stageOffsetY,
+      ...movementLogFlags(),
+    });
   }
 
   offsetDragging = false;
 
-  void syncClickThroughState({ x: me.clientX, y: me.clientY });
-
-});
+  if (!mustCapturePointer()) {
+    void syncClickThroughState({ x: me.clientX, y: me.clientY });
+  }
+}
 
 
 
 window.addEventListener(
-
   "wheel",
-
   (e) => {
-
     if (!editBoundsMode) return;
-
     e.preventDefault();
-
     const delta = e.deltaY > 0 ? -0.05 : 0.05;
-
     void applyStageScale(stageScale + delta);
-
   },
-
   { passive: false },
-
 );
-
-
 
 stage.addEventListener("mousedown", (e) => {
 
   if (e.button !== 0) return;
 
-  if (menu.classList.contains("open") && !menu.contains(e.target as Node)) {
-    toggleMenu(false);
+  if (petMenuOpen) {
+    e.preventDefault();
+    void invoke("pet_menu_hide");
     return;
   }
 
   if (editBoundsMode) {
-
+    if (exitEditBoundsInFlight || editBoundsEnterPending) return;
     e.preventDefault();
-
-    offsetDragging = true;
-    void applyClickThrough(false);
-
-    offsetDragStart = {
-
-      x: e.clientX,
-
-      y: e.clientY,
-
-      ox: stageOffsetX,
-
-      oy: stageOffsetY,
-
-    };
-
+    const edge = hitTestEditEdge(e.clientX, e.clientY);
+    if (edge) {
+      suppressEditBoundsExit(1200);
+      void beginResizeDrag(e, edge);
+      return;
+    }
+    if (!hitInteractive(e.clientX, e.clientY)) {
+      void exitEditBounds("click-empty");
+      return;
+    }
+    suppressEditBoundsExit(1200);
+    offsetDragging = false;
+    beginOffsetDrag(e.clientX, e.clientY);
     return;
-
   }
 
+  suppressClickCapture(DOUBLE_CLICK_MS);
+
   pointerDown = true;
-  void applyClickThrough(false);
+  void applyClickThrough(false, true);
+  void refreshDragWindowSize();
+  void readWindowBoundsPhysical().then((bounds) => {
+    cachedWinPos = { x: bounds.x, y: bounds.y };
+  });
 
   windowDragStarted = false;
 
@@ -1992,58 +2516,32 @@ stage.addEventListener("mousedown", (e) => {
 
 
 
-stage.addEventListener("dblclick", async (e) => {
-
-  e.preventDefault();
-
-  pointerDown = false;
-
-  windowDragStarted = false;
-
-  windowDragAnchorReady = false;
-
-  endWindowDrag();
-
-  await invoke("pet_open_main", { page: null });
-
-});
-
-
-
 stage.addEventListener("contextmenu", (e) => {
-
+  if (!hitInteractive(e.clientX, e.clientY)) return;
   e.preventDefault();
-
-  openPetMenu(e.clientX, e.clientY);
-
+  void applyClickThrough(false, true).then(() => openPetMenu());
 });
-
-
 
 root.addEventListener("contextmenu", (e) => {
-
   if (e.target === stage || stage.contains(e.target as Node)) return;
-
+  if (!hitInteractive(e.clientX, e.clientY)) return;
   e.preventDefault();
-
-  openPetMenu(e.clientX, e.clientY);
-
+  void applyClickThrough(false, true).then(() => openPetMenu());
 });
 
-
-
-function openPetMenu(clientX?: number, clientY?: number) {
-
-  if (menu.classList.contains("open")) {
-
-    toggleMenu(false);
-
-    return;
-
+async function openPetMenu() {
+  if (rightClickMenuLock) return;
+  rightClickMenuLock = true;
+  try {
+    await invoke<boolean>("pet_menu_toggle_at_cursor");
+  } catch (err) {
+    console.error("打开桌宠菜单失败", err);
+    if (!petMenuOpen && !shouldDeferClickThrough()) startClickThrough();
+  } finally {
+    window.setTimeout(() => {
+      rightClickMenuLock = false;
+    }, 250);
   }
-
-  toggleMenu(true, clientX, clientY);
-
 }
 
 
@@ -2056,38 +2554,7 @@ document.addEventListener("mousedown", (e) => {
 
   }
 
-  if (menu.classList.contains("open") && !menu.contains(e.target as Node)) {
-    toggleMenu(false);
-    return;
-  }
-
-  if (editBoundsMode) {
-
-    if (isInsideEditArea(e.target)) {
-
-      return;
-
-    }
-
-    void exitEditBounds();
-
-    return;
-
-  }
-
-});
-
-
-
-document.addEventListener("click", (e) => {
-
-  if (Date.now() < editBoundsSuppressUntil) {
-
-    return;
-
-  }
-
-  if (menu.contains(e.target as Node)) {
+  if (resizeDragging || offsetDragging) {
 
     return;
 
@@ -2101,7 +2568,11 @@ document.addEventListener("click", (e) => {
 
     }
 
-    void exitEditBounds();
+    petMovementLog("mousedown-outside", {
+      target: e.target instanceof Element ? e.target.className : String(e.target),
+      ...movementLogFlags(),
+    });
+    void exitEditBounds("mousedown-outside");
 
     return;
 
@@ -2111,117 +2582,34 @@ document.addEventListener("click", (e) => {
 
 
 
-void getCurrentWindow().listen("tauri://blur", () => {
-  if (Date.now() < editBoundsSuppressUntil) {
-    return;
-  }
-  toggleMenu(false);
-  if (editBoundsMode) {
-    void exitEditBounds();
-  }
-});
+void tauriReady.then(() => {
+  void getCurrentWindow().listen("tauri://blur", () => {
+    if (!editBoundsMode || exitEditBoundsInFlight) return;
+    if (Date.now() < editBoundsSuppressUntil) return;
+    if (Date.now() < menuCloseSuppressUntil) return;
+    void exitEditBounds("blur");
+  });
 
-
-
-menu.addEventListener("mouseenter", () => {
-  if (menuAutoCloseTimer) {
-    clearTimeout(menuAutoCloseTimer);
-    menuAutoCloseTimer = null;
-  }
-});
-
-
-
-menu.addEventListener("mousedown", (e) => {
-  e.stopPropagation();
-});
-
-menu.addEventListener("click", async (e) => {
-
-  e.stopPropagation();
-
-  const btn = (e.target as HTMLElement).closest("button");
-
-  if (!btn) return;
-
-  const action = btn.getAttribute("data-action");
-
-  if (action === "toggle-bubble") {
-    void setBubbleEnabled(!bubbleEnabled);
-    return;
-  }
-
-  if (action === "open-characters-menu") {
-    setMenuView("characters");
-    return;
-  }
-
-  if (action === "menu-back") {
-    setMenuView("main");
-    return;
-  }
-
-  if (action === "submenu") {
-    const submenuId = btn.getAttribute("data-submenu");
-    toggleSubmenu(submenuId);
-    return;
-  }
-
-  if (action === "switch-skin" || action === "switch-character") {
-    const id = btn.getAttribute("data-id");
-    if (!id || menuSwitchBusy) return;
-    menuSwitchBusy = true;
-    toggleMenu(false);
-    try {
-      if (action === "switch-character") {
-        await invoke("characters_set_active", { characterId: id });
-      } else {
-        const characters = await invoke<CharacterInfo[]>("characters_list");
-        const active = characters.find((c) => c.active);
-        if (active) {
-          await invoke("characters_set_skin", { characterId: active.id, skinId: id });
-        }
-      }
-    } catch (err) {
-      console.error("桌宠菜单切换失败", err);
-      showPetLoadError(err);
-    } finally {
-      menuSwitchBusy = false;
-    }
-    return;
-  }
-
-  if (action === "edit-bounds") {
-
+  void getCurrentWindow().listen("tauri://focus", () => {
     if (editBoundsMode) {
-
-      await exitEditBounds();
-
-    } else {
-
-      await enterEditBounds();
-
+      cancelEditBoundsBlurExit();
     }
+  });
+});
 
-    return;
-
-  }
-
-  toggleMenu(false);
-
-  try {
-    if (action === "main") {
-      await invoke("pet_open_main", { page: null });
-    } else if (action === "hide") {
-      await invoke("pet_hide", { destroy: false });
-    } else if (action === "quit") {
-      await invoke("app_exit");
+window.addEventListener("keydown", (e) => {
+  if (!editBoundsMode || e.key !== "Escape") return;
+  e.preventDefault();
+  petMovementLog("esc-exit", movementLogFlags());
+  offsetDragging = false;
+  void (async () => {
+    if (resizeDragging) {
+      resizeDragging = false;
+      root.classList.remove("edit-bounds-resizing");
+      resetEditOverlayLayout();
     }
-  } catch (err) {
-    console.error("桌宠菜单操作失败", err);
-    showPetLoadError(err);
-  }
-
+    await exitEditBounds("esc");
+  })();
 });
 
 
@@ -2241,7 +2629,7 @@ document.addEventListener("visibilitychange", () => {
     }
     void resumePetFromHidden();
   }
-  startClickThrough();
+  if (!document.hidden && !shouldDeferClickThrough()) startClickThrough();
 });
 
 
@@ -2277,8 +2665,39 @@ async function setupPetEvents() {
     // debounce 由 Rust 端处理，此处仅预留
   });
 
+  const unlistenEditBounds = await listen("pet-enter-edit-bounds", () => {
+    void enterEditBounds();
+  });
+
+  const unlistenMenuState = await listen<boolean>("pet-menu-state", (ev) => {
+    const wasOpen = petMenuOpen;
+    petMenuOpen = !!ev.payload;
+    if (wasOpen && !petMenuOpen) {
+      menuCloseSuppressUntil = Date.now() + 1800;
+      suppressEditBoundsExit(1800);
+    }
+    if (!petMenuOpen) {
+      prevLeftMouseDown = false;
+      if (!shouldDeferClickThrough()) startClickThrough();
+    }
+  });
+
   const unlistenClickThrough = await listen("pet-sync-click-through", () => {
-    startClickThrough();
+    if (!petMenuOpen && !shouldDeferClickThrough()) startClickThrough();
+  });
+
+  const unlistenBubble = await listen<boolean>("pet-bubble-enabled-changed", (ev) => {
+    applyBubbleEnabledFromConfig(ev.payload);
+    if (!ev.payload) clearBubble();
+  });
+
+  const unlistenScale = await listen<number>("pet-scale-changed", (ev) => {
+    if (appExiting || editBoundsMode) return;
+    const scale = ev.payload;
+    if (typeof scale !== "number") return;
+    void applyStageScale(scale);
+    clampStageOffset();
+    applyStageTransform();
   });
 
   petEventUnlisten = () => {
@@ -2288,19 +2707,50 @@ async function setupPetEvents() {
     unlistenAnimations();
     unlistenPreview();
     unlistenContext();
+    unlistenEditBounds();
+    unlistenMenuState();
     unlistenClickThrough();
+    unlistenBubble();
+    unlistenScale();
     petEventUnlisten = null;
   };
 
   if (import.meta.hot) {
-    import.meta.hot.dispose(() => petEventUnlisten?.());
+    import.meta.hot.dispose(() => {
+      petEventUnlisten?.();
+      stopClickThroughPoll();
+      stopEditBoundsPoll();
+      pet?.dispose();
+      pet = null;
+      petAssetResolver?.dispose();
+      petAssetResolver = null;
+      releaseCanvasGlContext();
+    });
   }
 }
 
 async function bootPetWindow() {
+  await waitForTauriInternals();
+  try {
+    const dbPath = await invoke<string>("app_get_data_path");
+    const dataDir = dbPath.replace(/[\\/][^\\/]+$/, "");
+    initPetMovementLog(
+      (lines) => invoke("pet_append_movement_logs", { lines }),
+      dataDir,
+    );
+  } catch (err) {
+    console.error("pet movement log init failed", err);
+    initPetMovementLog(async () => {});
+  }
+  void refreshScreenBounds();
   await setupPetEvents();
   await loadBubbleEnabled();
-  // 首载由 show_pet 在 pet.html 就绪后 nudge；不再用定时兜底 reload，避免与 nudge 双重重载碎块
+  // 首启仅依赖 Rust nudge；短兜底防监听器就绪前 nudge 丢失（勿立即 reload，避免与 nudge 双重重载）
+  window.setTimeout(() => {
+    if (!pet && !reloadInProgress && !reloadEverStarted) {
+      void reloadPet();
+    }
+  }, 600);
 }
 
 void bootPetWindow();
