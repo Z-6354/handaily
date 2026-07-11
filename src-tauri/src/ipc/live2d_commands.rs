@@ -90,6 +90,36 @@ pub async fn autostart_set_enabled(
     crate::system::autostart::set_enabled(&app, &db, enabled)
 }
 
+#[derive(Serialize)]
+pub struct McpApiStatusPayload {
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub async fn mcp_api_get_status(
+    st: State<'_, Arc<AppState>>,
+) -> Result<McpApiStatusPayload, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    Ok(McpApiStatusPayload {
+        enabled: crate::system::mcp_api::is_enabled(&db),
+    })
+}
+
+#[tauri::command]
+pub async fn mcp_api_set_enabled(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    let prev = crate::system::mcp_api::is_enabled(&db);
+    crate::system::mcp_api::set_enabled(&db, enabled)?;
+    if prev != enabled {
+        app.restart();
+    }
+    Ok(())
+}
+
 // ── 人设导入进度 ──
 
 const PERSONA_WIKI_IMPORT_STEP_TOTAL: u32 = 4;
@@ -1056,10 +1086,27 @@ pub async fn pet_set_bubble_enabled(
     st: State<'_, Arc<AppState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    let db = crate::db::lock_conn(&st.db)?;
-    crate::pet::set_bubble_enabled(&db, enabled)?;
-    let _ = app.emit_to(crate::pet::PET_LABEL, "pet-bubble-enabled-changed", enabled);
+    {
+        let db = crate::db::lock_conn(&st.db)?;
+        crate::pet::set_bubble_enabled(&db, enabled)?;
+    }
+    for label in [
+        crate::pet::PET_LABEL,
+        crate::pet::PET_MENU_LABEL,
+        "main",
+    ] {
+        let _ = app.emit_to(label, "pet-bubble-enabled-changed", enabled);
+    }
+    if !enabled {
+        let _ = app.emit_to(crate::pet::PET_LABEL, "pet-clear-bubble", ());
+    }
     crate::pet::emit_pet_status_changed(&app);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn pet_clear_bubble(app: tauri::AppHandle) -> Result<(), String> {
+    let _ = app.emit_to(crate::pet::PET_LABEL, "pet-clear-bubble", ());
     Ok(())
 }
 

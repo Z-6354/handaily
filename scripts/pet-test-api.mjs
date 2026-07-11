@@ -8,7 +8,8 @@
  *   node scripts/pet-test-api.mjs snapshot
  *   node scripts/pet-test-api.mjs switch next-skin
  *   node scripts/pet-test-api.mjs favorites
- *   node scripts/pet-test-api.mjs logs --n 20
+ *   node scripts/pet-test-api.mjs speak --text "你好"
+ *   node scripts/pet-test-api.mjs speak random
  */
 
 const BASE = process.env.HANDAILY_TEST_API_URL ?? "http://127.0.0.1:19420";
@@ -89,9 +90,43 @@ async function main() {
       break;
     case "logs": {
       const n = args.n ?? 40;
-      result = await request("GET", `/pet/logs/tail?n=${n}`);
+      if (sub === "movement") {
+        result = await request("GET", `/pet/logs/movement/tail?n=${n}`);
+      } else {
+        result = await request("GET", `/pet/logs/tail?n=${n}`);
+      }
       break;
     }
+    case "interaction":
+      if (sub === "sync") result = await request("POST", "/pet/interaction/sync");
+      else result = await request("GET", "/pet/interaction");
+      break;
+    case "bubble": {
+      const enabled = sub === "on" || sub === "enable" || sub === "true";
+      if (sub === "off" || sub === "disable" || sub === "false") {
+        result = await request("POST", "/pet/bubble/set", { enabled: false });
+      } else if (sub === "on" || sub === "enable" || sub === "true") {
+        result = await request("POST", "/pet/bubble/set", { enabled: true });
+      } else if (args.enabled !== undefined) {
+        result = await request("POST", "/pet/bubble/set", {
+          enabled: args.enabled === "true" || args.enabled === true,
+        });
+      } else {
+        throw new Error("bubble requires on|off or --enabled true|false");
+      }
+      break;
+    }
+    case "main":
+      if (sub === "open") result = await request("POST", "/pet/main/open");
+      else if (sub === "close") result = await request("POST", "/pet/main/close");
+      else throw new Error(`unknown main subcommand: ${sub}`);
+      break;
+    case "click":
+      if (sub === "left") result = await request("POST", "/pet/click/left");
+      else if (sub === "right") result = await request("POST", "/pet/click/right");
+      else if (sub === "double") result = await request("POST", "/pet/click/double");
+      else throw new Error(`unknown click subcommand: ${sub}`);
+      break;
     case "menu":
       if (sub === "open") result = await request("POST", "/pet/menu/open");
       else if (sub === "hide") result = await request("POST", "/pet/menu/hide");
@@ -124,8 +159,57 @@ async function main() {
         throw new Error(`unknown switch subcommand: ${sub}`);
       }
       break;
+    case "speak":
+      if (sub === "random") {
+        result = await request("POST", "/pet/speak/random");
+      } else {
+        const text = args.text ?? rest.join(" ");
+        if (!text) throw new Error("speak requires --text");
+        result = await request("POST", "/pet/speak", {
+          text,
+          animation: args.animation ?? null,
+        });
+      }
+      break;
+    case "edit":
+      if (sub === "enter") result = await request("POST", "/pet/edit/enter");
+      else throw new Error(`unknown edit subcommand: ${sub}`);
+      break;
     case "exit":
       result = await request("POST", "/app/exit");
+      break;
+    case "cursor":
+      if (sub === "set") {
+        const x = Number(args.x);
+        const y = Number(args.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+          throw new Error("cursor set requires --x and --y");
+        }
+        result = await request("POST", "/system/cursor", { x, y });
+      } else {
+        result = await request("GET", "/system/cursor");
+      }
+      break;
+    case "mouse": {
+      const x = Number(args.x);
+      const y = Number(args.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        throw new Error("mouse requires --x and --y");
+      }
+      result = await request("POST", "/system/mouse", {
+        x,
+        y,
+        button: args.button ?? sub ?? "left",
+        action: args.action ?? "click",
+      });
+      break;
+    }
+    case "screenshot":
+      if (sub === "pet") result = await request("GET", "/system/screenshot/pet");
+      else {
+        const maxW = args.max_width ?? args["max-width"] ?? 1280;
+        result = await request("GET", `/system/screenshot?max_width=${maxW}`);
+      }
       break;
     default:
       throw new Error(`unknown command: ${cmd}`);

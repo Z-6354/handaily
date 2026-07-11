@@ -11,8 +11,8 @@ function isImportActive(phase: string): boolean {
   return phase === "scan" || phase === "import" || phase === "paused";
 }
 
-function shouldKeepModalOpen(phase: string): boolean {
-  return isImportActive(phase) || phase === "done" || phase === "error";
+function shouldAutoOpenModal(phase: string): boolean {
+  return isImportActive(phase);
 }
 
 export function useWikiBulkImport() {
@@ -25,7 +25,7 @@ export function useWikiBulkImport() {
     const payload = normalizeWikiBulkImportProgress(raw);
     lastUpdatedRef.current = payload.updated_at_ms > 0 ? payload.updated_at_ms : Date.now();
     setProgress(payload);
-    if (shouldKeepModalOpen(payload.phase)) {
+    if (shouldAutoOpenModal(payload.phase)) {
       setOpen(true);
     }
     if (pollTimer.current) {

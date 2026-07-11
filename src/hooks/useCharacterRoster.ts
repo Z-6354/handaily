@@ -149,6 +149,22 @@ export function useCharacterRoster(options: {
     void loadCurrentPage();
   }, [loadCurrentPage]);
 
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listen<boolean>("main-window-visible", (ev) => {
+      if (!ev.payload) return;
+      void loadCurrentPage();
+      window.setTimeout(() => {
+        void loadCurrentPage();
+      }, 350);
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
+  }, [loadCurrentPage]);
+
   return {
     characters,
     total,

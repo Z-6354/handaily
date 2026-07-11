@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -105,6 +106,56 @@ pub fn build_avatar_path_index(data_dir: &Path) -> HashMap<String, String> {
         }
     }
     map
+}
+
+struct AvatarIndexCache {
+    fingerprint: u64,
+    index: HashMap<String, String>,
+}
+
+static AVATAR_INDEX: OnceLock<Mutex<AvatarIndexCache>> = OnceLock::new();
+
+fn avatars_dir_fingerprint(data_dir: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
+    let dir = avatars_dir(data_dir);
+    if let Ok(m) = fs::metadata(&dir) {
+        m.len().hash(&mut h);
+        if let Ok(t) = m.modified() {
+            t.hash(&mut h);
+        }
+    }
+    if dir.is_dir() {
+        if let Ok(rd) = fs::read_dir(&dir) {
+            let mut stems: Vec<_> = rd
+                .flatten()
+                .filter(|e| e.path().is_file())
+                .filter_map(|e| e.path().file_stem().map(|s| s.to_owned()))
+                .collect();
+            stems.sort();
+            for stem in stems {
+                stem.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+/// 带缓存的头像路径索引（人物列表分页高频路径）
+pub fn cached_avatar_path_index(data_dir: &Path) -> HashMap<String, String> {
+    let fp = avatars_dir_fingerprint(data_dir);
+    let lock = AVATAR_INDEX.get_or_init(|| {
+        Mutex::new(AvatarIndexCache {
+            fingerprint: 0,
+            index: HashMap::new(),
+        })
+    });
+    let mut cache = lock.lock().unwrap_or_else(|e| e.into_inner());
+    if cache.fingerprint != fp || cache.index.is_empty() {
+        cache.fingerprint = fp;
+        cache.index = build_avatar_path_index(data_dir);
+    }
+    cache.index.clone()
 }
 
 pub fn count_avatar_files(data_dir: &Path) -> usize {
@@ -273,10 +324,23 @@ const AVATAR_STARTUP_DELAY_SECS: u64 = 1;
 const AVATAR_BATCH_SIZE: usize = 48;
 const AVATAR_BATCH_PAUSE_SECS: u64 = 2;
 
+async fn interruptible_sleep_secs(st: &AppState, secs: u64) {
+    let mut remaining = Duration::from_secs(secs);
+    let step = Duration::from_millis(100);
+    while remaining > Duration::ZERO {
+        if st.stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        let nap = remaining.min(step);
+        tokio::time::sleep(nap).await;
+        remaining = remaining.saturating_sub(nap);
+    }
+}
+
 /// 应用启动后后台分批下载缺失头像，落盘到 data/characters/avatars
 pub fn spawn_sync_on_startup(app: AppHandle, st: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(AVATAR_STARTUP_DELAY_SECS)).await;
+        interruptible_sleep_secs(&st, AVATAR_STARTUP_DELAY_SECS).await;
 
         if resolve_blhx_db_path().is_err() {
             crate::log::warn("avatar sync skipped: blhx sqlite not found");
@@ -304,7 +368,7 @@ pub fn spawn_sync_on_startup(app: AppHandle, st: Arc<AppState>) {
                 let _ = app.emit("avatars-cached", paths);
             }
 
-            tokio::time::sleep(Duration::from_secs(AVATAR_BATCH_PAUSE_SECS)).await;
+            interruptible_sleep_secs(&st, AVATAR_BATCH_PAUSE_SECS).await;
         }
     });
 }

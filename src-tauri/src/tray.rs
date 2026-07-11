@@ -5,13 +5,20 @@ use std::sync::Arc;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
-    Emitter, Manager,
+    Manager,
 };
 
 use crate::state::AppState;
 
+pub const TRAY_ID: &str = "xiaohan-tray";
+
 pub struct TrayMenuState {
     pub pet_toggle_item: MenuItem<tauri::Wry>,
+}
+
+/// 退出时立即移除托盘图标（进程收尾可能较慢，避免图标长时间残留）。
+pub fn dismiss_tray_icon(app: &tauri::AppHandle) {
+    let _ = app.remove_tray_by_id(TRAY_ID);
 }
 
 pub fn sync_pet_toggle_label(app: &tauri::AppHandle) {
@@ -35,7 +42,7 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         pet_toggle_item: pet_toggle.clone(),
     });
 
-    let mut tray_builder = TrayIconBuilder::new().tooltip("小寒桌宠");
+    let mut tray_builder = TrayIconBuilder::with_id(TRAY_ID).tooltip("小寒桌宠");
     if let Some(icon) = app.default_window_icon().cloned() {
         tray_builder = tray_builder.icon(icon);
     }
@@ -78,7 +85,7 @@ pub fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     if let Some(win) = app.get_webview_window("main") {
                         if win.is_visible().unwrap_or(false) {
                             let _ = win.hide();
-                            let _ = win.emit("main-window-visible", false);
+                            crate::pet::emit_main_window_visible(app, false);
                             crate::pet::restore_pet_topmost_if_visible(app);
                         } else if let Err(e) = crate::pet::show_main_window(app, None) {
                             crate::log::warn(format!("显示主窗口失败: {e}"));

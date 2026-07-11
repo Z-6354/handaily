@@ -26,6 +26,7 @@ export type PetMoveEvent =
   | "esc-exit"
   | "click-through"
   | "restore-interaction"
+  | "test-action"
   | "window-drag-move";
 
 export type PetMovementLogPayload = Record<string, unknown>;

@@ -1,11 +1,13 @@
 //! Windows：主窗口「最大化」= 铺满工作区（不含任务栏），拦截系统全屏最大化。
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Once;
 
 use tauri::{PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
-use windows::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
+use windows::Win32::UI::Controls::{InitCommonControlsEx, INITCOMMONCONTROLSEX, ICC_STANDARD_CLASSES};
+use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetAncestor, IsZoomed, SetWindowPos, ShowWindow, GA_ROOT, HTCAPTION, MINMAXINFO, SC_MAXIMIZE,
     SIZE_MAXIMIZED, SWP_FRAMECHANGED, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WM_GETMINMAXINFO,
@@ -14,38 +16,61 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 const SUBCLASS_ID: usize = 0x5A48_414E;
 static APPLYING_WORK_AREA: AtomicBool = AtomicBool::new(false);
-static HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
+static COMCTL_INIT: Once = Once::new();
+static mut HOOK_FRAME_HWND: Option<isize> = None;
 
-/// 安装窗口子类（挂在顶层 frame HWND 上）。
+fn ensure_comctl_v6() {
+    COMCTL_INIT.call_once(|| {
+        unsafe {
+            let mut icc = INITCOMMONCONTROLSEX {
+                dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+                dwICC: ICC_STANDARD_CLASSES,
+            };
+            let _ = InitCommonControlsEx(&mut icc);
+        }
+    });
+}
+
+fn hook_frame_hwnd() -> Option<isize> {
+    unsafe { HOOK_FRAME_HWND }
+}
+
+fn set_hook_frame_hwnd(raw: isize) {
+    unsafe {
+        HOOK_FRAME_HWND = if raw == 0 { None } else { Some(raw) };
+    }
+}
+
+/// 安装窗口子类（挂在顶层 frame HWND 上）。应在窗口已 show 后调用。
 pub fn install_maximize_work_area_hook(win: &WebviewWindow) -> Result<(), String> {
-    if HOOK_INSTALLED.load(Ordering::Relaxed) {
+    ensure_comctl_v6();
+    let hwnd = frame_hwnd(win.hwnd().map_err(|e| e.to_string())?);
+    let raw = hwnd.0 as isize;
+    if hook_frame_hwnd() == Some(raw) {
         return Ok(());
     }
-    let hwnd = frame_hwnd(win.hwnd().map_err(|e| e.to_string())?);
     unsafe {
+        let _ = RemoveWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID);
         if !SetWindowSubclass(hwnd, Some(subclass_proc), SUBCLASS_ID, 0).as_bool() {
-            return Err("SetWindowSubclass 失败".into());
+            let code = windows::Win32::Foundation::GetLastError().0;
+            return Err(format!("SetWindowSubclass 失败 (GetLastError={code})"));
         }
     }
-    HOOK_INSTALLED.store(true, Ordering::Relaxed);
+    set_hook_frame_hwnd(raw);
     Ok(())
 }
 
 /// 退出前移除子类，避免 HWND 销毁后仍收到窗口消息。
 pub fn uninstall_maximize_work_area_hook(win: &WebviewWindow) {
-    if !HOOK_INSTALLED.load(Ordering::Relaxed) {
-        return;
-    }
     let Ok(hwnd) = win.hwnd() else {
-        HOOK_INSTALLED.store(false, Ordering::Relaxed);
+        set_hook_frame_hwnd(0);
         return;
     };
     let frame = frame_hwnd(hwnd);
     unsafe {
-        use windows::Win32::UI::Shell::RemoveWindowSubclass;
         let _ = RemoveWindowSubclass(frame, Some(subclass_proc), SUBCLASS_ID);
     }
-    HOOK_INSTALLED.store(false, Ordering::Relaxed);
+    set_hook_frame_hwnd(0);
 }
 
 fn frame_hwnd(hwnd: HWND) -> HWND {

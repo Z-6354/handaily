@@ -8,8 +8,6 @@ import {
   type HelpContent,
 } from "../lib/helpContent";
 import { xiaohan } from "../lib/xiaohan";
-
-const BILIBILI_HOME = "https://space.bilibili.com/146915875";
 const IS_DEBUG = import.meta.env.DEV;
 
 export function HelpGuideGrid() {
@@ -77,13 +75,6 @@ export function HelpGuideGrid() {
     }));
   };
 
-  const updateChangelog = (index: number, patch: Partial<HelpContent["changelog"][0]>) => {
-    setDraft((prev) => ({
-      ...prev,
-      changelog: prev.changelog.map((c, i) => (i === index ? { ...c, ...patch } : c)),
-    }));
-  };
-
   const view = editing ? draft : content;
 
   if (loading) {
@@ -107,12 +98,6 @@ export function HelpGuideGrid() {
               {section.title}
             </a>
           ))}
-          <a className="doc-toc__link" href="#doc-changelog">
-            更新公告
-          </a>
-          <a className="doc-toc__link" href="#doc-feedback">
-            反馈
-          </a>
         </nav>
 
         <div className="doc-main">
@@ -193,70 +178,6 @@ export function HelpGuideGrid() {
             </article>
           ))}
 
-          <div className="doc-asides">
-            <section id="doc-changelog" className="doc-aside">
-              <h3 className="doc-aside__title">更新公告</h3>
-              {view.changelog.map((entry, index) => (
-                <article key={`${entry.version}-${index}`} className="doc-release">
-                  <div className="doc-release__meta">
-                    {editing ? (
-                      <>
-                        <input
-                          className="doc-field doc-field--short doc-field--title"
-                          value={draft.changelog[index]?.version ?? entry.version}
-                          onChange={(e) => updateChangelog(index, { version: e.target.value })}
-                          placeholder="版本"
-                        />
-                        <input
-                          className="doc-field doc-field--short"
-                          value={draft.changelog[index]?.date ?? entry.date}
-                          onChange={(e) => updateChangelog(index, { date: e.target.value })}
-                          placeholder="日期"
-                        />
-                      </>
-                    ) : (
-                      <>
-                        <span className="doc-release__ver">v{entry.version}</span>
-                        <time className="doc-release__date">{entry.date}</time>
-                      </>
-                    )}
-                  </div>
-                  {editing ? (
-                    <textarea
-                      className="doc-field"
-                      value={draft.changelog[index]?.body ?? entry.body}
-                      rows={3}
-                      onChange={(e) => updateChangelog(index, { body: e.target.value })}
-                    />
-                  ) : (
-                    <p className="doc-release__body">{entry.body}</p>
-                  )}
-                </article>
-              ))}
-            </section>
-
-            <section id="doc-feedback" className="doc-aside">
-              <h3 className="doc-aside__title">反馈</h3>
-              {editing ? (
-                <textarea
-                  className="doc-field"
-                  value={draft.footerText}
-                  rows={3}
-                  onChange={(e) => setDraft((p) => ({ ...p, footerText: e.target.value }))}
-                />
-              ) : view.footerText === DEFAULT_HELP_CONTENT.footerText ? (
-                <p className="doc-footer-text">
-                  使用中遇到问题，欢迎到 B 站主页
-                  <a href={BILIBILI_HOME} target="_blank" rel="noopener noreferrer">
-                    万年烟火
-                  </a>
-                  留言或私信。
-                </p>
-              ) : (
-                <p className="doc-footer-text">{view.footerText}</p>
-              )}
-            </section>
-          </div>
         </div>
       </div>
     </div>

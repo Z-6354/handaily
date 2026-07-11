@@ -1,4 +1,6 @@
 export const HELP_CONTENT_SETTING_KEY = "help_custom_content_v1";
+export const UPDATE_ANNOUNCEMENT_SEEN_KEY = "update_announcement_seen_v0.1.0";
+export const CREATOR_BILIBILI_URL = "https://space.bilibili.com/146915875";
 
 export interface HelpSection {
   id: string;

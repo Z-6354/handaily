@@ -58,11 +58,19 @@ export function PetDisplaySettings({ setFeedback }: Props) {
   useEffect(() => {
     let unlistenStatus: (() => void) | undefined;
     let unlistenMain: (() => void) | undefined;
+    let unlistenBubble: (() => void) | undefined;
     void listen<PetStatusChangedPayload>("pet-status-changed", (ev) => {
       setPetEnabled(ev.payload.active);
       setBubbleEnabled(ev.payload.bubble_enabled);
     }).then((fn) => {
       unlistenStatus = fn;
+    });
+    void listen<boolean>("pet-bubble-enabled-changed", (ev) => {
+      if (typeof ev.payload === "boolean") {
+        setBubbleEnabled(ev.payload);
+      }
+    }).then((fn) => {
+      unlistenBubble = fn;
     });
     void listen<boolean>("main-window-visible", (ev) => {
       if (ev.payload) void refreshCore();
@@ -71,6 +79,7 @@ export function PetDisplaySettings({ setFeedback }: Props) {
     });
     return () => {
       unlistenStatus?.();
+      unlistenBubble?.();
       unlistenMain?.();
       if (scaleSaveTimer.current) clearTimeout(scaleSaveTimer.current);
       if (freqSaveTimer.current) clearTimeout(freqSaveTimer.current);

@@ -18,6 +18,10 @@ export interface AutostartStatus {
   supported: boolean;
 }
 
+export interface McpApiStatus {
+  enabled: boolean;
+}
+
 export interface PetRemarkLine {
   text: string;
   animation?: string | null;
@@ -262,6 +266,9 @@ export const xiaohan = {
   autostartGetStatus: () => invoke<AutostartStatus>("autostart_get_status"),
   autostartSetEnabled: (enabled: boolean) =>
     invoke<void>("autostart_set_enabled", { enabled }),
+  mcpApiGetStatus: () => invoke<McpApiStatus>("mcp_api_get_status"),
+  mcpApiSetEnabled: (enabled: boolean) =>
+    invoke<void>("mcp_api_set_enabled", { enabled }),
   getPerformanceSnapshot: () => invoke<PerformanceSnapshot>("system_get_performance"),
 
   personaGetDetail: (personaId: string) =>

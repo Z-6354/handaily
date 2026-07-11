@@ -388,10 +388,23 @@ const LIVE2D_STARTUP_DELAY_SECS: u64 = 45;
 const LIVE2D_BATCH_SIZE: usize = 8;
 const LIVE2D_BATCH_PAUSE_SECS: u64 = 1;
 
+async fn interruptible_sleep_secs(st: &crate::state::AppState, secs: u64) {
+    let mut remaining = std::time::Duration::from_secs(secs);
+    let step = std::time::Duration::from_millis(100);
+    while remaining > std::time::Duration::ZERO {
+        if st.stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        let nap = remaining.min(step);
+        tokio::time::sleep(nap).await;
+        remaining = remaining.saturating_sub(nap);
+    }
+}
+
 /// 启动后后台按 plan.json 批量导入缺失的 Live2D 模型（直至剩余为 0）
 pub fn spawn_batch_on_startup(st: std::sync::Arc<crate::state::AppState>) {
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(LIVE2D_STARTUP_DELAY_SECS)).await;
+        interruptible_sleep_secs(&st, LIVE2D_STARTUP_DELAY_SECS).await;
 
         let plan_path = match resolve_plan_path(None) {
             Ok(p) => p,
@@ -440,7 +453,7 @@ pub fn spawn_batch_on_startup(st: std::sync::Arc<crate::state::AppState>) {
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(LIVE2D_BATCH_PAUSE_SECS)).await;
+            interruptible_sleep_secs(&st, LIVE2D_BATCH_PAUSE_SECS).await;
         }
     });
 }

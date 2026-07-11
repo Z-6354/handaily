@@ -14,6 +14,7 @@ export function SettingsPanel() {
   const [idleThreshold, setIdleThreshold] = useState(90);
   const [autostart, setAutostart] = useState(false);
   const [autostartSupported, setAutostartSupported] = useState(isAutostartSupportedClient);
+  const [mcpApi, setMcpApi] = useState(false);
   const [dataPath, setDataPath] = useState("");
   const [saving, setSaving] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -23,13 +24,15 @@ export function SettingsPanel() {
     let cancelled = false;
     void (async () => {
       try {
-        const [idle, autostartStatus, path] = await Promise.all([
+        const [idle, autostartStatus, mcpStatus, path] = await Promise.all([
           xiaohan.getSetting("idle_threshold_secs"),
           xiaohan.autostartGetStatus().catch(() => null),
+          xiaohan.mcpApiGetStatus().catch(() => null),
           xiaohan.getDataPath(),
         ]);
         if (cancelled) return;
         if (idle) setIdleThreshold(parseInt(idle, 10));
+        if (mcpStatus) setMcpApi(mcpStatus.enabled);
         if (autostartStatus) {
           setAutostart(autostartStatus.enabled);
           setAutostartSupported(
@@ -74,6 +77,26 @@ export function SettingsPanel() {
       setSaveError(successFeedback(enabled ? "已开启开机自启动" : "已关闭开机自启动"));
     } catch (e) {
       setSaveError(parseApiError(e, "自启动"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleMcpApi = async (enabled: boolean) => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await xiaohan.mcpApiSetEnabled(enabled);
+      setMcpApi(enabled);
+      setSaveError(
+        successFeedback(
+          enabled
+            ? "已开启 Agent 控制接口，应用正在重启…"
+            : "已关闭 Agent 控制接口，应用正在重启…",
+        ),
+      );
+    } catch (e) {
+      setSaveError(parseApiError(e, "Agent 控制接口"));
     } finally {
       setSaving(false);
     }
@@ -132,6 +155,15 @@ export function SettingsPanel() {
                 disabled={saving || !autostartSupported}
                 onChange={(v) => void handleAutostart(v)}
               />
+              <SettingsToggle
+                label="Agent 控制接口 (MCP)"
+                checked={mcpApi}
+                disabled={saving}
+                onChange={(v) => void handleMcpApi(v)}
+              />
+              <p className="hint-block">
+                开启后重启应用并在本机 127.0.0.1:19420 提供 HTTP 控制面，供 MCP / 自动化测试使用；默认关闭。
+              </p>
             </SettingsSection>
           )}
         </div>

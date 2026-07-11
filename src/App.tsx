@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { UpdateAnnouncementModal, getLatestChangelogEntry } from "./components/UpdateAnnouncementModal";
 import { HelpGuideGrid } from "./components/HelpGuideGrid";
+import { CREATOR_BILIBILI_URL } from "./lib/helpContent";
 import { PageHeader } from "./components/PageHeader";
 import { WikiBulkImportModal } from "./components/WikiBulkImportModal";
 import { WikiBulkImportProvider, useWikiBulkImportContext } from "./contexts/WikiBulkImportContext";
@@ -129,12 +131,18 @@ function AppShell() {
             </button>
           ))}
         </nav>
-        <p className="sidebar-tagline">Live2D · 本地台词 · 纯桌宠</p>
+        <p className="sidebar-tagline">
+          <a href={CREATOR_BILIBILI_URL} target="_blank" rel="noopener noreferrer">
+            万年烟火
+          </a>
+          制作
+        </p>
       </aside>
 
       <main
         className={`content${page === "persona" ? " content--persona" : " content--scroll content--secondary"}`}
       >
+        <UpdateAnnouncementModal entry={getLatestChangelogEntry()} />
         <WikiBulkImportModal
           open={bulk.open}
           progress={bulk.progress}

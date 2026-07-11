@@ -185,6 +185,7 @@ function syncBubbleToggleUI() {
 }
 
 async function loadBubbleEnabled() {
+  if (bubbleSetPending) return;
   try {
     bubbleEnabled = await invoke<boolean>("pet_get_bubble_enabled");
   } catch {
@@ -193,17 +194,30 @@ async function loadBubbleEnabled() {
   syncBubbleToggleUI();
 }
 
+let bubbleSetChain: Promise<void> = Promise.resolve();
+let bubbleSetPending = false;
+
 async function setBubbleEnabled(enabled: boolean) {
   const prev = bubbleEnabled;
+  if (prev === enabled) return;
+  menuSuppressBlurUntil = Date.now() + 1500;
   bubbleEnabled = enabled;
   syncBubbleToggleUI();
-  try {
-    await invoke("pet_set_bubble_enabled", { enabled });
-  } catch (e) {
-    bubbleEnabled = prev;
-    syncBubbleToggleUI();
-    showMenuError(e);
-  }
+  bubbleSetPending = true;
+  bubbleSetChain = bubbleSetChain.then(async () => {
+    try {
+      await invoke("pet_set_bubble_enabled", { enabled });
+    } catch (e) {
+      if (bubbleEnabled === enabled) {
+        bubbleEnabled = prev;
+        syncBubbleToggleUI();
+      }
+      showMenuError(e);
+    } finally {
+      bubbleSetPending = false;
+    }
+  });
+  await bubbleSetChain;
 }
 
 function setMenuView(view: "main" | "characters" | "skins") {
@@ -406,6 +420,8 @@ root.addEventListener("click", async (e) => {
 
   const action = btn.getAttribute("data-action");
   if (action === "toggle-bubble") {
+    e.preventDefault();
+    e.stopPropagation();
     void setBubbleEnabled(!bubbleEnabled);
     return;
   }
@@ -485,7 +501,8 @@ root.addEventListener("click", async (e) => {
   }
   if (action === "main") {
     try {
-      await hideMenu();
+      menuSuppressBlurUntil = Date.now() + 2000;
+      cancelAutoClose();
       await invoke("pet_open_main", { page: null });
     } catch (err) {
       console.error("桌宠菜单操作失败", err);
@@ -516,6 +533,7 @@ void waitForTauriInternals().then(async () => {
   void listen<PetMenuShownPayload>("pet-menu-shown", (ev) => {
     const ms = ev.payload?.suppress_blur_ms ?? 1200;
     menuSuppressBlurUntil = Date.now() + ms;
+    void loadBubbleEnabled();
     resetMenuView();
     scheduleRefreshPetMenuPickers();
     cancelAutoClose();
@@ -531,6 +549,12 @@ void waitForTauriInternals().then(async () => {
 
   void listen("pet-app-exiting", () => {
     cancelAutoClose();
+  });
+
+  void listen<boolean>("pet-bubble-enabled-changed", (ev) => {
+    if (typeof ev.payload !== "boolean") return;
+    bubbleEnabled = ev.payload;
+    syncBubbleToggleUI();
   });
 
   void getCurrentWindow().listen("tauri://blur", () => {

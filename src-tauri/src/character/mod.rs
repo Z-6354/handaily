@@ -252,20 +252,19 @@ fn resolve_character_skin_id(
     }
 }
 
-/// 与皮肤分页列表一致：在 normalize 后解析应展示/高亮的皮肤 id
+/// 与皮肤分页列表一致：在 normalize 后解析应展示/高亮的皮肤 id（调用方应已 normalize skins）
 fn resolve_display_skin_id(
-    data_dir: &Path,
     meta: &CharacterMeta,
     db: &rusqlite::Connection,
     global_active_id: &str,
 ) -> String {
-    let normalized = normalize_character_skins(data_dir, &meta.skins);
     let mut skin_id = resolve_character_skin_id(meta, db, global_active_id);
-    if !normalized.iter().any(|s| s.id == skin_id) {
-        skin_id = normalized
+    if !meta.skins.iter().any(|s| s.id == skin_id) {
+        skin_id = meta
+            .skins
             .iter()
             .find(|s| s.default)
-            .or_else(|| normalized.first())
+            .or_else(|| meta.skins.first())
             .map(|s| s.id.clone())
             .unwrap_or(skin_id);
     }
@@ -291,18 +290,28 @@ fn set_preferred_skin_in_manifest(
     })
 }
 
-fn model_is_ready(data_dir: &Path, model_id: &str) -> bool {
+fn model_is_ready(data_dir: &Path, model_id: &str, model_ids: Option<&HashSet<String>>) -> bool {
     if model_id.is_empty() {
         return false;
     }
     if models::is_builtin_model(model_id) {
         return true;
     }
+    if let Some(ids) = model_ids {
+        let canonical = models::canonical_model_id(model_id);
+        if ids.contains(model_id) || ids.contains(canonical.as_str()) {
+            return true;
+        }
+    }
     models::resolve_assets(data_dir, model_id).is_ok()
 }
 
 /// 去重并移除「已有可用模型时仍显示的默认占位皮肤」
-fn normalize_character_skins(data_dir: &Path, skins: &[CharacterSkinMeta]) -> Vec<CharacterSkinMeta> {
+fn normalize_character_skins(
+    data_dir: &Path,
+    skins: &[CharacterSkinMeta],
+    model_ids: Option<&HashSet<String>>,
+) -> Vec<CharacterSkinMeta> {
     let mut out: Vec<CharacterSkinMeta> = Vec::new();
     let mut seen_model_ids: HashSet<String> = HashSet::new();
 
@@ -313,9 +322,11 @@ fn normalize_character_skins(data_dir: &Path, skins: &[CharacterSkinMeta]) -> Ve
         out.push(skin.clone());
     }
 
-    let has_ready = out.iter().any(|s| model_is_ready(data_dir, &s.model_id));
+    let has_ready = out
+        .iter()
+        .any(|s| model_is_ready(data_dir, &s.model_id, model_ids));
     if has_ready {
-        out.retain(|s| model_is_ready(data_dir, &s.model_id));
+        out.retain(|s| model_is_ready(data_dir, &s.model_id, model_ids));
     }
 
     if out.is_empty() {
@@ -327,7 +338,7 @@ fn normalize_character_skins(data_dir: &Path, skins: &[CharacterSkinMeta]) -> Ve
 pub fn repair_character_manifest_skins(data_dir: &Path, manifest: &mut CharacterManifest) -> bool {
     let mut changed = false;
     for c in &mut manifest.characters {
-        let normalized = normalize_character_skins(data_dir, &c.skins);
+        let normalized = normalize_character_skins(data_dir, &c.skins, None);
         if normalized.len() != c.skins.len()
             || normalized
                 .iter()
@@ -350,13 +361,13 @@ pub fn repair_character_manifest_skins(data_dir: &Path, manifest: &mut Character
             }
         }
 
-        if c.skins.iter().any(|s| s.default && model_is_ready(data_dir, &s.model_id)) {
+        if c.skins.iter().any(|s| s.default && model_is_ready(data_dir, &s.model_id, None)) {
             continue;
         }
         if let Some(ready_idx) = c
             .skins
             .iter()
-            .position(|s| model_is_ready(data_dir, &s.model_id))
+            .position(|s| model_is_ready(data_dir, &s.model_id, None))
         {
             for s in &mut c.skins {
                 s.default = false;
@@ -377,6 +388,7 @@ fn build_skin_info(
     s: &CharacterSkinMeta,
     active_skin_id: &str,
     model_cache: Option<&HashMap<String, String>>,
+    model_ids: Option<&HashSet<String>>,
 ) -> CharacterSkinInfo {
     CharacterSkinInfo {
         id: s.id.clone(),
@@ -388,7 +400,7 @@ fn build_skin_info(
             model_name(data_dir, &s.model_id)
         },
         active: s.id == active_skin_id,
-        model_ready: model_is_ready(data_dir, &s.model_id),
+        model_ready: model_is_ready(data_dir, &s.model_id, model_ids),
     }
 }
 
@@ -412,16 +424,15 @@ fn skin_infos_with_cache(
     active_skin_id: &str,
     model_cache: Option<&std::collections::HashMap<String, String>>,
 ) -> Vec<CharacterSkinInfo> {
-    normalize_character_skins(data_dir, &meta.skins)
+    normalize_character_skins(data_dir, &meta.skins, None)
         .iter()
-        .map(|s| build_skin_info(data_dir, s, active_skin_id, model_cache))
+        .map(|s| build_skin_info(data_dir, s, active_skin_id, model_cache, None))
         .collect()
 }
 
 /// 合并 manifest 与仅存在于 persona 的条目（单皮肤默认模型）
 /// 已有人物条目会从 persona manifest 同步 name/source/description
-/// 合并 manifest 与 persona（单次读盘）
-fn load_resolved_roster(data_dir: &Path, _model_ids: &HashSet<String>) -> CharacterManifest {
+fn load_resolved_roster(data_dir: &Path, model_ids: &HashSet<String>) -> Vec<CharacterMeta> {
     let mut manifest = load_manifest(data_dir);
     let persona_manifest = persona::load_manifest(data_dir);
     let persona_by_id: HashMap<&str, &persona::PersonaMeta> = persona_manifest
@@ -436,6 +447,7 @@ fn load_resolved_roster(data_dir: &Path, _model_ids: &HashSet<String>) -> Charac
             c.source = p.source.clone();
             c.description = p.description.clone();
         }
+        c.skins = normalize_character_skins(data_dir, &c.skins, Some(model_ids));
     }
 
     for p in &persona_manifest.personas {
@@ -443,7 +455,7 @@ fn load_resolved_roster(data_dir: &Path, _model_ids: &HashSet<String>) -> Charac
             continue;
         }
         let model_id = default_skin_model_id(&p.id);
-        manifest.characters.push(CharacterMeta {
+        let mut meta = CharacterMeta {
             id: p.id.clone(),
             name: p.name.clone(),
             source: p.source.clone(),
@@ -459,26 +471,26 @@ fn load_resolved_roster(data_dir: &Path, _model_ids: &HashSet<String>) -> Charac
             faction: String::new(),
             ship_type: String::new(),
             rarity: String::new(),
-        });
+        };
+        meta.skins = normalize_character_skins(data_dir, &meta.skins, Some(model_ids));
+        manifest.characters.push(meta);
     }
-    manifest
+    manifest.characters
 }
 
 struct ResolvedRosterCache {
-    fingerprint: u64,
+    manifest_fp: u64,
+    models_fp: u64,
     characters: Arc<Vec<CharacterMeta>>,
     model_ids: Arc<HashSet<String>>,
 }
 
 static RESOLVED_ROSTER: OnceLock<Mutex<ResolvedRosterCache>> = OnceLock::new();
 
-fn roster_fingerprint(data_dir: &Path) -> u64 {
+fn manifest_fingerprint(data_dir: &Path) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     let mut h = DefaultHasher::new();
-    for path in [
-        manifest_path(data_dir),
-        persona::manifest_path(data_dir),
-    ] {
+    for path in [manifest_path(data_dir), persona::manifest_path(data_dir)] {
         if let Ok(m) = fs::metadata(&path) {
             m.len().hash(&mut h);
             if let Ok(t) = m.modified() {
@@ -486,14 +498,25 @@ fn roster_fingerprint(data_dir: &Path) -> u64 {
             }
         }
     }
+    h.finish()
+}
+
+fn models_fingerprint(data_dir: &Path) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let mut h = DefaultHasher::new();
     let models_root = models::models_dir(data_dir);
     if models_root.is_dir() {
         if let Ok(entries) = fs::read_dir(&models_root) {
-            let mut dirs: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
-            dirs.sort_by_key(|e| e.file_name());
-            for entry in dirs {
-                entry.file_name().hash(&mut h);
-                if let Ok(m) = entry.metadata() {
+            let mut names: Vec<_> = entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name())
+                .collect();
+            names.sort();
+            for name in names {
+                name.hash(&mut h);
+                let sub = models_root.join(&name);
+                if let Ok(m) = fs::metadata(&sub) {
                     m.len().hash(&mut h);
                     if let Ok(t) = m.modified() {
                         t.hash(&mut h);
@@ -506,25 +529,34 @@ fn roster_fingerprint(data_dir: &Path) -> u64 {
 }
 
 fn resolved_roster_arc(data_dir: &Path) -> Arc<Vec<CharacterMeta>> {
-    let fp = roster_fingerprint(data_dir);
+    let manifest_fp = manifest_fingerprint(data_dir);
+    let models_fp = models_fingerprint(data_dir);
     let lock = RESOLVED_ROSTER.get_or_init(|| {
         Mutex::new(ResolvedRosterCache {
-            fingerprint: 0,
+            manifest_fp: 0,
+            models_fp: 0,
             characters: Arc::new(Vec::new()),
             model_ids: Arc::new(HashSet::new()),
         })
     });
     let mut cache = lock.lock().unwrap_or_else(|e| e.into_inner());
-    if cache.fingerprint != fp || cache.characters.is_empty() {
+    if cache.manifest_fp != manifest_fp
+        || cache.models_fp != models_fp
+        || cache.characters.is_empty()
+    {
         let model_ids = models::list_model_id_set(data_dir).unwrap_or_default();
-        cache.fingerprint = fp;
-        cache.model_ids = Arc::new(model_ids);
-        cache.characters = Arc::new(
-            load_resolved_roster(data_dir, cache.model_ids.as_ref())
-                .characters,
-        );
+        cache.manifest_fp = manifest_fp;
+        cache.models_fp = models_fp;
+        cache.model_ids = Arc::new(model_ids.clone());
+        cache.characters = Arc::new(load_resolved_roster(data_dir, &model_ids));
     }
     Arc::clone(&cache.characters)
+}
+
+/// 启动后后台预热人物列表缓存，减少首次打开人物页等待。
+pub fn warm_roster_cache(data_dir: &Path) {
+    let _ = resolved_roster_arc(data_dir);
+    let _ = avatar::cached_avatar_path_index(data_dir);
 }
 
 pub fn roster_cache_len(data_dir: &Path) -> usize {
@@ -544,8 +576,15 @@ pub fn memory_stats(data_dir: &Path) -> CharacterMemoryStats {
     }
 }
 
-fn resolve_all_characters(data_dir: &Path) -> Vec<CharacterMeta> {
-    resolved_roster_arc(data_dir).as_ref().clone()
+fn resolve_all_characters(data_dir: &Path) -> Arc<Vec<CharacterMeta>> {
+    resolved_roster_arc(data_dir)
+}
+
+fn resolved_roster_model_ids(data_dir: &Path) -> Arc<HashSet<String>> {
+    let _ = resolved_roster_arc(data_dir);
+    let lock = RESOLVED_ROSTER.get().expect("resolved roster init");
+    let cache = lock.lock().unwrap_or_else(|e| e.into_inner());
+    Arc::clone(&cache.model_ids)
 }
 
 /// 人物 id + 显示名（供头像批量同步）
@@ -696,9 +735,9 @@ fn meta_to_brief(
     include_trait: bool,
     avatar_index: Option<&HashMap<String, String>>,
 ) -> CharacterBrief {
-    let normalized = normalize_character_skins(data_dir, &c.skins);
-    let skin_id = resolve_display_skin_id(data_dir, c, db, active_id);
-    let skin_meta = normalized
+    let skin_id = resolve_display_skin_id(c, db, active_id);
+    let skin_meta = c
+        .skins
         .iter()
         .find(|s| s.id == skin_id)
         .or_else(|| default_skin(c));
@@ -718,7 +757,7 @@ fn meta_to_brief(
         active_skin_name: skin_meta
             .map(|s| s.name.clone())
             .unwrap_or_else(|| "默认".into()),
-        skin_count: normalized.len(),
+        skin_count: c.skins.len(),
         is_builtin: is_builtin_character(&c.id),
         faction,
         ship_type,
@@ -741,12 +780,16 @@ fn roster_filter_indices(
     favorites_only: bool,
     favorite_ids: &[String],
 ) -> Vec<usize> {
+    let fav_set: Option<HashSet<&str>> = if favorites_only {
+        Some(favorite_ids.iter().map(|s| s.as_str()).collect())
+    } else {
+        None
+    };
     let mut indices: Vec<usize> = items
         .iter()
         .enumerate()
         .filter(|(_, c)| {
-            if favorites_only {
-                let set: HashSet<&str> = favorite_ids.iter().map(|s| s.as_str()).collect();
+            if let Some(ref set) = fav_set {
                 if !set.contains(c.id.as_str()) {
                     return false;
                 }
@@ -1032,7 +1075,7 @@ impl ModelWikiTitleLookup {
         let plan_display_wiki = load_plan_display_wiki_map(data_dir);
         let mut character_names = HashMap::new();
         let mut roster_names = Vec::new();
-        for c in resolve_all_characters(data_dir) {
+        for c in resolve_all_characters(data_dir).iter() {
             let name = c.name.trim().to_string();
             if name.is_empty() {
                 continue;
@@ -1203,7 +1246,7 @@ pub fn list_characters(data_dir: &Path, db: &rusqlite::Connection) -> Vec<Charac
     }
     all.iter()
         .map(|c| {
-            let skin = resolve_display_skin_id(data_dir, c, db, &active_id);
+            let skin = resolve_display_skin_id(c, db, &active_id);
             CharacterInfo {
                 id: c.id.clone(),
                 name: c.name.clone(),
@@ -1288,13 +1331,21 @@ pub(crate) fn build_pet_menu_skins_payload(
     active_model_id: &str,
 ) -> Result<PetMenuSkinsPayload, String> {
     let meta = find_character_meta(data_dir, character_id)?;
-    let normalized = normalize_character_skins(data_dir, &meta.skins);
+    let model_ids_set = resolved_roster_model_ids(data_dir);
+    let normalized =
+        normalize_character_skins(data_dir, &meta.skins, Some(model_ids_set.as_ref()));
     let model_ids: Vec<String> = normalized.iter().map(|s| s.model_id.clone()).collect();
     let model_cache = models::model_names_for_ids(data_dir, &model_ids);
     let skins: Vec<CharacterSkinInfo> = normalized
         .iter()
         .map(|s| {
-            let mut info = build_skin_info(data_dir, s, "", Some(&model_cache));
+            let mut info = build_skin_info(
+                data_dir,
+                s,
+                "",
+                Some(&model_cache),
+                Some(model_ids_set.as_ref()),
+            );
             info.active = models::canonical_model_id(&s.model_id)
                 == models::canonical_model_id(active_model_id);
             info
@@ -1330,7 +1381,7 @@ pub fn list_characters_page(
     let indices = roster_filter_indices(&all, query, favorites_only, favorite_ids);
     let total = indices.len();
     let limit = limit.clamp(1, 200);
-    let avatar_index = avatar::build_avatar_path_index(data_dir);
+    let avatar_index = avatar::cached_avatar_path_index(data_dir);
     let items = indices
         .iter()
         .skip(offset)
@@ -1352,8 +1403,8 @@ pub fn get_character_detail(
 ) -> Result<CharacterDetail, String> {
     let meta = find_character_meta(data_dir, character_id)?;
     let active_id = active_character_id(db, data_dir);
-    let skin_id = resolve_display_skin_id(data_dir, &meta, db, &active_id);
-    let normalized = normalize_character_skins(data_dir, &meta.skins);
+    let skin_id = resolve_display_skin_id(&meta, db, &active_id);
+    let normalized = normalize_character_skins(data_dir, &meta.skins, None);
     let active_skin = normalized
         .iter()
         .find(|s| s.id == skin_id)
@@ -1384,7 +1435,7 @@ pub fn get_character_detail(
         meta.ship_type.clone(),
         meta.rarity.clone(),
     );
-    let active_model_ready = model_is_ready(data_dir, &active_model_id);
+    let active_model_ready = model_is_ready(data_dir, &active_model_id, None);
     Ok(CharacterDetail {
         id: meta.id.clone(),
         name: meta.name.clone(),
@@ -1422,8 +1473,8 @@ pub fn list_character_skins_page(
 ) -> Result<CharacterSkinsPage, String> {
     let meta = find_character_meta(data_dir, character_id)?;
     let active_id = active_character_id(db, data_dir);
-    let normalized = normalize_character_skins(data_dir, &meta.skins);
-    let active_skin_id = resolve_display_skin_id(data_dir, &meta, db, &active_id);
+    let normalized = normalize_character_skins(data_dir, &meta.skins, None);
+    let active_skin_id = resolve_display_skin_id(&meta, db, &active_id);
     let total = normalized.len();
     let limit = limit.clamp(1, 100);
     let slice: Vec<_> = normalized.iter().skip(offset).take(limit).collect();
@@ -1431,7 +1482,7 @@ pub fn list_character_skins_page(
     let model_cache = models::model_names_for_ids(data_dir, &model_ids);
     let items = slice
         .iter()
-        .map(|s| build_skin_info(data_dir, s, &active_skin_id, Some(&model_cache)))
+        .map(|s| build_skin_info(data_dir, s, &active_skin_id, Some(&model_cache), None))
         .collect();
     Ok(CharacterSkinsPage {
         total,
@@ -1449,7 +1500,7 @@ pub fn set_active_character(
     character_id: &str,
 ) -> Result<(), String> {
     let meta = find_character_meta(data_dir, character_id)?;
-    let normalized = normalize_character_skins(data_dir, &meta.skins);
+    let normalized = normalize_character_skins(data_dir, &meta.skins, None);
     let pref_id = resolve_preferred_skin_id(&meta);
     let skin = normalized
         .iter()
@@ -1457,7 +1508,7 @@ pub fn set_active_character(
         .or_else(|| normalized.iter().find(|s| s.default))
         .or_else(|| normalized.first())
         .ok_or_else(|| format!("人物 {character_id} 无可用皮肤"))?;
-    if !model_is_ready(data_dir, &skin.model_id) {
+    if !model_is_ready(data_dir, &skin.model_id, None) {
         return Err("该人物皮肤模型尚未完成，请先导入模型".into());
     }
     set_active_character_id(db, character_id)?;
@@ -1475,12 +1526,12 @@ pub fn select_character_skin(
     skin_id: &str,
 ) -> Result<String, String> {
     let meta = find_character_meta(data_dir, character_id)?;
-    let normalized = normalize_character_skins(data_dir, &meta.skins);
+    let normalized = normalize_character_skins(data_dir, &meta.skins, None);
     let skin = normalized
         .iter()
         .find(|s| s.id == skin_id)
         .ok_or_else(|| format!("未知皮肤: {skin_id}"))?;
-    if !model_is_ready(data_dir, &skin.model_id) {
+    if !model_is_ready(data_dir, &skin.model_id, None) {
         return Err("该皮肤模型尚未完成，请先导入模型".into());
     }
     set_preferred_skin_in_manifest(data_dir, character_id, skin_id)?;
@@ -1820,8 +1871,9 @@ mod tests {
             },
         ];
         save_manifest(base, &manifest).unwrap();
-        let meta = find_character_meta(base, "cheshire").unwrap();
-        let skin_id = resolve_display_skin_id(base, &meta, &db, "other-character");
+        let mut meta = find_character_meta(base, "cheshire").unwrap();
+        meta.skins = normalize_character_skins(base, &meta.skins, None);
+        let skin_id = resolve_display_skin_id(&meta, &db, "other-character");
         assert_eq!(skin_id, "ready-skin");
     }
 

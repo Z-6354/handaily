@@ -1,19 +1,21 @@
-//! Debug 构建专用 HTTP 测试 API（127.0.0.1），供 AI / 脚本驱动桌宠操作。
-//! 设置 `HANDAILY_DISABLE_TEST_API=1` 可关闭；`HANDAILY_TEST_API_PORT` 改端口（默认 19420）。
+//! 本地 HTTP Agent 控制 API（127.0.0.1），供 MCP / 脚本驱动桌宠。
+//! 需在设置中开启「Agent 控制接口」；`HANDAILY_DISABLE_TEST_API=1` 可强制关闭。
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 
 static TEST_API_CTX: OnceLock<(AppHandle, Arc<AppState>)> = OnceLock::new();
+static TEST_API_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 const DEFAULT_PORT: u16 = 19420;
 
@@ -22,11 +24,17 @@ pub fn spawn_server(app: AppHandle, st: Arc<AppState>) {
         crate::log::info("test-api: disabled (HANDAILY_DISABLE_TEST_API)");
         return;
     }
+    TEST_API_SHUTDOWN.store(false, Ordering::SeqCst);
     let _ = TEST_API_CTX.set((app, st));
     thread::Builder::new()
         .name("handaily-test-api".into())
         .spawn(server_loop)
         .expect("test-api thread");
+}
+
+/// 退出时唤醒 accept 循环，避免 `incoming()` 阻塞进程结束。
+pub fn shutdown_server() {
+    TEST_API_SHUTDOWN.store(true, Ordering::SeqCst);
 }
 
 fn server_loop() {
@@ -42,24 +50,105 @@ fn server_loop() {
             return;
         }
     };
+    if let Err(e) = listener.set_nonblocking(true) {
+        crate::log::warn(format!("test-api: set_nonblocking failed: {e}"));
+        return;
+    }
     crate::log::info(format!("test-api: listening on http://{addr}"));
-    for conn in listener.incoming().flatten() {
-        let _ = conn.set_read_timeout(Some(std::time::Duration::from_secs(30)));
-        let _ = conn.set_write_timeout(Some(std::time::Duration::from_secs(30)));
-        if let Err(e) = handle_connection(conn) {
-            crate::log::warn(format!("test-api: request error: {e}"));
+    loop {
+        if shutting_down() {
+            break;
+        }
+        match listener.accept() {
+            Ok((conn, _)) => {
+                if shutting_down() {
+                    break;
+                }
+                thread::spawn(move || {
+                    if let Err(e) = handle_connection(conn) {
+                        crate::log::warn(format!("test-api: request error: {e}"));
+                    }
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                crate::log::warn(format!("test-api: accept error: {e}"));
+                break;
+            }
         }
     }
 }
 
+fn shutting_down() -> bool {
+    TEST_API_SHUTDOWN.load(Ordering::Relaxed)
+        || crate::APP_EXITING.load(Ordering::Relaxed)
+        || TEST_API_CTX
+            .get()
+            .map(|(_, st)| st.stop_flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<String, String> {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let n = match stream.read(&mut chunk) {
+            Ok(0) if buf.is_empty() => return Ok(String::new()),
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                if buf.is_empty() {
+                    return Err(e.to_string());
+                }
+                break;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        buf.extend_from_slice(&chunk[..n]);
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            let raw = String::from_utf8_lossy(&buf);
+            let mut content_length = 0usize;
+            for line in raw.split("\r\n") {
+                if line.is_empty() {
+                    break;
+                }
+                let lower = line.to_ascii_lowercase();
+                if let Some(rest) = lower.strip_prefix("content-length:") {
+                    content_length = rest.trim().parse().unwrap_or(0);
+                }
+            }
+            let header_end = raw.find("\r\n\r\n").unwrap_or(raw.len());
+            let have_body = buf.len().saturating_sub(header_end + 4);
+            if have_body >= content_length {
+                break;
+            }
+        }
+        if buf.len() > 256 * 1024 {
+            return Err("request too large".into());
+        }
+    }
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
 fn handle_connection(mut stream: TcpStream) -> Result<(), String> {
+    let _ = stream.set_nonblocking(false);
     let conn_t0 = Instant::now();
-    let mut buf = vec![0u8; 64 * 1024];
-    let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
-    if n == 0 {
+    let read_timeout = if shutting_down() {
+        Duration::from_millis(250)
+    } else {
+        Duration::from_secs(8)
+    };
+    let _ = stream.set_read_timeout(Some(read_timeout));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(8)));
+    let raw = read_http_request(&mut stream)?;
+    if raw.is_empty() {
         return Ok(());
     }
-    let raw = String::from_utf8_lossy(&buf[..n]);
     let mut lines = raw.split("\r\n");
     let request_line = lines.next().unwrap_or("");
     let parts: Vec<&str> = request_line.split_whitespace().collect();
@@ -76,13 +165,16 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), String> {
         if line.is_empty() {
             break;
         }
-        if let Some(rest) = line.strip_prefix("Content-Length:") {
+        let lower = line.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
             content_length = rest.trim().parse().unwrap_or(0);
         }
     }
-    let header_end = raw.find("\r\n\r\n").unwrap_or(n);
-    let body = if content_length > 0 && header_end + 4 + content_length <= n {
+    let header_end = raw.find("\r\n\r\n").unwrap_or(raw.len());
+    let body = if content_length > 0 && header_end + 4 + content_length <= raw.len() {
         raw[header_end + 4..header_end + 4 + content_length].to_string()
+    } else if header_end + 4 < raw.len() {
+        raw[header_end + 4..].trim().to_string()
     } else {
         String::new()
     };
@@ -161,7 +253,7 @@ fn route(method: &str, path: &str, query: &str, body: &str) -> Result<(u16, Valu
             json!({
                 "ok": true,
                 "service": "handaily-test-api",
-                "build": "debug",
+                "mcp_enabled": true,
             }),
         )),
         ("GET", "/") => Ok((200, api_index_json())),
@@ -210,6 +302,17 @@ fn route(method: &str, path: &str, query: &str, body: &str) -> Result<(u16, Valu
             let n = parse_query_usize(query, "n", 40).clamp(1, 200);
             let lines = tail_display_logs(st.data_dir(), n)?;
             Ok((200, json!({ "ok": true, "lines": lines })))
+        }
+        ("GET", "/pet/logs/movement/tail") => {
+            let (_app, st) = ctx()?;
+            let n = parse_query_usize(query, "n", 40).clamp(1, 200);
+            let lines = tail_movement_logs(st.data_dir(), n)?;
+            Ok((200, json!({ "ok": true, "lines": lines })))
+        }
+        ("GET", "/pet/interaction") => {
+            let (app, st) = ctx()?;
+            let state = crate::pet::interaction_state(app, st)?;
+            Ok((200, json!({ "ok": true, "interaction": state })))
         }
         ("POST", "/pet/switch/skin") => {
             let input: SwitchSkinBody = parse_body(body)?;
@@ -317,14 +420,145 @@ fn route(method: &str, path: &str, query: &str, body: &str) -> Result<(u16, Valu
             ))
         }
         ("POST", "/pet/menu/open") => {
-            let (app, _st) = ctx()?;
+            let (app, st) = ctx()?;
+            log_test_action(st, "menu.open", json!({}))?;
             crate::pet::show_pet_menu_at_cursor(app)?;
             Ok((200, json!({ "ok": true })))
         }
         ("POST", "/pet/menu/hide") => {
-            let (app, _st) = ctx()?;
+            let (app, st) = ctx()?;
+            log_test_action(st, "menu.hide", json!({}))?;
             crate::pet::hide_pet_menu(app)?;
+            crate::pet::sync_pet_interaction_state(app);
             Ok((200, json!({ "ok": true })))
+        }
+        ("POST", "/pet/click/left") => {
+            let (app, st) = ctx()?;
+            log_test_action(st, "click.left", json!({}))?;
+            crate::pet::emit_pet_test_action(app, "click-left")?;
+            Ok((200, json!({ "ok": true, "action": "click-left" })))
+        }
+        ("POST", "/pet/click/right") => {
+            let (app, st) = ctx()?;
+            log_test_action(st, "click.right", json!({}))?;
+            let open = crate::pet::toggle_pet_menu_at_cursor(app)?;
+            Ok((200, json!({ "ok": true, "menu_open": open })))
+        }
+        ("POST", "/pet/click/double") => {
+            let (app, st) = ctx()?;
+            log_test_action(st, "click.double", json!({}))?;
+            crate::pet::emit_pet_test_action(app, "click-double")?;
+            Ok((200, json!({ "ok": true, "action": "click-double" })))
+        }
+        ("POST", "/pet/main/open") => {
+            let (app, st) = ctx()?;
+            log_test_action(st, "main.open", json!({}))?;
+            crate::pet::show_main_window(app, None)?;
+            Ok((200, json!({ "ok": true })))
+        }
+        ("POST", "/pet/main/close") => {
+            let (app, st) = ctx()?;
+            log_test_action(st, "main.close", json!({}))?;
+            crate::pet::hide_main_window(app)?;
+            Ok((200, json!({ "ok": true })))
+        }
+        ("POST", "/pet/bubble/set") => {
+            let input: BubbleSetBody = if body.trim().is_empty() {
+                BubbleSetBody {
+                    enabled: parse_query_bool(query, "enabled").ok_or_else(|| {
+                        "bubble/set requires JSON body or ?enabled=true|false".to_string()
+                    })?,
+                }
+            } else {
+                parse_body(body)?
+            };
+            let (app, st) = ctx()?;
+            log_test_action(st, "bubble.set", json!({ "enabled": input.enabled }))?;
+            {
+                let db = crate::db::lock_conn(&st.db)?;
+                crate::pet::set_bubble_enabled(&db, input.enabled)?;
+            }
+            for label in [crate::pet::PET_LABEL, crate::pet::PET_MENU_LABEL, "main"] {
+                let _ = app.emit_to(label, "pet-bubble-enabled-changed", input.enabled);
+            }
+            if !input.enabled {
+                let _ = app.emit_to(crate::pet::PET_LABEL, "pet-clear-bubble", ());
+            }
+            crate::pet::emit_pet_status_changed(app);
+            Ok((200, json!({ "ok": true, "enabled": input.enabled })))
+        }
+        ("POST", "/pet/interaction/sync") => {
+            let (app, st) = ctx()?;
+            log_test_action(st, "interaction.sync", json!({}))?;
+            crate::pet::sync_pet_interaction_state(app);
+            crate::pet::emit_pet_test_action(app, "sync-interaction")?;
+            let state = crate::pet::interaction_state(app, st)?;
+            Ok((200, json!({ "ok": true, "interaction": state })))
+        }
+        ("POST", "/pet/speak") => {
+            let input: SpeakBody = parse_body(body)?;
+            let (app, st) = ctx()?;
+            crate::pet::emit_remark_agent(&app, st, &input.text, input.animation)?;
+            Ok((200, json!({ "ok": true, "text": input.text.trim() })))
+        }
+        ("POST", "/pet/speak/random") => {
+            let (app, st) = ctx()?;
+            let text = crate::pet::emit_random_remark_agent(&app, st)?;
+            Ok((200, json!({ "ok": true, "text": text })))
+        }
+        ("POST", "/pet/preview/animation") => {
+            let input: PreviewAnimationBody = parse_body(body)?;
+            let (app, st) = ctx()?;
+            crate::pet::preview_animation(&app, st, &input.animation, input.r#loop.unwrap_or(false))?;
+            Ok((200, json!({ "ok": true, "animation": input.animation })))
+        }
+        ("POST", "/pet/edit/enter") => {
+            let (app, _st) = ctx()?;
+            crate::pet::enter_pet_edit_bounds(app)?;
+            Ok((200, json!({ "ok": true })))
+        }
+        ("GET", "/system/cursor") => {
+            let pos = crate::system::win32_input::cursor_position()?;
+            Ok((200, json!({ "ok": true, "cursor": pos })))
+        }
+        ("POST", "/system/cursor") => {
+            let input: CursorSetBody = parse_body(body)?;
+            crate::system::win32_input::set_cursor_position(input.x, input.y)?;
+            Ok((200, json!({ "ok": true, "x": input.x, "y": input.y })))
+        }
+        ("POST", "/system/mouse") => {
+            let input: MouseBody = parse_body(body)?;
+            let (app, st) = ctx()?;
+            let button = input.button.as_deref().unwrap_or("left");
+            let action = input.action.as_deref().unwrap_or("click");
+            log_test_action(
+                st,
+                "system.mouse",
+                json!({ "button": button, "action": action, "x": input.x, "y": input.y }),
+            )?;
+            let _ = app;
+            crate::system::win32_input::mouse_button_action(button, action, input.x, input.y)?;
+            Ok((
+                200,
+                json!({ "ok": true, "button": button, "action": action, "x": input.x, "y": input.y }),
+            ))
+        }
+        ("GET", "/system/screenshot/pet") => {
+            let (app, st) = ctx()?;
+            let region = pet_capture_region(app)?;
+            log_test_action(st, "system.screenshot.pet", json!({ "region": region }))?;
+            let shot = crate::system::win32_input::capture_region_png(
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+            )?;
+            Ok((200, json!({ "ok": true, "screenshot": shot })))
+        }
+        ("GET", "/system/screenshot") => {
+            let max_w = parse_query_usize(query, "max_width", 1280).clamp(320, 3840) as u32;
+            let shot = crate::system::win32_input::capture_primary_screen_png(max_w)?;
+            Ok((200, json!({ "ok": true, "screenshot": shot })))
         }
         ("POST", "/app/exit") => {
             let (app, st) = ctx()?;
@@ -363,6 +597,80 @@ struct NextSkinBody {
 #[derive(Deserialize, Default)]
 struct NextCharacterBody {
     timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct BubbleSetBody {
+    enabled: bool,
+}
+
+#[derive(Deserialize)]
+struct CursorSetBody {
+    x: i32,
+    y: i32,
+}
+
+#[derive(Deserialize)]
+struct MouseBody {
+    x: i32,
+    y: i32,
+    button: Option<String>,
+    action: Option<String>,
+}
+
+fn pet_capture_region(app: &AppHandle) -> Result<crate::system::win32_input::ScreenRegion, String> {
+    let win = app
+        .get_webview_window(crate::pet::PET_LABEL)
+        .ok_or_else(|| "pet window missing".to_string())?;
+    let pos = win.outer_position().map_err(|e| e.to_string())?;
+    let size = win.outer_size().map_err(|e| e.to_string())?;
+    Ok(crate::system::win32_input::ScreenRegion {
+        x: pos.x,
+        y: pos.y,
+        width: size.width as i32,
+        height: size.height as i32,
+    })
+}
+
+fn log_test_action(st: &AppState, action: &str, detail: Value) -> Result<(), String> {
+    let line = json!({
+        "ts": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        "scope": "test-api",
+        "level": "info",
+        "message": action,
+        "detail": detail,
+    })
+    .to_string();
+    crate::pet::append_display_debug_logs(st.data_dir(), &[line])?;
+    crate::log::info(format!("test-api action: {action}"));
+    Ok(())
+}
+
+fn tail_movement_logs(data_dir: &std::path::Path, n: usize) -> Result<Vec<String>, String> {
+    let path = data_dir.join("logs").join("pet-movement.jsonl");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    let start = lines.len().saturating_sub(n);
+    Ok(lines[start..].to_vec())
+}
+
+#[derive(Deserialize)]
+struct SpeakBody {
+    text: String,
+    animation: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PreviewAnimationBody {
+    animation: String,
+    #[serde(rename = "loop")]
+    r#loop: Option<bool>,
 }
 
 fn pick_next_skin(st: &AppState) -> Result<(String, String), String> {
@@ -443,6 +751,21 @@ fn parse_query_usize(query: &str, key: &str, default: usize) -> usize {
     default
 }
 
+fn parse_query_bool(query: &str, key: &str) -> Option<bool> {
+    for part in query.split('&') {
+        if let Some((k, v)) = part.split_once('=') {
+            if k == key {
+                return match v.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => Some(true),
+                    "0" | "false" | "no" | "off" => Some(false),
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
 fn tail_display_logs(data_dir: &std::path::Path, n: usize) -> Result<Vec<String>, String> {
     let path = data_dir.join("logs").join("pet-display.jsonl");
     if !path.exists() {
@@ -465,12 +788,30 @@ pub fn api_index_json() -> Value {
             { "method": "GET", "path": "/pet/menu/skins" },
             { "method": "GET", "path": "/pet/characters" },
             { "method": "GET", "path": "/pet/logs/tail?n=40" },
+            { "method": "GET", "path": "/pet/logs/movement/tail?n=40" },
+            { "method": "GET", "path": "/pet/interaction" },
             { "method": "POST", "path": "/pet/switch/skin", "body": { "character_id": "", "skin_id": "", "timeout_ms": 30000 } },
             { "method": "POST", "path": "/pet/switch/character", "body": { "character_id": "", "timeout_ms": 30000 } },
             { "method": "POST", "path": "/pet/switch/next-skin", "body": { "timeout_ms": 30000 } },
             { "method": "POST", "path": "/pet/switch/next-character", "body": { "timeout_ms": 30000 } },
             { "method": "POST", "path": "/pet/menu/open" },
             { "method": "POST", "path": "/pet/menu/hide" },
+            { "method": "POST", "path": "/pet/click/left" },
+            { "method": "POST", "path": "/pet/click/right" },
+            { "method": "POST", "path": "/pet/click/double" },
+            { "method": "POST", "path": "/pet/main/open" },
+            { "method": "POST", "path": "/pet/main/close" },
+            { "method": "POST", "path": "/pet/bubble/set", "body": { "enabled": true } },
+            { "method": "POST", "path": "/pet/interaction/sync" },
+            { "method": "POST", "path": "/pet/speak", "body": { "text": "", "animation": null } },
+            { "method": "POST", "path": "/pet/speak/random" },
+            { "method": "POST", "path": "/pet/preview/animation", "body": { "animation": "", "loop": false } },
+            { "method": "POST", "path": "/pet/edit/enter" },
+            { "method": "GET", "path": "/system/cursor" },
+            { "method": "POST", "path": "/system/cursor", "body": { "x": 0, "y": 0 } },
+            { "method": "POST", "path": "/system/mouse", "body": { "x": 0, "y": 0, "button": "left", "action": "click" } },
+            { "method": "GET", "path": "/system/screenshot?max_width=1280" },
+            { "method": "GET", "path": "/system/screenshot/pet" },
             { "method": "POST", "path": "/app/exit" }
         ]
     })

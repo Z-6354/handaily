@@ -594,6 +594,7 @@ pub fn hide_pet_menu(app: &AppHandle) -> Result<(), String> {
         let _ = win.hide();
     }
     emit_pet_menu_state(app, false);
+    sync_pet_interaction_state(app);
     Ok(())
 }
 
@@ -632,6 +633,9 @@ fn show_pet_menu_immediate(app: &AppHandle, screen_x: i32, screen_y: i32) -> Res
         .get_webview_window(PET_MENU_LABEL)
         .ok_or_else(|| "菜单窗口不存在".to_string())?;
     let _ = prepare_menu_webview(&win);
+    if let Some(pet) = app.get_webview_window(PET_LABEL) {
+        let _ = pet.set_ignore_cursor_events(false);
+    }
     let (x, y) = clamp_menu_position(screen_x, screen_y);
     win.set_position(PhysicalPosition::new(x, y))
         .map_err(|e| e.to_string())?;
@@ -943,19 +947,40 @@ pub fn pet_visible(app: &AppHandle) -> bool {
         .unwrap_or(false)
 }
 
+/// 主窗口是否仍在前台展示（可见即视为打开，失焦不算关闭）。
+pub fn is_main_window_visible(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .and_then(|w| w.is_visible().ok())
+        .unwrap_or(false)
+}
+
+/// 广播主窗可见性（主窗 WebView + 全应用），桌宠端依赖此事件更新 mainWindowVisible。
+pub fn emit_main_window_visible(app: &AppHandle, visible: bool) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.emit("main-window-visible", visible);
+    }
+    let _ = app.emit("main-window-visible", visible);
+}
+
 /// 显示主窗口；桌宠 `always_on_top` 会挡住主窗口，需先让桌宠降层。
 pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), String> {
-    let _ = hide_pet_menu(app);
-    let _ = app.emit_to(PET_LABEL, "pet-main-opening", 800u64);
     let win = crate::ensure_main_window(app)?;
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         let _ = pet.set_always_on_top(false);
-        let _ = pet.set_ignore_cursor_events(true);
+        let _ = pet.set_ignore_cursor_events(false);
     }
     let _ = win.unminimize();
     win.show().map_err(|e| e.to_string())?;
+    // 主窗 show 成功后再通知桌宠，避免 show 失败时桌宠长期锁在 overlay 态
+    let _ = app.emit_to(PET_LABEL, "pet-main-opening", 1200u64);
+    if let Some(pet) = app.get_webview_window(PET_LABEL) {
+        let _ = pet.set_always_on_top(false);
+        let _ = pet.set_ignore_cursor_events(false);
+    }
     let _ = win.set_focus();
-    let _ = win.emit("main-window-visible", true);
+    emit_main_window_visible(app, true);
+    let _ = hide_pet_menu(app);
+    sync_pet_interaction_state(app);
     if let Some(page) = page.filter(|p| !p.is_empty()) {
         let _ = app.emit_to("main", "main-navigate", page.to_string());
     }
@@ -964,7 +989,9 @@ pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), Strin
 
 /// 主窗口失焦/隐藏后恢复桌宠置顶（若仍可见）；菜单打开时保持菜单在桌宠之上。
 pub fn restore_pet_topmost_if_visible(app: &AppHandle) {
-    let _ = app.emit_to(PET_LABEL, "pet-main-closed", ());
+    if is_main_window_visible(app) {
+        return;
+    }
     if app
         .try_state::<PetRuntimeState>()
         .map(|rt| rt.user_hidden_pet.load(Ordering::Acquire))
@@ -975,15 +1002,105 @@ pub fn restore_pet_topmost_if_visible(app: &AppHandle) {
     if is_pet_menu_visible(app) {
         if let Some(menu) = app.get_webview_window(PET_MENU_LABEL) {
             raise_menu_above_pet(app, &menu);
-            return;
+        }
+        return;
+    }
+    let _ = app.emit_to(PET_LABEL, "pet-main-closed", ());
+    sync_pet_interaction_state(app);
+}
+
+/// 主窗开关 / 菜单关闭后，强制同步桌宠穿透、置顶与前端菜单状态位。
+pub fn sync_pet_interaction_state(app: &AppHandle) {
+    if crate::APP_EXITING.load(Ordering::Relaxed) {
+        return;
+    }
+    if is_main_window_visible(app) {
+        if let Some(pet) = app.get_webview_window(PET_LABEL) {
+            let _ = pet.set_always_on_top(false);
+            let _ = pet.set_ignore_cursor_events(false);
+        }
+        if is_pet_menu_visible(app) || pet_menu_open_or_pending(app) {
+            let _ = app.emit_to(PET_LABEL, "pet-menu-state", false);
+        }
+        let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
+        return;
+    }
+    if is_pet_menu_visible(app) || pet_menu_open_or_pending(app) {
+        if let Some(pet) = app.get_webview_window(PET_LABEL) {
+            let _ = pet.set_ignore_cursor_events(false);
+        }
+        let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
+        return;
+    }
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        let pending = rt
+            .menu_pending_show
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if pending.is_some() {
+            suppress_menu_show(&rt);
+            let _ = app.emit_to(PET_LABEL, "pet-menu-state", false);
         }
     }
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         if pet.is_visible().unwrap_or(false) {
-            let _ = pet.set_always_on_top(true);
-            let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
+            let _ = pet.set_ignore_cursor_events(false);
+            if !app
+                .try_state::<PetRuntimeState>()
+                .map(|rt| rt.user_hidden_pet.load(Ordering::Acquire))
+                .unwrap_or(false)
+            {
+                let _ = pet.set_always_on_top(true);
+            }
         }
     }
+    let menu_open = is_pet_menu_visible(app) || pet_menu_open_or_pending(app);
+    let _ = app.emit_to(PET_LABEL, "pet-menu-state", menu_open);
+    let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
+}
+
+/// 自动化测试：桌宠交互层状态（Rust 侧）
+#[derive(Clone, Serialize)]
+pub struct PetInteractionState {
+    pub main_window_visible: bool,
+    pub pet_visible: bool,
+    pub menu_visible: bool,
+    pub menu_open_or_pending: bool,
+    pub bubble_enabled: bool,
+    pub cursor_over_pet: bool,
+    pub cursor_over_menu: bool,
+}
+
+pub fn interaction_state(app: &AppHandle, st: &AppState) -> Result<PetInteractionState, String> {
+    let bubble_enabled = {
+        let db = crate::db::lock_conn(&st.db)?;
+        is_bubble_enabled(&db)
+    };
+    Ok(PetInteractionState {
+        main_window_visible: is_main_window_visible(app),
+        pet_visible: pet_visible(app),
+        menu_visible: is_pet_menu_visible(app),
+        menu_open_or_pending: pet_menu_open_or_pending(app),
+        bubble_enabled,
+        cursor_over_pet: is_cursor_over_pet_window(app),
+        cursor_over_menu: is_cursor_over_menu_window(app),
+    })
+}
+
+pub fn emit_pet_test_action(app: &AppHandle, action: &str) -> Result<(), String> {
+    let _ = app.emit_to(PET_LABEL, "pet-test-action", action.to_string());
+    Ok(())
+}
+
+pub fn hide_main_window(app: &AppHandle) -> Result<(), String> {
+    let Some(win) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let _ = win.hide();
+    emit_main_window_visible(app, false);
+    restore_pet_topmost_if_visible(app);
+    Ok(())
 }
 
 pub fn model_status(
@@ -1463,9 +1580,9 @@ pub(crate) fn pump_ui_messages() {
 pub(crate) fn pump_ui_messages() {}
 
 fn drain_ui_after_pet_exit(app: &AppHandle) {
-    for _ in 0..10 {
+    for _ in 0..3 {
         pump_ui_messages();
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(10));
     }
     let _ = app;
 }
@@ -1493,9 +1610,9 @@ pub fn destroy_pet_window_for_exit(app: &AppHandle) {
     }
     let _ = app.emit_to(PET_LABEL, "pet-app-exiting", ());
     let _ = app.emit_to(PET_MENU_LABEL, "pet-app-exiting", ());
-    for _ in 0..6 {
+    for _ in 0..2 {
         pump_ui_messages();
-        std::thread::sleep(Duration::from_millis(15));
+        std::thread::sleep(Duration::from_millis(10));
     }
     if let Some(win) = app.get_webview_window(PET_MENU_LABEL) {
         detach_menu_window_effects(&win);
@@ -2367,6 +2484,19 @@ pub fn sync_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String>
     Ok(())
 }
 
+async fn interruptible_sleep_secs(st: &AppState, secs: u64) {
+    let mut remaining = Duration::from_secs(secs);
+    let step = Duration::from_millis(100);
+    while remaining > Duration::ZERO {
+        if st.stop_flag.load(Ordering::Relaxed) {
+            return;
+        }
+        let nap = remaining.min(step);
+        tokio::time::sleep(nap).await;
+        remaining = remaining.saturating_sub(nap);
+    }
+}
+
 pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
     let runtime = app.state::<PetRuntimeState>();
     if runtime
@@ -2396,14 +2526,14 @@ pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
 
             let enabled = {
                 let Ok(db) = st.lock_db() else {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    interruptible_sleep_secs(&st, 5).await;
                     continue;
                 };
                 is_enabled(&db)
             };
 
             if !enabled {
-                tokio::time::sleep(Duration::from_secs(10)).await;
+                interruptible_sleep_secs(&st, 10).await;
                 continue;
             }
 
@@ -2411,7 +2541,7 @@ pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
 
             let interval_sec = {
                 let Ok(db) = st.lock_db() else {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    interruptible_sleep_secs(&st, 5).await;
                     continue;
                 };
                 let model_id = models::active_model_id(&db);
@@ -2421,14 +2551,20 @@ pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
 
             let bubble_on = {
                 let Ok(db) = st.lock_db() else {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    interruptible_sleep_secs(&st, 5).await;
                     continue;
                 };
                 is_bubble_enabled(&db)
             };
 
             if interval_sec == 0 || !pet_visible(&app) || !bubble_on {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                interruptible_sleep_secs(&st, 5).await;
+                continue;
+            }
+
+            if is_main_window_visible(&app) || is_pet_menu_visible(&app) || pet_menu_open_or_pending(&app)
+            {
+                interruptible_sleep_secs(&st, 5).await;
                 continue;
             }
 
@@ -2457,7 +2593,7 @@ pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
             } else {
                 interval_sec.max(30) as u64
             };
-            tokio::time::sleep(Duration::from_secs(sleep_sec)).await;
+            interruptible_sleep_secs(&st, sleep_sec).await;
         }
     });
 }
@@ -2571,6 +2707,10 @@ pub fn emit_remark(
         return;
     }
 
+    if is_main_window_visible(app) || is_pet_menu_visible(app) || pet_menu_open_or_pending(app) {
+        return;
+    }
+
     let _ = app.emit_to(
         PET_LABEL,
         "pet-remark",
@@ -2580,6 +2720,46 @@ pub fn emit_remark(
             animation,
         },
     );
+}
+
+/// Agent / MCP 测试：尽量展示台词，跳过气泡开关与 pet enabled 限制。
+pub fn emit_remark_agent(
+    app: &AppHandle,
+    st: &Arc<AppState>,
+    text: &str,
+    animation: Option<String>,
+) -> Result<(), String> {
+    let text = text.trim();
+    if text.is_empty() || is_machine_text(text) {
+        return Err("台词为空或无效".into());
+    }
+    if !pet_visible(app) {
+        if let Some(rt) = app.try_state::<PetRuntimeState>() {
+            if rt.fullscreen_suppressed.load(Ordering::Relaxed) {
+                return Err("全屏抑制中，无法显示桌宠".into());
+            }
+            let _ = show_pet(app, st);
+        }
+    }
+    if !pet_visible(app) {
+        return Err("桌宠窗口不可见".into());
+    }
+    let _ = app.emit_to(
+        PET_LABEL,
+        "pet-remark",
+        PetRemarkPayload {
+            text: trim_remark(text, 80),
+            source: "mcp".into(),
+            animation,
+        },
+    );
+    Ok(())
+}
+
+pub fn emit_random_remark_agent(app: &AppHandle, st: &Arc<AppState>) -> Result<String, String> {
+    let payload = build_remark_from_lines(st).ok_or_else(|| "当前模型没有可用台词".to_string())?;
+    emit_remark_agent(app, st, &payload.text, payload.animation)?;
+    Ok(payload.text)
 }
 
 pub fn build_remark_from_lines(st: &AppState) -> Option<PetRemarkPayload> {

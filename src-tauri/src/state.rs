@@ -86,13 +86,37 @@ impl JoinState {
         }
     }
     pub fn join_all(&self) {
+        self.join_all_timeout(std::time::Duration::from_secs(2));
+    }
+
+    /// 退出时 join 后台线程，超时后放弃等待以免托盘图标长时间残留。
+    pub fn join_all_timeout(&self, timeout: std::time::Duration) {
+        let deadline = std::time::Instant::now() + timeout;
         for slot in [&self.poller, &self.input, &self.file, &self.audio] {
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
             if let Ok(mut guard) = slot.lock() {
                 if let Some(handle) = guard.take() {
-                    let _ = handle.join();
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    let _ = wait_join_timeout(handle, remaining);
                 }
             }
         }
+    }
+}
+
+fn wait_join_timeout(handle: JoinHandle<()>, timeout: std::time::Duration) -> bool {
+    if timeout.is_zero() {
+        return false;
+    }
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(handle.join());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(())) => true,
+        _ => false,
     }
 }
 

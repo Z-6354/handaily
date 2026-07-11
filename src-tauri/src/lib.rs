@@ -14,13 +14,12 @@ pub mod prompts;
 pub mod state;
 pub mod system;
 pub mod tracker;
-#[cfg(debug_assertions)]
 pub mod test_api;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow, WindowEvent};
+use tauri::{AppHandle, Manager, WebviewWindow, WindowEvent};
 #[cfg(not(windows))]
 use tauri::{PhysicalPosition, PhysicalSize, Position, Size};
 
@@ -143,27 +142,8 @@ fn prepare_main_window_for_first_show(win: &WebviewWindow) {
     }
 }
 
-fn install_main_window_maximize_hook(win: &WebviewWindow) {
-    #[cfg(windows)]
-    {
-        match crate::system::win32_work_area::install_maximize_work_area_hook(win) {
-            Ok(()) => {}
-            Err(e) => {
-                crate::log::warn(format!("工作区最大化钩子安装失败: {e}"));
-                let win_for_hook = win.clone();
-                std::thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(300));
-                    if let Err(e2) =
-                        crate::system::win32_work_area::install_maximize_work_area_hook(
-                            &win_for_hook,
-                        )
-                    {
-                        crate::log::warn(format!("工作区最大化钩子重试失败: {e2}"));
-                    }
-                });
-            }
-        }
-    }
+pub fn install_main_window_maximize_hook(_win: &WebviewWindow) {
+    // WebView2 宿主窗口不支持稳定的 SetWindowSubclass；改由 on_window_event + correct_if_zoomed 处理。
 }
 
 static MAIN_WINDOW_ENSURED: AtomicBool = AtomicBool::new(false);
@@ -187,7 +167,6 @@ pub fn ensure_main_window(app: &AppHandle) -> Result<WebviewWindow, String> {
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
-        install_main_window_maximize_hook(&win);
         prepare_main_window_for_first_show(&win);
     }
     Ok(win)
@@ -233,6 +212,7 @@ pub fn run() {
                         if let Err(e) = crate::character::migrate_on_startup(&data_dir, &db) {
                             crate::log::warn(format!("人物 manifest 启动迁移失败: {e}"));
                         }
+                        crate::character::warm_roster_cache(&data_dir);
                     }
                 });
             }
@@ -256,9 +236,10 @@ pub fn run() {
 
             install_dev_console_shutdown_hook(app.handle());
 
-            #[cfg(debug_assertions)]
-            if std::env::var("HANDAILY_DISABLE_TEST_API").is_err() {
-                test_api::spawn_server(app.handle().clone(), app_state.clone());
+            if let Ok(db) = crate::db::lock_conn(&app_state.db) {
+                if crate::system::mcp_api::should_spawn(&db) {
+                    test_api::spawn_server(app.handle().clone(), app_state.clone());
+                }
             }
 
             Ok(())
@@ -273,6 +254,8 @@ pub fn run() {
             ipc::live2d_commands::settings_save,
             ipc::live2d_commands::autostart_get_status,
             ipc::live2d_commands::autostart_set_enabled,
+            ipc::live2d_commands::mcp_api_get_status,
+            ipc::live2d_commands::mcp_api_set_enabled,
             ipc::live2d_commands::persona_list,
             ipc::live2d_commands::persona_set_active,
             ipc::live2d_commands::persona_get_detail,
@@ -336,6 +319,7 @@ pub fn run() {
             ipc::live2d_commands::pet_clear_spine_ready,
             ipc::live2d_commands::pet_get_bubble_enabled,
             ipc::live2d_commands::pet_set_bubble_enabled,
+            ipc::live2d_commands::pet_clear_bubble,
             ipc::live2d_commands::pet_get_model_status,
             ipc::live2d_commands::pet_get_config,
             ipc::live2d_commands::pet_resolve_model_preload_config,
@@ -378,7 +362,7 @@ pub fn run() {
                 WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
                     let _ = window.hide();
-                    let _ = window.emit("main-window-visible", false);
+                    crate::pet::emit_main_window_visible(window.app_handle(), false);
                     crate::pet::restore_pet_topmost_if_visible(window.app_handle());
                 }
                 WindowEvent::Resized(_) => {
@@ -391,8 +375,19 @@ pub fn run() {
                         handle_main_window_maximize(&win);
                     }
                 }
+                WindowEvent::Focused(true) => {
+                    if let Some(win) = window.app_handle().get_webview_window("main") {
+                        #[cfg(windows)]
+                        crate::system::win32_work_area::correct_if_zoomed(&win);
+                        #[cfg(not(windows))]
+                        handle_main_window_maximize(&win);
+                    }
+                }
                 WindowEvent::Focused(false) => {
-                    crate::pet::restore_pet_topmost_if_visible(window.app_handle());
+                    if !crate::pet::is_main_window_visible(window.app_handle()) {
+                        crate::pet::emit_main_window_visible(window.app_handle(), false);
+                        crate::pet::restore_pet_topmost_if_visible(window.app_handle());
+                    }
                 }
                 _ => {}
             }
@@ -412,6 +407,8 @@ pub(crate) fn prepare_app_exit_impl(app: &tauri::AppHandle, st: Option<&Arc<stat
     if EXIT_PREPARED.swap(true, Ordering::SeqCst) {
         return;
     }
+    crate::tray::dismiss_tray_icon(app);
+    crate::test_api::shutdown_server();
     if let Some(st) = st {
         st.stop_flag
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -476,7 +473,7 @@ fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             }
             // join 后台线程（后台线程在 stop_flag=true 时会跳出循环并 flush_on_exit）
             if let Some(js) = app.try_state::<state::JoinState>() {
-                js.join_all();
+                js.join_all_timeout(Duration::from_millis(500));
             }
         }
         _ => {}

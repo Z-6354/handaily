@@ -46,12 +46,15 @@ function movementLogFlags(): Record<string, unknown> {
     exitEditBoundsInFlight,
     ignoreCursorActive,
     petMenuOpen,
+    mainWindowVisible,
+    bubbleEnabled,
+    pollPointerCapture,
     stageOffsetX,
     stageOffsetY,
     stageScale,
     canvasDisplayW,
     canvasDisplayH,
-    suppressUntil: editBoundsSuppressUntil,
+    suppressUntil: suppressVisibilityUntil,
   };
 }
 
@@ -201,6 +204,7 @@ stage.append(canvasWrap, fallback);
 root.append(stage, bubble, editOverlay);
 
 let bubbleTimer: ReturnType<typeof setTimeout> | null = null;
+let bubbleLifecycleToken = 0;
 let pendingBubble: { text: string; animation?: string | null } | null = null;
 let bubbleEnabled = true;
 
@@ -249,7 +253,21 @@ function shouldDeferClickThrough(): boolean {
   return (
     editBoundsMode ||
     editBoundsEnterPending ||
+    mainWindowVisible ||
     (petDisplayReady && petDisplay.reloadInProgress)
+  );
+}
+
+function shouldFocusPet(): boolean {
+  return !mainWindowVisible && Date.now() >= suppressVisibilityUntil;
+}
+
+function canRunClickThroughPoll(): boolean {
+  return (
+    !document.hidden &&
+    !mainWindowVisible &&
+    !petMenuOpen &&
+    !shouldDeferClickThrough()
   );
 }
 
@@ -269,31 +287,182 @@ function resetPointerGestureState() {
   endWindowDrag();
 }
 
-async function restoreNormalInteraction() {
-  resetPointerGestureState();
+let restoreInteractionToken = 0;
+let restoreScheduleTimer: ReturnType<typeof setTimeout> | null = null;
+let restoreScheduleOpts: { focusPet?: boolean; light?: boolean } | undefined;
+let restoreDeferredForGesture = false;
+const RESTORE_DEBOUNCE_MS = 64;
+const earlyUnlisteners: Array<() => void> = [];
+
+function isUserGestureActive(): boolean {
+  return (
+    pointerDown ||
+    windowDragStarted ||
+    pollPointerCapture ||
+    offsetDragging ||
+    resizeDragging
+  );
+}
+
+function cancelScheduledRestore() {
+  if (restoreScheduleTimer) {
+    clearTimeout(restoreScheduleTimer);
+    restoreScheduleTimer = null;
+  }
+  restoreScheduleOpts = undefined;
+}
+
+function flushDeferredRestoreIfIdle() {
+  if (!restoreDeferredForGesture || isUserGestureActive()) return;
+  restoreDeferredForGesture = false;
+  scheduleRestoreInteraction();
+}
+
+function scheduleRestoreInteraction(options?: { focusPet?: boolean; light?: boolean }) {
+  if (appExiting) return;
+  if (options) {
+    restoreScheduleOpts = { ...restoreScheduleOpts, ...options };
+  } else if (!restoreScheduleOpts) {
+    restoreScheduleOpts = options;
+  }
+  if (isUserGestureActive()) {
+    restoreDeferredForGesture = true;
+    return;
+  }
+  const run = () => {
+    restoreScheduleTimer = null;
+    if (isUserGestureActive()) {
+      restoreDeferredForGesture = true;
+      return;
+    }
+    restoreDeferredForGesture = false;
+    const opts = restoreScheduleOpts;
+    restoreScheduleOpts = undefined;
+    void restoreNormalInteraction(opts);
+  };
+  if (restoreScheduleOpts?.light) {
+    if (restoreScheduleTimer) {
+      clearTimeout(restoreScheduleTimer);
+      restoreScheduleTimer = null;
+    }
+    run();
+    return;
+  }
+  if (restoreScheduleTimer) clearTimeout(restoreScheduleTimer);
+  restoreScheduleTimer = window.setTimeout(run, RESTORE_DEBOUNCE_MS);
+}
+
+function pauseBubbleForOverlay() {
+  bubbleLifecycleToken += 1;
+  if (bubbleTimer) {
+    clearTimeout(bubbleTimer);
+    bubbleTimer = null;
+  }
+  bubble.classList.remove("visible");
+}
+
+function flushPendingBubbleIfAllowed() {
+  if (!pendingBubble || !bubbleEnabled || mainWindowVisible || petMenuOpen || document.hidden) {
+    return;
+  }
+  const next = pendingBubble;
+  pendingBubble = null;
+  showBubble(next.text, next.animation);
+}
+
+function requestClickThroughSync() {
+  if (!canRunClickThroughPoll()) return;
+  ensureClickThroughPoll();
+  void syncClickThroughState();
+}
+
+function resumeInteractionAfterMainClose() {
+  if (document.hidden || editBoundsMode || appExiting || mainWindowVisible) return;
+  ignoreCursorActive = false;
+  void applyClickThrough(false, true);
+  if (canRunClickThroughPoll()) {
+    ensureClickThroughPoll();
+  }
+  scheduleRestoreInteraction({ focusPet: false, light: true });
+}
+
+function applyMainWindowVisibility(visible: boolean, suppressMs = 600) {
+  suppressVisibilityUntil = Math.max(suppressVisibilityUntil, Date.now() + suppressMs);
+  if (visible) {
+    if (mainWindowVisible) return;
+    mainWindowVisible = true;
+    stopClickThroughPoll();
+    pauseBubbleForOverlay();
+    cancelScheduledRestore();
+    void restoreNormalInteraction({ focusPet: false });
+    return;
+  }
+  if (!mainWindowVisible) return;
+  mainWindowVisible = false;
+  if (!document.hidden) {
+    resumeInteractionAfterMainClose();
+    window.setTimeout(() => flushPendingBubbleIfAllowed(), 120);
+  }
+}
+
+function disposeEarlyListeners() {
+  while (earlyUnlisteners.length > 0) {
+    earlyUnlisteners.pop()?.();
+  }
+}
+
+async function restoreNormalInteraction(options?: { focusPet?: boolean; light?: boolean }) {
+  const token = ++restoreInteractionToken;
+  const gestureActive = isUserGestureActive();
+  const light = options?.light ?? false;
+  if (!light && !gestureActive) {
+    resetPointerGestureState();
+    pollPointerCapture = false;
+  }
   stopEditBoundsPoll();
   cancelEditBoundsBlurExit();
-  stopClickThroughPoll();
-  clickThroughApplySerial += 1;
+  if (!light && !gestureActive) {
+    stopClickThroughPoll();
+    clickThroughApplySerial += 1;
+  }
   editBoundsEnterPending = false;
-  if (document.hidden || editBoundsMode) return;
-  petMovementLog("restore-interaction", movementLogFlags());
+  if (document.hidden || editBoundsMode || appExiting) return;
+  if (gestureActive) {
+    restoreDeferredForGesture = true;
+    return;
+  }
+  if (!light) {
+    petMovementLog("restore-interaction", movementLogFlags());
+  }
   try {
-    ignoreCursorActive = true;
-    await applyClickThrough(false, true);
-    await syncClickThroughState();
-    ensureClickThroughPoll();
-    try {
-      await petWindow.setFocus();
-    } catch {
-      // ignore
+    if (!light || ignoreCursorActive) {
+      ignoreCursorActive = false;
+      await applyClickThrough(false, true);
+    }
+    if (token !== restoreInteractionToken) return;
+    if (mainWindowVisible) return;
+    if (token !== restoreInteractionToken) return;
+    if (canRunClickThroughPoll()) {
+      ensureClickThroughPoll();
+    }
+    const focusPet = options?.focusPet ?? shouldFocusPet();
+    if (focusPet && !isUserGestureActive()) {
+      window.setTimeout(() => {
+        if (token !== restoreInteractionToken) return;
+        if (shouldFocusPet() && !document.hidden && !editBoundsMode && !appExiting && !isUserGestureActive()) {
+          void petWindow.setFocus().catch(() => {});
+        }
+      }, 80);
     }
   } catch (err) {
+    if (token !== restoreInteractionToken) return;
     console.error("restoreNormalInteraction failed", err);
-    ignoreCursorActive = true;
+    ignoreCursorActive = false;
     void applyClickThrough(false, true).then(() => {
-      ensureClickThroughPoll();
-      void syncClickThroughState();
+      if (token !== restoreInteractionToken) return;
+      if (canRunClickThroughPoll()) {
+        ensureClickThroughPoll();
+      }
     });
   }
 }
@@ -376,6 +545,9 @@ let menuCloseSuppressUntil = 0;
 let cachedWinPos: { x: number; y: number } | null = null;
 let lastDispatchedClickAt = 0;
 let appExiting = false;
+let mainWindowVisible = false;
+let suppressVisibilityUntil = 0;
+let pollPointerCapture = false;
 
 function collectInteractiveRects(): DOMRect[] {
   const rects: DOMRect[] = [];
@@ -475,7 +647,7 @@ async function trackPollLeftClickWhenIgnored(
     return;
   }
 
-  if (!ignoreCursorActive || shouldDeferClickThrough() || petMenuOpen || rightClickMenuLock || mainWindowCovering) {
+  if (!ignoreCursorActive || shouldDeferClickThrough() || petMenuOpen || rightClickMenuLock || mainWindowVisible) {
     pollLeftWasDown = down;
     return;
   }
@@ -485,6 +657,7 @@ async function trackPollLeftClickWhenIgnored(
 
   if (edgeDown && hitInteractive(pointer.x, pointer.y)) {
     suppressClickCapture(DOUBLE_CLICK_MS);
+    pollPointerCapture = true;
     pollLeftDownAt = Date.now();
     pollLeftDownClient = { x: pointer.x, y: pointer.y };
     pointerDown = true;
@@ -497,6 +670,7 @@ async function trackPollLeftClickWhenIgnored(
       screenY: screen.y,
       time: pollLeftDownAt,
     };
+    ignoreCursorActive = false;
     void applyClickThrough(false, true);
     void refreshDragWindowSize();
     void readWindowBoundsPhysical().then((bounds) => {
@@ -505,6 +679,7 @@ async function trackPollLeftClickWhenIgnored(
   }
 
   if (edgeUp && pollLeftWasDown) {
+    pollPointerCapture = false;
     const elapsed = Date.now() - pollLeftDownAt;
     const dist = Math.hypot(pointer.x - pollLeftDownClient.x, pointer.y - pollLeftDownClient.y);
     const isClick =
@@ -533,9 +708,73 @@ async function trackPollLeftClickWhenIgnored(
   pollLeftWasDown = down;
 }
 
+async function trackPollPointerDrag(
+  pointer: { x: number; y: number },
+  screen: { x: number; y: number },
+) {
+  if (!pointerDown || !pollPointerCapture || editBoundsMode) return;
+  let down = false;
+  try {
+    down = await invoke<boolean>("pet_is_left_mouse_down");
+  } catch {
+    return;
+  }
+
+  if (!windowDragStarted) {
+    const dx = pointer.x - pointerStart.x;
+    const dy = pointer.y - pointerStart.y;
+    if (Math.hypot(dx, dy) >= DRAG_THRESHOLD) {
+      ignoreCursorActive = false;
+      void applyClickThrough(false, true);
+      void beginWindowDrag(pointerStart.screenX, pointerStart.screenY);
+    }
+  } else if (windowDragAnchorReady) {
+    const dx = screen.x - dragAnchor.screenX;
+    const dy = screen.y - dragAnchor.screenY;
+    const clamped = clampWindowPosition(
+      dragAnchor.winX + dx,
+      dragAnchor.winY + dy,
+      dragWindowPhysW,
+      dragWindowPhysH,
+    );
+    scheduleDragPosition(clamped.x, clamped.y);
+  }
+
+  const edgeUp = !down && pollLeftWasDown;
+  if (edgeUp) {
+    pollPointerCapture = false;
+    const elapsed = Date.now() - pollLeftDownAt;
+    const dist = Math.hypot(pointer.x - pollLeftDownClient.x, pointer.y - pollLeftDownClient.y);
+    const isClick =
+      elapsed <= CLICK_MAX_MS &&
+      dist < DRAG_THRESHOLD &&
+      hitInteractive(pollLeftDownClient.x, pollLeftDownClient.y);
+
+    if (isClick) {
+      if (windowDragStarted) {
+        endWindowDrag();
+      } else {
+        dispatchStageClick(pointer.x, pointer.y);
+      }
+      windowDragStarted = false;
+      windowDragAnchorReady = false;
+    } else if (windowDragStarted) {
+      endWindowDrag();
+      void savePosition();
+      windowDragStarted = false;
+      windowDragAnchorReady = false;
+    }
+    pointerDown = false;
+    flushDeferredRestoreIfIdle();
+  }
+
+  pollLeftWasDown = down;
+}
+
 let clickThroughApplySerial = 0;
 
 async function applyClickThrough(ignore: boolean, force = false) {
+  if (ignore && mainWindowVisible) return;
   if (ignore && mustCapturePointer()) return;
   if (!force && ignore === ignoreCursorActive) return;
   const token = ++clickThroughApplySerial;
@@ -566,8 +805,8 @@ function stopClickThroughPoll() {
 }
 
 function ensureClickThroughPoll() {
-  if (document.hidden) return;
-  stopClickThroughPoll();
+  if (document.hidden || !canRunClickThroughPoll()) return;
+  if (clickThroughInterval) return;
   clickThroughInterval = window.setInterval(() => {
     if (document.hidden) return;
     void runClickThroughPollTick();
@@ -602,16 +841,21 @@ async function dismissMenuOnOutsideLeftClick() {
 }
 
 async function runClickThroughPollTick() {
+  if (appExiting) {
+    stopClickThroughPoll();
+    return;
+  }
+  if (mainWindowVisible) {
+    stopClickThroughPoll();
+    if (ignoreCursorActive) {
+      ignoreCursorActive = false;
+      void applyClickThrough(false, true);
+    }
+    return;
+  }
   if (editBoundsMode) {
     await runEditBoundsPollTick();
     return;
-  }
-  if (shouldDeferClickThrough() || mustCapturePointer()) return;
-
-  if (petMenuOpen) {
-    await dismissMenuOnOutsideLeftClick();
-  } else {
-    prevLeftMouseDown = false;
   }
 
   let pointer: { x: number; y: number } | undefined;
@@ -622,6 +866,18 @@ async function runClickThroughPollTick() {
     screen = { x: client.screen.x, y: client.screen.y };
   } else {
     return;
+  }
+
+  if (pointerDown && pollPointerCapture) {
+    await trackPollPointerDrag(pointer, screen);
+  }
+
+  if (shouldDeferClickThrough() || mustCapturePointer()) return;
+
+  if (petMenuOpen) {
+    await dismissMenuOnOutsideLeftClick();
+  } else {
+    prevLeftMouseDown = false;
   }
 
   await syncClickThroughState(pointer);
@@ -646,6 +902,12 @@ async function runClickThroughPollTick() {
 }
 
 async function syncClickThroughState(pointer?: { x: number; y: number }) {
+  if (mainWindowVisible || petMenuOpen) {
+    if (ignoreCursorActive) {
+      await applyClickThrough(false, true);
+    }
+    return;
+  }
   if (mustCapturePointer()) {
     await applyClickThrough(false, true);
     return;
@@ -666,12 +928,11 @@ async function syncClickThroughState(pointer?: { x: number; y: number }) {
 }
 
 function startClickThrough() {
-  if (document.hidden || shouldDeferClickThrough()) {
+  if (!canRunClickThroughPoll()) {
     stopClickThroughPoll();
     return;
   }
-  ensureClickThroughPoll();
-  void syncClickThroughState();
+  requestClickThroughSync();
 }
 
 function stopClickThrough() {
@@ -682,7 +943,7 @@ function stopClickThrough() {
 async function ensureClickThroughDisabled() {
   stopClickThroughPoll();
   clickThroughApplySerial += 1;
-  ignoreCursorActive = true;
+  ignoreCursorActive = false;
   await applyClickThrough(false, true);
 }
 
@@ -780,6 +1041,7 @@ function pickLineForAnimation(lines: PetRemarkLine[], animation?: string | null)
 }
 
 function clearBubble() {
+  bubbleLifecycleToken += 1;
   bubble.classList.remove("visible");
   if (bubbleTimer) {
     clearTimeout(bubbleTimer);
@@ -790,10 +1052,17 @@ function clearBubble() {
 
 function showBubble(text: string, animation?: string | null) {
   if (!bubbleEnabled) return;
+  if (mainWindowVisible || petMenuOpen) {
+    pendingBubble = { text, animation };
+    return;
+  }
   if (document.hidden) {
     pendingBubble = { text, animation };
     return;
   }
+
+  bubbleLifecycleToken += 1;
+  const token = bubbleLifecycleToken;
 
   bubble.textContent = text;
   bubble.classList.remove("visible");
@@ -803,21 +1072,35 @@ function showBubble(text: string, animation?: string | null) {
 
   if (bubbleTimer) clearTimeout(bubbleTimer);
   bubbleTimer = setTimeout(() => {
+    if (token !== bubbleLifecycleToken || !bubbleEnabled) {
+      bubbleTimer = null;
+      return;
+    }
     bubble.classList.remove("visible");
-    if (!editBoundsMode) startClickThrough();
+    bubbleTimer = null;
+    if (!editBoundsMode && !petMenuOpen && !mainWindowVisible) {
+      requestClickThroughSync();
+    }
   }, 8000);
 
   if (animation && pet) {
     pet.playAnimation(animation, false);
   }
-  if (!editBoundsMode) startClickThrough();
+  if (!editBoundsMode && !petMenuOpen && !mainWindowVisible) {
+    requestClickThroughSync();
+  }
 }
-
-
 
 function applyBubbleEnabledFromConfig(enabled: boolean | undefined) {
   if (typeof enabled !== "boolean") return;
+  const wasEnabled = bubbleEnabled;
   bubbleEnabled = enabled;
+  if (!enabled) {
+    clearBubble();
+    if (wasEnabled && !petMenuOpen && !mainWindowVisible && !document.hidden) {
+      requestClickThroughSync();
+    }
+  }
 }
 
 async function loadBubbleEnabled() {
@@ -826,6 +1109,7 @@ async function loadBubbleEnabled() {
   } catch {
     bubbleEnabled = true;
   }
+  if (!bubbleEnabled) clearBubble();
 }
 
 async function loadConfig(): Promise<PetConfigPayload> {
@@ -897,7 +1181,6 @@ function initPetDisplayModule() {
         stageOffsetX = cfg.offset_x ?? 0;
         stageOffsetY = cfg.offset_y ?? 0;
         clampStageOffset();
-        applyBubbleEnabledFromConfig(cfg.bubble_enabled);
       },
       applyCanvasDisplaySize,
       shouldExitEditBeforeReload: async () => {
@@ -926,7 +1209,7 @@ function initPetDisplayModule() {
     clampStageOffset();
     applyStageTransform();
     applyCanvasDisplaySize();
-    if (!petDisplay.reloadInProgress) startClickThrough();
+    if (!petDisplay.reloadInProgress && canRunClickThroughPoll()) startClickThrough();
     petLog("info", "reload", "success", { modelId: cfg.model_id, animations: animationNames.length });
     scheduleSiblingSkinPreload(cfg.model_id);
   });
@@ -934,7 +1217,7 @@ function initPetDisplayModule() {
   petDisplay.on("reload-failure", ({ err }) => showPetLoadError(err));
 
   petDisplay.on("reload-finally", () => {
-    void restoreNormalInteraction();
+    scheduleRestoreInteraction();
     if (!pendingSwitchReload) return;
     pendingSwitchReload = false;
     void (async () => {
@@ -1160,6 +1443,7 @@ function scheduleEditResize(bounds: ResizeBoundsPayload) {
         }
 
         applyEditResizeCanvasSync(logW, logH, prevW, prevH, edge);
+        applyStageTransform();
       })
       .catch((err) => {
         console.error("edit resize apply failed", err);
@@ -1271,8 +1555,8 @@ function syncCanvasToWindow(w: number, h: number, refitCanvas = false) {
 
 function applyCanvasDisplaySize() {
   if (editBoundsMode) {
-    canvasWrap.style.width = "100%";
-    canvasWrap.style.height = "100%";
+    canvasWrap.style.width = `${canvasDisplayW}px`;
+    canvasWrap.style.height = `${canvasDisplayH}px`;
     return;
   }
   canvasWrap.style.width = `${canvasDisplayW}px`;
@@ -1442,6 +1726,8 @@ function ensureCanvasAttached() {
 function disposePetForExit() {
   if (appExiting) return;
   appExiting = true;
+  restoreInteractionToken += 1;
+  cancelScheduledRestore();
   root.style.visibility = "hidden";
   root.style.pointerEvents = "none";
   canvasWrap.style.visibility = "hidden";
@@ -1466,6 +1752,7 @@ function disposePetForExit() {
   pet = null;
   releaseCanvasGlContext(canvas);
   petEventUnlisten?.();
+  disposeEarlyListeners();
 }
 
 async function isPetWindowVisible(): Promise<boolean> {
@@ -1585,11 +1872,10 @@ function showPetLoadError(err: unknown) {
 }
 
 async function resumePetFromHidden() {
-  if (mainWindowCovering) return;
   if (Date.now() < suppressVisibilityUntil) return;
   if (petDisplay.reloadInProgress) {
     await petDisplay.whenIdle();
-    if (!document.hidden && !mainWindowCovering) void resumePetFromHidden();
+    if (!document.hidden) void resumePetFromHidden();
     return;
   }
   const now = Date.now();
@@ -1611,46 +1897,56 @@ async function resumePetFromHidden() {
 }
 
 // 尽早注册，避免 Rust on_page_load 发出的 pet-reload 在监听器就绪前丢失
-let suppressVisibilityUntil = 0;
-let mainWindowCovering = false;
 
 const tauriReady = waitForTauriInternals();
 
-void tauriReady.then(() => {
-  void listen("pet-app-exiting", () => {
-    disposePetForExit();
-  });
+void tauriReady.then(async () => {
+  earlyUnlisteners.push(
+    await listen("pet-app-exiting", () => {
+      disposePetForExit();
+    }),
+  );
 
-  void listen<number>("pet-main-opening", (ev) => {
-    mainWindowCovering = true;
-    suppressVisibilityUntil = Date.now() + (ev.payload ?? 1500);
-    pet?.setRenderPaused(true);
-  });
+  earlyUnlisteners.push(
+    await listen<number>("pet-main-opening", (ev) => {
+      applyMainWindowVisibility(true, ev.payload ?? 1200);
+    }),
+  );
 
-  void listen("pet-main-closed", () => {
-    mainWindowCovering = false;
-    suppressVisibilityUntil = Date.now() + 400;
-    if (pet) {
-      pet.setRenderPaused(false);
-      void syncCanvasFromWindow(false).then(() => {
+  earlyUnlisteners.push(
+    await listen("pet-main-closed", () => {
+      suppressVisibilityUntil = Math.max(suppressVisibilityUntil, Date.now() + 200);
+      if (pet) {
+        pet.setRenderPaused(false);
         applyStageTransform();
-        startClickThrough();
-      });
-      return;
-    }
-    void resumePetFromHidden();
-  });
+      } else {
+        void resumePetFromHidden();
+      }
+      applyMainWindowVisibility(false, 200);
+    }),
+  );
 
-  void listen("pet-hidden", () => {
-    mainWindowCovering = false;
-    petMenuOpen = false;
-    pendingBubble = null;
-    stopClickThrough();
-    pet?.setRenderPaused(true);
-    if (editBoundsMode) {
-      void abandonEditBoundsOnHidden();
-    }
-  });
+  earlyUnlisteners.push(
+    await listen<boolean>("main-window-visible", (ev) => {
+      if (ev.payload) {
+        applyMainWindowVisibility(true, 600);
+        return;
+      }
+      applyMainWindowVisibility(false, 200);
+    }),
+  );
+
+  earlyUnlisteners.push(
+    await listen("pet-hidden", () => {
+      petMenuOpen = false;
+      pendingBubble = null;
+      stopClickThrough();
+      pet?.setRenderPaused(true);
+      if (editBoundsMode) {
+        void abandonEditBoundsOnHidden();
+      }
+    }),
+  );
 });
 
 const petReloadUnlistenPromise = tauriReady.then(() =>
@@ -1678,7 +1974,6 @@ async function refreshPetAnimations() {
   if (!pet) return;
   try {
     const cfg = await loadConfig();
-    applyBubbleEnabledFromConfig(cfg.bubble_enabled);
     pet.configureAnimations({
       idleAnimation: cfg.idle_animation,
       clickAnimation: cfg.click_animation,
@@ -1918,7 +2213,7 @@ async function enterEditBounds() {
     startEditBoundsPoll();
 
     void petWindow.setFocus().catch(() => {});
-    suppressEditBoundsExit(3500);
+    suppressEditBoundsExit(400);
     pet?.setRenderPaused(false);
     petMovementLog("enter-edit", {
       phase: "ready",
@@ -2226,6 +2521,7 @@ function handlePointerUp(me: MouseEvent) {
   if (pointerDown && !editBoundsMode && me.button === 0) {
 
     pointerDown = false;
+    pollPointerCapture = false;
 
     const elapsed = Date.now() - pointerStart.time;
 
@@ -2292,6 +2588,7 @@ function handlePointerUp(me: MouseEvent) {
   if (!mustCapturePointer()) {
     void syncClickThroughState({ x: me.clientX, y: me.clientY });
   }
+  flushDeferredRestoreIfIdle();
 }
 
 
@@ -2327,6 +2624,7 @@ stage.addEventListener("mousedown", (e) => {
       return;
     }
     if (!hitInteractive(e.clientX, e.clientY)) {
+      editBoundsAwaitMouseUp = false;
       void exitEditBounds("click-empty");
       return;
     }
@@ -2337,7 +2635,9 @@ stage.addEventListener("mousedown", (e) => {
   }
 
   suppressClickCapture(DOUBLE_CLICK_MS);
+  suppressVisibilityUntil = Math.max(suppressVisibilityUntil, Date.now() + 500);
 
+  pollPointerCapture = false;
   pointerDown = true;
   void applyClickThrough(false, true);
   void refreshDragWindowSize();
@@ -2370,6 +2670,7 @@ stage.addEventListener("mousedown", (e) => {
 stage.addEventListener("contextmenu", (e) => {
   if (!hitInteractive(e.clientX, e.clientY)) return;
   e.preventDefault();
+  if (ignoreCursorActive) return;
   stopClickThroughPoll();
   void openPetMenu();
   void applyClickThrough(false, true);
@@ -2379,6 +2680,7 @@ root.addEventListener("contextmenu", (e) => {
   if (e.target === stage || stage.contains(e.target as Node)) return;
   if (!hitInteractive(e.clientX, e.clientY)) return;
   e.preventDefault();
+  if (ignoreCursorActive) return;
   stopClickThroughPoll();
   void openPetMenu();
   void applyClickThrough(false, true);
@@ -2391,7 +2693,10 @@ async function openPetMenu() {
     if (petDisplayReady && petDisplay.reloadInProgress) {
       petLog("info", "menu", "open during reload");
     }
-    await invoke<boolean>("pet_menu_toggle_at_cursor");
+    const open = await invoke<boolean>("pet_menu_toggle_at_cursor");
+    if (open) {
+      void ensureClickThroughDisabled();
+    }
   } catch (err) {
     console.error("打开桌宠菜单失败", err);
     if (!petMenuOpen && !shouldDeferClickThrough()) startClickThrough();
@@ -2405,12 +2710,6 @@ async function openPetMenu() {
 
 
 document.addEventListener("mousedown", (e) => {
-
-  if (Date.now() < editBoundsSuppressUntil) {
-
-    return;
-
-  }
 
   if (resizeDragging || offsetDragging) {
 
@@ -2426,6 +2725,7 @@ document.addEventListener("mousedown", (e) => {
 
     }
 
+    editBoundsAwaitMouseUp = false;
     petMovementLog("mousedown-outside", {
       target: e.target instanceof Element ? e.target.className : String(e.target),
       ...movementLogFlags(),
@@ -2473,21 +2773,17 @@ window.addEventListener("keydown", (e) => {
 
 
 document.addEventListener("visibilitychange", () => {
-  if (mainWindowCovering || Date.now() < suppressVisibilityUntil) {
+  if (Date.now() < suppressVisibilityUntil) {
     return;
   }
   if (document.hidden) {
     pet?.setRenderPaused(true);
     stopClickThrough();
   } else {
-    if (pendingBubble) {
-      const next = pendingBubble;
-      pendingBubble = null;
-      showBubble(next.text, next.animation);
-    }
+    flushPendingBubbleIfAllowed();
     void resumePetFromHidden();
   }
-  if (!document.hidden && !shouldDeferClickThrough()) startClickThrough();
+  if (!document.hidden && canRunClickThroughPoll()) startClickThrough();
 });
 
 
@@ -2531,23 +2827,59 @@ async function setupPetEvents() {
   const unlistenMenuState = await listen<boolean>("pet-menu-state", (ev) => {
     const wasOpen = petMenuOpen;
     petMenuOpen = !!ev.payload;
-    if (wasOpen && !petMenuOpen) {
+    if (petMenuOpen) {
+      void ensureClickThroughDisabled();
+      return;
+    }
+    if (wasOpen) {
       menuCloseSuppressUntil = Date.now() + 1800;
       suppressEditBoundsExit(1800);
-    }
-    if (!petMenuOpen) {
       prevLeftMouseDown = false;
-      if (!shouldDeferClickThrough()) startClickThrough();
+      void loadBubbleEnabled().then(() => {
+        if (!bubbleEnabled) {
+          clearBubble();
+        } else {
+          flushPendingBubbleIfAllowed();
+        }
+      });
     }
+    scheduleRestoreInteraction({ focusPet: shouldFocusPet() });
   });
 
   const unlistenClickThrough = await listen("pet-sync-click-through", () => {
-    if (!petMenuOpen && !shouldDeferClickThrough()) startClickThrough();
+    if (mainWindowVisible) {
+      stopClickThroughPoll();
+      if (ignoreCursorActive) {
+        void applyClickThrough(false, true);
+      }
+      return;
+    }
+    if (!shouldDeferClickThrough()) {
+      requestClickThroughSync();
+    }
   });
 
   const unlistenBubble = await listen<boolean>("pet-bubble-enabled-changed", (ev) => {
     applyBubbleEnabledFromConfig(ev.payload);
-    if (!ev.payload) clearBubble();
+  });
+  const unlistenClearBubble = await listen("pet-clear-bubble", () => {
+    clearBubble();
+  });
+
+  const unlistenTestAction = await listen<string>("pet-test-action", (ev) => {
+    const action = ev.payload;
+    petMovementLog("test-action", { action, ...movementLogFlags() });
+    if (action === "click-left") {
+      pet?.handleClick();
+      return;
+    }
+    if (action === "click-double") {
+      void openMainFromDoubleClick();
+      return;
+    }
+    if (action === "sync-interaction") {
+      scheduleRestoreInteraction({ focusPet: shouldFocusPet() });
+    }
   });
 
   const unlistenScale = await listen<number>("pet-scale-changed", (ev) => {
@@ -2571,15 +2903,25 @@ async function setupPetEvents() {
     unlistenMenuState();
     unlistenClickThrough();
     unlistenBubble();
+    unlistenClearBubble();
+    unlistenTestAction();
     unlistenScale();
     petEventUnlisten = null;
   };
 
   if (import.meta.hot) {
     import.meta.hot.dispose(() => {
+      restoreInteractionToken += 1;
+      cancelScheduledRestore();
       petEventUnlisten?.();
+      disposeEarlyListeners();
       stopClickThroughPoll();
       stopEditBoundsPoll();
+      bubbleLifecycleToken += 1;
+      if (bubbleTimer) {
+        clearTimeout(bubbleTimer);
+        bubbleTimer = null;
+      }
       petDisplay?.disposeForExit();
       pet = null;
       releaseCanvasGlContext(canvas);

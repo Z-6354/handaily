@@ -104,6 +104,16 @@ body {
   border-top: 1px solid var(--border-light);
 }
 
+.sidebar-tagline a {
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.sidebar-tagline a:hover {
+  text-decoration: underline;
+}
+
 .nav-item {
   display: flex;
   align-items: center;
@@ -1292,6 +1302,72 @@ body {
 .wiki-bulk-modal__stat--fail {
   color: var(--error);
   font-weight: 600;
+}
+
+.update-announcement-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.update-announcement-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  border: none;
+  background: rgba(15, 23, 42, 0.42);
+  backdrop-filter: blur(4px);
+  cursor: default;
+}
+
+.update-announcement-modal__dialog {
+  position: relative;
+  z-index: 1;
+  width: min(480px, 100%);
+  padding: 22px 24px 20px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(124, 138, 255, 0.28);
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.98) 0%, rgba(244, 242, 255, 0.96) 100%);
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.18), var(--shadow-glow);
+}
+
+.update-announcement-modal__head {
+  margin-bottom: 12px;
+}
+
+.update-announcement-modal__title {
+  margin: 0 0 6px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.update-announcement-modal__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.update-announcement-modal__ver {
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.update-announcement-modal__body {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.update-announcement-modal__actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .pet-lines-import-block-badge--bulk {
