@@ -1105,6 +1105,23 @@ pub async fn pet_set_bubble_enabled(
 }
 
 #[tauri::command]
+pub async fn pet_get_always_on_top(
+    st: State<'_, Arc<AppState>>,
+) -> Result<bool, String> {
+    let db = crate::db::lock_conn(&st.db)?;
+    Ok(crate::pet::is_always_on_top_enabled(&db))
+}
+
+#[tauri::command]
+pub async fn pet_set_always_on_top(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::pet::set_pet_always_on_top(&app, st.inner().clone(), enabled)
+}
+
+#[tauri::command]
 pub async fn pet_clear_bubble(app: tauri::AppHandle) -> Result<(), String> {
     let _ = app.emit_to(crate::pet::PET_LABEL, "pet-clear-bubble", ());
     Ok(())

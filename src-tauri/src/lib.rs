@@ -320,6 +320,8 @@ pub fn run() {
             ipc::live2d_commands::pet_clear_spine_ready,
             ipc::live2d_commands::pet_get_bubble_enabled,
             ipc::live2d_commands::pet_set_bubble_enabled,
+            ipc::live2d_commands::pet_get_always_on_top,
+            ipc::live2d_commands::pet_set_always_on_top,
             ipc::live2d_commands::pet_clear_bubble,
             ipc::live2d_commands::pet_get_model_status,
             ipc::live2d_commands::pet_get_config,

@@ -111,6 +111,7 @@ pub struct PetStatusPayload {
     pub scale: f64,
     pub remark_interval_sec: i64,
     pub bubble_enabled: bool,
+    pub always_on_top: bool,
     pub model_id: String,
     pub model_name: String,
     pub animations: Vec<String>,
@@ -130,6 +131,7 @@ pub struct PetStatusChangedPayload {
     /// 设置页「启用桌宠」开关：DB 已启用且非用户主动隐藏。
     pub active: bool,
     pub bubble_enabled: bool,
+    pub always_on_top: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -203,6 +205,57 @@ pub fn set_bubble_enabled(db: &rusqlite::Connection, enabled: bool) -> Result<()
         if enabled { "1" } else { "0" },
     )
     .map_err(|e| e.to_string())
+}
+
+/// 桌宠窗口是否置顶（默认开启）。关闭后全屏/前台应用会自然遮挡桌宠。
+pub fn is_always_on_top_enabled(db: &rusqlite::Connection) -> bool {
+    crate::db::get_setting(db, "pet_always_on_top").as_deref() != Some("0")
+}
+
+pub fn set_always_on_top_setting(db: &rusqlite::Connection, enabled: bool) -> Result<(), String> {
+    crate::db::set_setting(
+        db,
+        "pet_always_on_top",
+        if enabled { "1" } else { "0" },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// 当前是否应将桌宠窗设为 TOPMOST（主窗打开时强制降层）。
+pub fn pet_should_be_topmost(app: &AppHandle) -> bool {
+    if is_main_window_visible(app) {
+        return false;
+    }
+    app.try_state::<Arc<AppState>>()
+        .and_then(|st| st.db.lock().ok().map(|db| is_always_on_top_enabled(&db)))
+        .unwrap_or(true)
+}
+
+pub fn sync_pet_topmost(app: &AppHandle) {
+    let topmost = pet_should_be_topmost(app);
+    if let Some(pet) = app.get_webview_window(PET_LABEL) {
+        if pet.is_visible().unwrap_or(false) {
+            let _ = pet.set_always_on_top(topmost);
+        }
+    }
+}
+
+fn clear_fullscreen_suppression_and_restore(app: &AppHandle, st: &Arc<AppState>) {
+    let Some(rt) = app.try_state::<PetRuntimeState>() else {
+        return;
+    };
+    if !rt.fullscreen_suppressed.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    let should_show = st
+        .db
+        .lock()
+        .ok()
+        .map(|db| is_enabled(&db) && !rt.user_hidden_pet.load(Ordering::Acquire))
+        .unwrap_or(false);
+    if should_show && !pet_visible(app) {
+        let _ = show_pet(app, st);
+    }
 }
 
 fn model_power_mode(_db: &rusqlite::Connection, _meta: &models::PetAnimationMeta) -> String {
@@ -303,7 +356,7 @@ fn is_pet_menu_visible(app: &AppHandle) -> bool {
 fn raise_menu_above_pet(app: &AppHandle, menu: &WebviewWindow) {
     let pet = app.get_webview_window(PET_LABEL);
     if let Some(pet) = &pet {
-        if pet.is_visible().unwrap_or(false) {
+        if pet.is_visible().unwrap_or(false) && pet_should_be_topmost(app) {
             let _ = pet.set_always_on_top(true);
         }
     }
@@ -551,11 +604,13 @@ fn pet_status_changed_payload(app: &AppHandle) -> PetStatusChangedPayload {
             st.db.lock().ok().map(|db| PetStatusChangedPayload {
                 active: pet_active_flag(app, &db),
                 bubble_enabled: is_bubble_enabled(&db),
+                always_on_top: is_always_on_top_enabled(&db),
             })
         })
         .unwrap_or(PetStatusChangedPayload {
             active: false,
             bubble_enabled: true,
+            always_on_top: true,
         })
 }
 
@@ -765,6 +820,7 @@ pub fn enter_pet_edit_bounds(app: &AppHandle) -> Result<(), String> {
         let _ = win.set_always_on_top(true);
         let _ = win.set_focus();
     }
+    sync_pet_topmost(app);
     Ok(())
 }
 
@@ -935,7 +991,6 @@ async fn wait_frontend_ready(max_secs: u64) {
 
 fn prepare_pet_webview(win: &tauri::WebviewWindow) -> Result<(), String> {
     let _ = win.set_background_color(Some(Color(0, 0, 0, 0)));
-    let _ = win.set_always_on_top(true);
     // 默认穿透，待前端按角色区域再关闭穿透（避免 WebView 就绪前透明窗挡桌面）
     let _ = win.set_ignore_cursor_events(true);
     Ok(())
@@ -1051,7 +1106,7 @@ pub fn sync_pet_interaction_state(app: &AppHandle) {
                 .map(|rt| rt.user_hidden_pet.load(Ordering::Acquire))
                 .unwrap_or(false)
             {
-                let _ = pet.set_always_on_top(true);
+                sync_pet_topmost(app);
             }
         }
     }
@@ -1121,6 +1176,7 @@ pub fn model_status(
         scale: model_scale(&db, &anim_meta),
         remark_interval_sec: model_remark_interval_sec(&db, &anim_meta),
         bubble_enabled: is_bubble_enabled(&db),
+        always_on_top: is_always_on_top_enabled(&db),
         model_id: model_id.to_string(),
         model_name,
         animations: anim_meta.animations,
@@ -1151,6 +1207,7 @@ pub fn status(app: &AppHandle, st: &AppState) -> Result<PetStatusPayload, String
         scale: model_scale(&db, &anim_meta),
         remark_interval_sec: model_remark_interval_sec(&db, &anim_meta),
         bubble_enabled: is_bubble_enabled(&db),
+        always_on_top: is_always_on_top_enabled(&db),
         model_id,
         model_name,
         animations: anim_meta.animations,
@@ -1191,6 +1248,7 @@ pub fn test_snapshot_light(app: &AppHandle, model_id: &str) -> Result<PetTestSna
         scale: 0.55,
         remark_interval_sec: 300,
         bubble_enabled: false,
+        always_on_top: true,
         model_id: model_id.to_string(),
         model_name: model_id.to_string(),
         animations: vec![],
@@ -1476,13 +1534,18 @@ pub fn ensure_pet_window(app: &AppHandle, st: &AppState) -> Result<(), String> {
             get_window_size(&db)
         };
 
+        let top_at_create = {
+            let db = crate::db::lock_conn(&st.db)?;
+            is_always_on_top_enabled(&db)
+        };
+
         let app_for_load = app.clone();
         WebviewWindowBuilder::new(app, PET_LABEL, pet_webview_url())
             .title("小寒桌宠")
             .inner_size(w, h)
             .transparent(true)
             .decorations(false)
-            .always_on_top(true)
+            .always_on_top(top_at_create)
             .skip_taskbar(true)
             .resizable(false)
             .shadow(false)
@@ -1684,7 +1747,7 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     let rt = app.state::<PetRuntimeState>();
     attach_position_guard(app, &win);
     set_pet_position(&win, &rt, x, y)?;
-    let _ = win.set_always_on_top(true);
+    sync_pet_topmost(app);
     win.show().map_err(|e| e.to_string())?;
     companion_session_start(st);
     if should_full_reload_pet(app) {
@@ -1704,10 +1767,6 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
 
 pub fn hide_pet(app: &AppHandle, destroy: bool) -> Result<(), String> {
     hide_pet_impl(app, destroy, true)
-}
-
-fn hide_pet_transient(app: &AppHandle) -> Result<(), String> {
-    hide_pet_impl(app, false, false)
 }
 
 fn hide_pet_impl(app: &AppHandle, destroy: bool, mark_user_hidden: bool) -> Result<(), String> {
@@ -2406,6 +2465,18 @@ pub fn set_enabled(app: &AppHandle, st: Arc<AppState>, enabled: bool) -> Result<
     Ok(())
 }
 
+pub fn set_pet_always_on_top(app: &AppHandle, st: Arc<AppState>, enabled: bool) -> Result<(), String> {
+    {
+        let db = crate::db::lock_conn(&st.db)?;
+        set_always_on_top_setting(&db, enabled)?;
+    }
+    clear_fullscreen_suppression_and_restore(app, &st);
+    sync_pet_topmost(app);
+    sync_menu_z_order_if_visible(app);
+    emit_pet_status_changed(app);
+    Ok(())
+}
+
 /// 启动时提前创建隐藏桌宠 WebView，与主窗口首屏并行，缩短首显等待。
 pub fn prewarm_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
     {
@@ -2636,28 +2707,21 @@ fn is_machine_text(s: &str) -> bool {
 }
 
 fn sync_fullscreen_visibility(app: &AppHandle, st: &Arc<AppState>) {
-    let fullscreen =
-        crate::tracker::win32::is_foreground_fullscreen()
-            && !crate::tracker::win32::is_foreground_own_process();
-    let Some(rt) = app.try_state::<PetRuntimeState>() else {
+    let always_on_top = st
+        .db
+        .lock()
+        .ok()
+        .map(|db| is_always_on_top_enabled(&db))
+        .unwrap_or(true);
+    if always_on_top {
+        clear_fullscreen_suppression_and_restore(app, st);
+        sync_pet_topmost(app);
         return;
-    };
-    if fullscreen {
-        if pet_visible(app) && !rt.fullscreen_suppressed.load(Ordering::Relaxed) {
-            let _ = hide_pet_transient(app);
-            rt.fullscreen_suppressed.store(true, Ordering::Relaxed);
-        }
-    } else if rt.fullscreen_suppressed.swap(false, Ordering::Relaxed) {
-        let user_hidden = rt.user_hidden_pet.load(Ordering::Acquire);
-        let enabled = st
-            .db
-            .lock()
-            .ok()
-            .map(|db| is_enabled(&db))
-            .unwrap_or(false);
-        if enabled && !user_hidden {
-            let _ = show_pet(app, st);
-        }
+    }
+
+    sync_pet_topmost(app);
+    if let Some(rt) = app.try_state::<PetRuntimeState>() {
+        rt.fullscreen_suppressed.store(false, Ordering::Relaxed);
     }
 }
 

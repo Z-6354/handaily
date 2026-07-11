@@ -36,6 +36,7 @@ export interface PetStatus {
   scale: number;
   remark_interval_sec: number;
   bubble_enabled: boolean;
+  always_on_top: boolean;
   model_id: string;
   model_name: string;
   animations: string[];
@@ -53,6 +54,7 @@ export interface PetStatus {
 export interface PetStatusChangedPayload {
   active: boolean;
   bubble_enabled: boolean;
+  always_on_top: boolean;
 }
 
 export interface PetAnimationMeta {
@@ -397,6 +399,9 @@ export const xiaohan = {
   petGetBubbleEnabled: () => invoke<boolean>("pet_get_bubble_enabled"),
   petSetBubbleEnabled: (enabled: boolean) =>
     invoke<void>("pet_set_bubble_enabled", { enabled }),
+  petGetAlwaysOnTop: () => invoke<boolean>("pet_get_always_on_top"),
+  petSetAlwaysOnTop: (enabled: boolean) =>
+    invoke<void>("pet_set_always_on_top", { enabled }),
   petPickModelFolder: () => invoke<string | null>("pet_pick_model_folder"),
   petStageFolderImport: (folder: string) =>
     invoke<PetImportStagingPreview>("pet_stage_folder_import", { folder }),

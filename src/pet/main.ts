@@ -1937,6 +1937,21 @@ void tauriReady.then(async () => {
   );
 
   earlyUnlisteners.push(
+    await listen("pet-sync-click-through", () => {
+      if (mainWindowVisible) {
+        stopClickThroughPoll();
+        if (ignoreCursorActive) {
+          void applyClickThrough(false, true);
+        }
+        return;
+      }
+      if (!shouldDeferClickThrough()) {
+        requestClickThroughSync();
+      }
+    }),
+  );
+
+  earlyUnlisteners.push(
     await listen("pet-hidden", () => {
       petMenuOpen = false;
       pendingBubble = null;

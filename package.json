@@ -12,6 +12,7 @@
     "dev:tauri": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-dev.ps1",
     "tauri:dev": "tauri dev --config src-tauri/tauri.preview.conf.json",
     "tauri:build": "tauri build",
+    "tauri:release": "tauri build && node scripts/copy-release.mjs",
     "tauri:build:exe": "tauri build --no-bundle",
     "tauri:pack": "tauri build --debug",
     "check:rust": "cargo check --manifest-path src-tauri/Cargo.toml",

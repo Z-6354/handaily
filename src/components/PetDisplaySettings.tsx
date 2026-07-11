@@ -13,6 +13,7 @@ export function PetDisplaySettings({ setFeedback }: Props) {
   const [loading, setLoading] = useState(true);
   const [petEnabled, setPetEnabled] = useState(true);
   const [bubbleEnabled, setBubbleEnabled] = useState(true);
+  const [alwaysOnTop, setAlwaysOnTop] = useState(true);
   const [petScale, setPetScale] = useState(0.8);
   const [petRemarkInterval, setPetRemarkInterval] = useState(300);
   const [randomMinSec, setRandomMinSec] = useState(30);
@@ -25,6 +26,7 @@ export function PetDisplaySettings({ setFeedback }: Props) {
   const applyPetStatus = useCallback((petStatus: Awaited<ReturnType<typeof xiaohan.petGetStatus>>) => {
     setPetEnabled(petStatus.active);
     setBubbleEnabled(petStatus.bubble_enabled);
+    setAlwaysOnTop(petStatus.always_on_top);
     setPetScale(petStatus.scale);
     setActiveModelId(petStatus.model_id || null);
     if (petStatus.model_id) {
@@ -62,6 +64,7 @@ export function PetDisplaySettings({ setFeedback }: Props) {
     void listen<PetStatusChangedPayload>("pet-status-changed", (ev) => {
       setPetEnabled(ev.payload.active);
       setBubbleEnabled(ev.payload.bubble_enabled);
+      setAlwaysOnTop(ev.payload.always_on_top);
     }).then((fn) => {
       unlistenStatus = fn;
     });
@@ -136,6 +139,7 @@ export function PetDisplaySettings({ setFeedback }: Props) {
       <>
         <SettingsToggle label="启用桌宠" checked disabled onChange={() => {}} />
         <SettingsToggle label="台词气泡" checked disabled onChange={() => {}} />
+        <SettingsToggle label="始终置顶" checked disabled onChange={() => {}} />
         <p className="hint-block empty--compact">加载桌宠设置…</p>
       </>
     );
@@ -172,6 +176,24 @@ export function PetDisplaySettings({ setFeedback }: Props) {
           }
         }}
       />
+
+      <SettingsToggle
+        label="始终置顶"
+        checked={alwaysOnTop}
+        onChange={async (next) => {
+          setAlwaysOnTop(next);
+          setFeedback(null);
+          try {
+            await xiaohan.petSetAlwaysOnTop(next);
+          } catch (e) {
+            setAlwaysOnTop(!next);
+            setFeedback(parseApiError(e, "始终置顶开关"));
+          }
+        }}
+      />
+      <p className="hint-block">
+        开启后桌宠始终浮于最前；关闭后全屏游戏、视频等前台应用会自然遮挡桌宠（桌宠仍保持运行）。
+      </p>
 
       <div className="settings-field">
         <div className="settings-field-body">

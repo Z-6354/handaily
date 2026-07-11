@@ -75,6 +75,8 @@ commands.allow = [
   "pet_clear_spine_ready",
   "pet_get_bubble_enabled",
   "pet_set_bubble_enabled",
+  "pet_get_always_on_top",
+  "pet_set_always_on_top",
   "pet_clear_bubble",
   "pet_get_model_status",
   "pet_get_config",
