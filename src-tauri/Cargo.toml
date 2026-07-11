@@ -1,6 +1,6 @@
 [package]
 name = "xiaohan-daily"
-version = "0.1.0"
+version = "0.2.0"
 description = "小寒桌宠 — Live2D 桌面宠物"
 authors = ["hanagent"]
 edition = "2021"

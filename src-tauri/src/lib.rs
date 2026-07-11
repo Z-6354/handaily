@@ -16,6 +16,7 @@ pub mod system;
 pub mod tracker;
 pub mod test_api;
 use std::sync::Arc;
+#[cfg(debug_assertions)]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

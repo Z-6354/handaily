@@ -11,7 +11,7 @@ use crate::state::AppState;
 
 #[tauri::command]
 pub fn app_ping() -> String {
-    "xiaohan-pet v0.1.0".to_string()
+    format!("xiaohan-pet v{}", env!("CARGO_PKG_VERSION"))
 }
 
 #[tauri::command]

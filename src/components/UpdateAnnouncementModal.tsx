@@ -90,7 +90,7 @@ export function UpdateAnnouncementModal({ entry }: UpdateAnnouncementModalProps)
 
 export function getLatestChangelogEntry(): HelpChangelogEntry {
   return DEFAULT_HELP_CONTENT.changelog[0] ?? {
-    version: "0.1.0",
+    version: "0.2.0",
     date: "",
     body: "欢迎使用小寒桌宠。",
   };

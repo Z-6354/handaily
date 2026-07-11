@@ -2407,7 +2407,7 @@ pub fn set_enabled(app: &AppHandle, st: Arc<AppState>, enabled: bool) -> Result<
 }
 
 /// 启动时提前创建隐藏桌宠 WebView，与主窗口首屏并行，缩短首显等待。
-pub fn prewarm_on_startup(_app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
+pub fn prewarm_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), String> {
     {
         let db = crate::db::lock_conn(&st.db)?;
         if !is_enabled(&db) {

@@ -1,5 +1,5 @@
 export const HELP_CONTENT_SETTING_KEY = "help_custom_content_v1";
-export const UPDATE_ANNOUNCEMENT_SEEN_KEY = "update_announcement_seen_v0.1.0";
+export const UPDATE_ANNOUNCEMENT_SEEN_KEY = "update_announcement_seen_v0.2.0";
 export const CREATOR_BILIBILI_URL = "https://space.bilibili.com/146915875";
 
 export interface HelpSection {
@@ -64,6 +64,12 @@ export const DEFAULT_HELP_CONTENT: HelpContent = {
     },
   ],
   changelog: [
+    {
+      version: "0.2.0",
+      date: "2026-07-11",
+      body:
+        "桌宠交互全面加固：修复主窗关闭/最小化后拖动卡顿、台词气泡反复开关异常、穿透状态不同步等问题；优化主窗与桌宠焦点切换与轻量恢复路径。新增桌宠测试 API 与 MCP 自动化工具（设置页可选开启）。模型切换与收藏菜单更稳定；显示层模块化重构并修复编辑范围漂移。本版本聚焦 Live2D 纯桌宠体验，已停用日报、AI 分析与微信推送等非桌宠功能。",
+    },
     {
       version: "0.1.0",
       date: "2026-07",
