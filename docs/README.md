@@ -16,15 +16,17 @@
 
 ```
 HANDAILY/
-├── src/                 # 前端：主窗口 + 桌宠页面（Vite → dist/）
-├── src-tauri/           # Rust 后端：采集、DB、托盘、桌宠、AI
-├── public/assets/pet/   # 内置桌宠 Spine 资源
-├── personas/            # 内置 AI 人设
-├── prompts/             # AI 提示词模板（Markdown）
-├── config/              # 供应商等配置
-├── scripts/             # 开发/构建脚本
-└── docs/questions/      # 技术问答归档（按编号检索）
+├── src/                      # 前端：主窗口 + 桌宠页面（Vite → dist/）
+├── src-tauri/                # Rust 后端：采集、DB、托盘、桌宠、AI
+├── bundled/
+│   ├── roster/               # 内置人物、人设、桌宠模型（唯一源）
+│   └── prompts/              # AI 提示词模板（build.rs 嵌入）
+├── public/app-icon.png       # 主界面图标
+├── scripts/                  # 开发/构建/校验脚本
+└── docs/questions/           # 技术问答归档（按编号检索）
 ```
+
+运行时用户数据在 `%AppData%/xiaohan-daily/data/`（人设、模型、提示词副本等）。
 
 ## 问答归档
 

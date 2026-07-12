@@ -6,8 +6,11 @@ incremental = true
 
 # dev/test 尾段慢的主因之一是巨型 PDB；debug=1 保留行号断点，链接明显更快
 [profile.dev]
+opt-level = 0
 debug = 1
 incremental = true
+codegen-units = 256
+split-debuginfo = "unpacked"
 
 [profile.test]
 inherits = "dev"
@@ -20,3 +23,7 @@ linker = "rust-lld"
 
 [profile.release]
 incremental = true
+
+# 若已安装 sccache（cargo install sccache），build.ps1 会自动启用 RUSTC_WRAPPER
+# [build]
+# rustc-wrapper = "sccache"

@@ -25,6 +25,7 @@ import {
 } from "../hooks/useCharacterRoster";
 import { useSearchHistory } from "../hooks/useSearchHistory";
 import { Pagination } from "../components/Pagination";
+import { RosterPackImportButton } from "../components/RosterPackImportButton";
 import { characterAccent, characterSkinTag } from "../lib/characterDisplay";
 
 function toPersonaDetail(c: CharacterDetail): PersonaDetail {
@@ -473,6 +474,11 @@ export function PersonaPanel() {
               </span>
               收藏
             </button>
+            <RosterPackImportButton
+              disabled={loading || refreshing}
+              onImported={() => void refresh()}
+              setFeedback={setPersonaFeedback}
+            />
           </div>
           <Pagination
             page={page}

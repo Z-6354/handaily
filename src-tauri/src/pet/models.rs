@@ -7,59 +7,11 @@ use std::path::{Path, PathBuf};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+use crate::embedded::{self, BuiltinModelDef};
+
 pub const BUILTIN_CHAIJUN: &str = "chaijun";
 
-struct BuiltinModelDef {
-    id: &'static str,
-    name: &'static str,
-    skel: &'static str,
-    atlas: &'static str,
-    png: &'static str,
-    meta_json: &'static str,
-}
-
-const BUILTIN_MODELS: &[BuiltinModelDef] = &[
-    BuiltinModelDef {
-        id: "chaijun",
-        name: "柴郡",
-        skel: "chaijun.skel",
-        atlas: "chaijun.atlas",
-        png: "chaijun.png",
-        meta_json: include_str!("../../../public/assets/pet/chaijun/animations.meta.json"),
-    },
-    BuiltinModelDef {
-        id: "edu",
-        name: "恶毒",
-        skel: "edu_3.skel",
-        atlas: "edu_3.atlas",
-        png: "edu_3.png",
-        meta_json: include_str!("../../../public/assets/pet/edu/animations.meta.json"),
-    },
-    BuiltinModelDef {
-        id: "wushiling",
-        name: "五十铃",
-        skel: "wushiling.skel",
-        atlas: "wushiling.atlas",
-        png: "wushiling.png",
-        meta_json: include_str!("../../../public/assets/pet/wushiling/animations.meta.json"),
-    },
-    BuiltinModelDef {
-        id: "qiye",
-        name: "企业",
-        skel: "qiye.skel",
-        atlas: "qiye.atlas",
-        png: "qiye.png",
-        meta_json: include_str!("../../../public/assets/pet/qiye/animations.meta.json"),
-    },
-    BuiltinModelDef {
-        id: "tashigan",
-        name: "塔什干",
-        skel: "tashigan.skel",
-        atlas: "tashigan.atlas",
-        png: "tashigan.png",
-        meta_json: include_str!("../../../public/assets/pet/tashigan/animations.meta.json"),
-    },
-];
+static BUILTIN_MODELS: &[BuiltinModelDef] = embedded::BUILTIN_MODELS;
 
 /// 旧版 Wiki 导入哈希 ID → 内置 slug
 const LEGACY_BUILTIN_IDS: &[(&str, &str)] = &[
@@ -225,7 +177,7 @@ pub struct PetImportStagingPreview {
 }
 
 fn staging_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("pet-import-staging")
+    crate::data_layout::pet_import_staging_dir(data_dir)
 }
 
 pub fn clear_import_staging(data_dir: &Path) -> Result<(), String> {
@@ -408,7 +360,7 @@ pub fn read_model_asset_bundle(
 }
 
 pub fn models_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("pet-models")
+    crate::data_layout::pet_models_dir(data_dir)
 }
 
 pub fn active_model_id(db: &rusqlite::Connection) -> String {
@@ -811,8 +763,7 @@ pub fn migrate_legacy_builtin_models(db: &rusqlite::Connection) -> Result<(), St
 
 const ANIM_META_FILENAME: &str = "animations.meta.json";
 
-/// 导入新模型时使用的默认动作/台词模板（与 config/pet-action-template.json 同步）
-const IMPORT_ACTION_TEMPLATE: &str = include_str!("../../../config/pet-action-template.json");
+const IMPORT_ACTION_TEMPLATE: &str = crate::embedded::PET_ACTION_TEMPLATE;
 
 fn read_import_action_template() -> PetAnimationMeta {
     serde_json::from_str(IMPORT_ACTION_TEMPLATE).unwrap_or_default()
@@ -1074,7 +1025,7 @@ pub fn apply_import_action_template(
 }
 
 fn meta_persist_dir(data_dir: &Path, model_id: &str) -> PathBuf {
-    data_dir.join("pet-meta").join(model_id)
+    crate::data_layout::pet_meta_model_dir(data_dir, model_id)
 }
 
 fn read_bundled_animation_meta(model_id: &str) -> Option<PetAnimationMeta> {

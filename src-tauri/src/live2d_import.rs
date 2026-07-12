@@ -54,14 +54,7 @@ pub struct Live2dImportResult {
 }
 
 pub fn handaily_data_dir() -> Result<PathBuf, String> {
-    if let Ok(p) = std::env::var("HANDAILY_DATA_DIR") {
-        let path = PathBuf::from(p.trim());
-        if !path.as_os_str().is_empty() {
-            return Ok(path);
-        }
-    }
-    let appdata = std::env::var("APPDATA").map_err(|_| "无法读取 APPDATA".to_string())?;
-    Ok(PathBuf::from(appdata).join("xiaohan-daily").join("data"))
+    crate::data_layout::handaily_data_dir()
 }
 
 pub fn resolve_live2d_root() -> PathBuf {
@@ -98,7 +91,7 @@ pub fn resolve_plan_path(explicit: Option<&Path>) -> Result<PathBuf, String> {
     let candidates = [
         handaily_data_dir()
             .ok()
-            .map(|d| d.join("live2d-plan.json")),
+            .map(|d| crate::data_layout::live2d_plan_path(&d)),
         std::env::current_dir()
             .ok()
             .map(|c| c.join("mcp/blhx-wiki/plan.json")),

@@ -1,59 +1,10 @@
-//! 提示词模板：仓库 `prompts/*.md` 为源，运行时优先读用户数据目录副本
+//! 提示词模板：内置 `bundled/prompts`，运行时优先读用户数据目录副本
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const DEFAULTS: &[(&str, &str)] = &[
-    (
-        "vision-screenshot",
-        include_str!("../../../prompts/vision-screenshot.md"),
-    ),
-    (
-        "period-analysis",
-        include_str!("../../../prompts/period-analysis.md"),
-    ),
-    (
-        "persona-test",
-        include_str!("../../../prompts/persona-test.md"),
-    ),
-    (
-        "report-period-summary",
-        include_str!("../../../prompts/report-period-summary.md"),
-    ),
-    (
-        "report-activity-log",
-        include_str!("../../../prompts/report-activity-log.md"),
-    ),
-    (
-        "timeline-segment-describe",
-        include_str!("../../../prompts/timeline-segment-describe.md"),
-    ),
-    (
-        "pet-remark",
-        include_str!("../../../prompts/pet-remark.md"),
-    ),
-    (
-        "persona-preprocess",
-        include_str!("../../../prompts/persona-preprocess.md"),
-    ),
-    (
-        "persona-preprocess-compact",
-        include_str!("../../../prompts/persona-preprocess-compact.md"),
-    ),
-    (
-        "persona-preprocess-minimal",
-        include_str!("../../../prompts/persona-preprocess-minimal.md"),
-    ),
-    (
-        "persona-skill-generate",
-        include_str!("../../../prompts/persona-skill-generate.md"),
-    ),
-    (
-        "persona-text-merge",
-        include_str!("../../../prompts/persona-text-merge.md"),
-    ),
-];
+const DEFAULTS: &[(&str, &str)] = crate::embedded::EMBEDDED_PROMPTS;
 
 /// 首次启动：将内置模板复制到 `%AppData%/xiaohan-daily/prompts/`
 pub fn seed_user_prompts(data_dir: &Path) -> std::io::Result<()> {
@@ -69,7 +20,7 @@ pub fn seed_user_prompts(data_dir: &Path) -> std::io::Result<()> {
 }
 
 pub fn prompts_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("prompts")
+    crate::data_layout::prompts_dir(data_dir)
 }
 
 /// 加载并渲染提示词（用户目录优先，否则内置默认）

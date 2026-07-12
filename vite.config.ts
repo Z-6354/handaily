@@ -1,12 +1,13 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
+import bundledPetPlugin from "./scripts/vite-bundled-pet";
 
 // Tauri 期望前端 dev server 在固定端口，生产构建输出到 dist
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(async () => ({
-  plugins: [react()],
+export default defineConfig(() => ({
+  plugins: [react(), bundledPetPlugin()],
   clearScreen: false,
   server: {
     port: 1420,
@@ -36,7 +37,7 @@ export default defineConfig(async () => ({
         "pet-menu": resolve(__dirname, "pet-menu.html"),
       },
       output: {
-        manualChunks(id) {
+        manualChunks(id: string) {
           if (id.includes("node_modules/react-dom") || id.includes("node_modules/react/")) {
             return "vendor-react";
           }

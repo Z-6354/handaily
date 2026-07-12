@@ -592,8 +592,8 @@ export class SpinePet {
     newH: number,
     prevW: number,
     prevH: number,
-    moveNorth: boolean,
-    moveWest: boolean,
+    _moveNorth: boolean,
+    _moveWest: boolean,
     _stageScale = 1,
   ) {
     if (!this.spine || !this.app) return;
@@ -604,10 +604,10 @@ export class SpinePet {
     if (dw === 0 && dh === 0) return;
     this.app.renderer.resize(w, h);
     const scale = Math.max(0.01, _stageScale);
-    if (moveWest && dw !== 0) {
+    if (dw !== 0) {
       this.spine.position.x += dw / scale;
     }
-    if (moveNorth && dh !== 0) {
+    if (dh !== 0) {
       this.spine.position.y += dh / scale;
     }
     this.app.render();

@@ -1,8 +1,8 @@
 ---
 name: xiaohan-prompts-md
 description: >-
-  Manages 小寒日报 AI prompt templates as Markdown files under prompts/ with
-  {{variable}} placeholders. Use when adding or editing AI prompts, system
+  Manages 小寒日报 AI prompt templates as Markdown files under bundled/prompts/
+  with {{variable}} placeholders. Use when adding or editing AI prompts, system
   messages, period analysis, vision screenshot instructions, or when the user
   asks to externalize hardcoded prompt strings to md files.
 ---
@@ -13,7 +13,7 @@ description: >-
 
 | 路径 | 用途 |
 |------|------|
-| `prompts/*.md` | 仓库源文件（版本管理、PR 审查） |
+| `bundled/prompts/*.md` | 仓库源文件（`build.rs` 自动嵌入） |
 | `%AppData%/xiaohan-daily/prompts/` | 运行时用户可编辑副本 |
 | `src-tauri/src/prompts/mod.rs` | 加载器：`seed_user_prompts` + `render` |
 
@@ -25,9 +25,9 @@ description: >-
 
 ## 新增提示词（检查清单）
 
-1. 在 `prompts/your-name.md` 编写模板
-2. 在 `prompts/README.md` 表格登记变量说明
-3. 在 `src-tauri/src/prompts/mod.rs` 的 `DEFAULTS` 增加 `(name, include_str!(...))`
+1. 在 `bundled/prompts/your-name.md` 编写模板
+2. 在 `bundled/prompts/README.md` 表格登记变量说明
+3. 重新编译 Rust（`build.rs` 扫描目录并生成 `EMBEDDED_PROMPTS`）
 4. 业务代码调用：
    ```rust
    prompts::render(data_dir, "your-name", &[("key", "value")])
@@ -52,7 +52,7 @@ description: >-
 
 ## 示例
 
-`prompts/period-analysis.md`：
+`bundled/prompts/period-analysis.md`：
 
 ```markdown
 工作类型只能从以下选项中选一个：{{type_list}}

@@ -77,6 +77,8 @@ pub struct PetRuntimeState {
     pub menu_suppress_show: AtomicBool,
     /// 用户通过菜单/托盘主动隐藏桌宠（非全屏抑制）；阻止台词等逻辑自动 show
     pub user_hidden_pet: AtomicBool,
+    /// 周期性重刷 TOPMOST 的心跳任务是否已启动
+    pub topmost_heartbeat_running: AtomicBool,
 }
 
 #[derive(Clone, Serialize)]
@@ -231,11 +233,36 @@ pub fn pet_should_be_topmost(app: &AppHandle) -> bool {
         .unwrap_or(true)
 }
 
+fn apply_webview_topmost(win: &WebviewWindow, topmost: bool) {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let hwnd = pet_frame_hwnd(win).or_else(|_| win.hwnd().map_err(|e| e.to_string()));
+        if let Ok(hwnd) = hwnd {
+            unsafe {
+                let z = if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST };
+                let _ = SetWindowPos(
+                    hwnd,
+                    Some(z),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+    let _ = win.set_always_on_top(topmost);
+}
+
 pub fn sync_pet_topmost(app: &AppHandle) {
     let topmost = pet_should_be_topmost(app);
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         if pet.is_visible().unwrap_or(false) {
-            let _ = pet.set_always_on_top(topmost);
+            apply_webview_topmost(&pet, topmost);
         }
     }
 }
@@ -342,7 +369,7 @@ fn clamp_menu_position(x: i32, y: i32) -> (i32, i32) {
 
 fn prepare_menu_webview(win: &WebviewWindow) -> Result<(), String> {
     let _ = win.set_background_color(Some(Color(0, 0, 0, 0)));
-    let _ = win.set_always_on_top(true);
+    apply_webview_topmost(win, true);
     Ok(())
 }
 
@@ -357,10 +384,10 @@ fn raise_menu_above_pet(app: &AppHandle, menu: &WebviewWindow) {
     let pet = app.get_webview_window(PET_LABEL);
     if let Some(pet) = &pet {
         if pet.is_visible().unwrap_or(false) && pet_should_be_topmost(app) {
-            let _ = pet.set_always_on_top(true);
+            apply_webview_topmost(&pet, true);
         }
     }
-    let _ = menu.set_always_on_top(true);
+    apply_webview_topmost(menu, true);
     raise_menu_hwnd_above_pet(menu, pet.as_ref());
 }
 
@@ -654,7 +681,7 @@ pub fn hide_pet_menu(app: &AppHandle) -> Result<(), String> {
 }
 
 fn detach_menu_window_effects(win: &WebviewWindow) {
-    let _ = win.set_always_on_top(false);
+    apply_webview_topmost(win, false);
     let _ = win.hide();
 }
 
@@ -817,7 +844,6 @@ pub fn enter_pet_edit_bounds(app: &AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window(PET_LABEL) {
         let _ = win.set_ignore_cursor_events(false);
         let _ = win.show();
-        let _ = win.set_always_on_top(true);
         let _ = win.set_focus();
     }
     sync_pet_topmost(app);
@@ -1021,15 +1047,15 @@ pub fn emit_main_window_visible(app: &AppHandle, visible: bool) {
 pub fn show_main_window(app: &AppHandle, page: Option<&str>) -> Result<(), String> {
     let win = crate::ensure_main_window(app)?;
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
-        let _ = pet.set_always_on_top(false);
+        apply_webview_topmost(&pet, false);
         let _ = pet.set_ignore_cursor_events(false);
     }
     let _ = win.unminimize();
     win.show().map_err(|e| e.to_string())?;
     // 主窗 show 成功后再通知桌宠，避免 show 失败时桌宠长期锁在 overlay 态
     let _ = app.emit_to(PET_LABEL, "pet-main-opening", 1200u64);
+    sync_pet_topmost(app);
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
-        let _ = pet.set_always_on_top(false);
         let _ = pet.set_ignore_cursor_events(false);
     }
     let _ = win.set_focus();
@@ -1071,9 +1097,9 @@ pub fn sync_pet_interaction_state(app: &AppHandle) {
     }
     if is_main_window_visible(app) {
         if let Some(pet) = app.get_webview_window(PET_LABEL) {
-            let _ = pet.set_always_on_top(false);
             let _ = pet.set_ignore_cursor_events(false);
         }
+        sync_pet_topmost(app);
         if is_pet_menu_visible(app) || pet_menu_open_or_pending(app) {
             let _ = app.emit_to(PET_LABEL, "pet-menu-state", false);
         }
@@ -1083,6 +1109,13 @@ pub fn sync_pet_interaction_state(app: &AppHandle) {
     if is_pet_menu_visible(app) || pet_menu_open_or_pending(app) {
         if let Some(pet) = app.get_webview_window(PET_LABEL) {
             let _ = pet.set_ignore_cursor_events(false);
+        }
+        if is_pet_menu_visible(app) {
+            if let Some(menu) = app.get_webview_window(PET_MENU_LABEL) {
+                raise_menu_above_pet(app, &menu);
+            }
+        } else {
+            sync_pet_topmost(app);
         }
         let _ = app.emit_to(PET_LABEL, "pet-sync-click-through", ());
         return;
@@ -1100,7 +1133,8 @@ pub fn sync_pet_interaction_state(app: &AppHandle) {
     }
     if let Some(pet) = app.get_webview_window(PET_LABEL) {
         if pet.is_visible().unwrap_or(false) {
-            let _ = pet.set_ignore_cursor_events(false);
+            // 穿透由桌宠前端按角色区域同步；此处勿强制 false，否则透明区会吞左键
+            let _ = pet.set_ignore_cursor_events(true);
             if !app
                 .try_state::<PetRuntimeState>()
                 .map(|rt| rt.user_hidden_pet.load(Ordering::Acquire))
@@ -1621,7 +1655,7 @@ fn stop_pet_runtime(app: &AppHandle) {
 /// 立刻解除透明置顶窗对桌面的遮挡（隐藏 + 取消置顶 + 穿透）。退出路径复用，不调用 close()。
 fn detach_pet_window_effects(win: &WebviewWindow) {
     let _ = win.set_ignore_cursor_events(true);
-    let _ = win.set_always_on_top(false);
+    apply_webview_topmost(win, false);
     let _ = win.hide();
 }
 
@@ -1749,6 +1783,7 @@ pub fn show_pet(app: &AppHandle, st: &Arc<AppState>) -> Result<(), String> {
     set_pet_position(&win, &rt, x, y)?;
     sync_pet_topmost(app);
     win.show().map_err(|e| e.to_string())?;
+    ensure_topmost_heartbeat(app);
     companion_session_start(st);
     if should_full_reload_pet(app) {
         schedule_pet_reload_after_show(app, st.clone());
@@ -2489,6 +2524,8 @@ pub fn prewarm_on_startup(app: &AppHandle, st: Arc<AppState>) -> Result<(), Stri
     {
         ensure_pet_window(app, &st)?;
     }
+    #[cfg(debug_assertions)]
+    let _ = app;
     Ok(())
 }
 
@@ -2568,6 +2605,50 @@ async fn interruptible_sleep_secs(st: &AppState, secs: u64) {
     }
 }
 
+fn ensure_topmost_heartbeat(app: &AppHandle) {
+    let Some(rt) = app.try_state::<PetRuntimeState>() else {
+        return;
+    };
+    if rt
+        .topmost_heartbeat_running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        struct HeartbeatGuard(AppHandle);
+        impl Drop for HeartbeatGuard {
+            fn drop(&mut self) {
+                if let Some(rt) = self.0.try_state::<PetRuntimeState>() {
+                    rt.topmost_heartbeat_running
+                        .store(false, Ordering::SeqCst);
+                }
+            }
+        }
+        let _guard = HeartbeatGuard(app.clone());
+        loop {
+            if crate::APP_EXITING.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if !pet_visible(&app) || is_main_window_visible(&app) {
+                continue;
+            }
+            if app
+                .try_state::<PetRuntimeState>()
+                .map(|rt| rt.user_hidden_pet.load(Ordering::Acquire))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            sync_pet_topmost(&app);
+            sync_menu_z_order_if_visible(&app);
+        }
+    });
+}
+
 pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
     let runtime = app.state::<PetRuntimeState>();
     if runtime
@@ -2577,6 +2658,7 @@ pub fn ensure_remark_scheduler(app: AppHandle, st: Arc<AppState>) {
     {
         return;
     }
+    ensure_topmost_heartbeat(&app);
 
     tauri::async_runtime::spawn(async move {
         struct SchedulerGuard(AppHandle);
@@ -2946,7 +3028,7 @@ fn append_jsonl_logs(
     if lines.is_empty() {
         return Ok(());
     }
-    let dir = data_dir.join("logs");
+    let dir = crate::data_layout::logs_dir(data_dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = dir.join(filename);
     use std::io::Write;

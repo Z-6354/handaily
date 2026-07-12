@@ -1,7 +1,10 @@
 //! 小寒桌宠 — 库根模块
 
+pub mod roster_pack;
 pub mod character;
+pub mod data_layout;
 pub mod db;
+pub mod embedded;
 pub mod ipc;
 pub mod live2d;
 pub mod live2d_import;
@@ -355,6 +358,8 @@ pub fn run() {
             ipc::live2d_commands::pet_append_movement_logs,
             ipc::live2d_commands::pet_append_display_logs,
             ipc::live2d_commands::system_get_performance,
+            ipc::live2d_commands::roster_pack_pick_zip,
+            ipc::live2d_commands::roster_pack_import,
         ])
         .on_window_event(|window, event| {
             if window.label() != "main" {

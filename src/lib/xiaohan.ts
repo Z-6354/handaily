@@ -22,6 +22,27 @@ export interface McpApiStatus {
   enabled: boolean;
 }
 
+export interface RosterPackImportProgress {
+  phase: string;
+  index: number;
+  total: number;
+  message: string;
+  charactersAdded: number;
+  charactersUpdated: number;
+  modelsCopied: number;
+  modelsSkipped: number;
+  personasCopied: number;
+}
+
+export interface RosterPackImportResult {
+  packLabel: string;
+  charactersAdded: number;
+  charactersUpdated: number;
+  modelsCopied: number;
+  modelsSkipped: number;
+  personasCopied: number;
+}
+
 export interface PetRemarkLine {
   text: string;
   animation?: string | null;
@@ -430,4 +451,7 @@ export const xiaohan = {
   }) => invoke<PetAnimationMeta>("pet_save_animation_layout", { payload }),
   petWikiImportLines: (modelId: string, url: string) =>
     invoke<PetRemarkLine[]>("pet_wiki_import_lines", { modelId, url }),
+  rosterPackPickZip: () => invoke<string | null>("roster_pack_pick_zip"),
+  rosterPackImport: (zipPath: string) =>
+    invoke<RosterPackImportResult>("roster_pack_import", { zipPath }),
 };

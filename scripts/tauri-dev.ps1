@@ -1,6 +1,8 @@
 # 开发启动：Ctrl+C 后清理 Vite，避免 npm「Terminate batch job (Y/N)?」
 $ErrorActionPreference = "Stop"
-Set-Location (Split-Path -Parent $PSScriptRoot)
+. "$PSScriptRoot\_common.ps1"
+Initialize-RustBuildEnv | Out-Null
+Set-Location (Get-ProjectRoot)
 
 function Stop-ViteDevServer {
     try {

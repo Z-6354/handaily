@@ -21,7 +21,9 @@ scripts\build.ps1 -ExeOnly
 
 产物：`src-tauri\target\release\xiaohan-daily.exe`
 
-日常验证：`npm run check:rust` · `npm run test:rust`
+日常验证：`npm run check:rust`（仅 lib，最快）· `npm run check:rust:bin`（含主程序链接前检查）· `npm run test:rust`
+
+> 编译慢时：勿并行开多个 `cargo`/`tauri dev`（会抢 build 目录锁）；可选安装 [sccache](https://github.com/mozilla/sccache) 加速重复编译；CLI 工具用 `--release` 运行（如 `roster:export`）。
 
 ## 文档
 
@@ -33,6 +35,9 @@ scripts\build.ps1 -ExeOnly
 |------|------|
 | `src/` | React 前端（主窗口 + 桌宠） |
 | `src-tauri/` | Rust 后端（采集、SQLite、托盘、AI） |
-| `personas/` · `prompts/` | 人设与提示词 |
-| `public/assets/pet/` | 内置桌宠模型 |
+| `bundled/` | 内置资源唯一源（roster、prompts、桌宠模型、图标模板） |
+| `public/app-icon.png` | 主界面图标（icons 脚本生成） |
+| `scripts/` | 开发/构建/校验脚本 |
 | `docs/questions/` | 技术问答归档 |
+
+桌宠 Spine 走 npm `@pixi-spine`；模型文件在 `bundled/roster/pet-models/`，经 Vite 插件映射为 `/assets/pet/`（dev）并写入 `dist/`（build）。

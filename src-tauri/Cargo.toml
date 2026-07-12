@@ -7,6 +7,10 @@ edition = "2021"
 rust-version = "1.82"
 default-run = "xiaohan-daily"
 
+[features]
+default = []
+cli-tools = []
+
 [lib]
 name = "xiaohan_daily_lib"
 # 仅桌面端：只产 rlib，避免 staticlib/cdylib 各多一次链接（尾段「卡住」的主因之一）
@@ -15,17 +19,26 @@ crate-type = ["rlib"]
 [[bin]]
 name = "blhx_import"
 path = "src/bin/blhx_import.rs"
+required-features = ["cli-tools"]
 
 [[bin]]
 name = "live2d_import"
 path = "src/bin/live2d_import.rs"
+required-features = ["cli-tools"]
 
 [[bin]]
 name = "avatar_import"
 path = "src/bin/avatar_import.rs"
+required-features = ["cli-tools"]
+
+[[bin]]
+name = "roster_pack"
+path = "src/bin/roster_pack.rs"
+required-features = ["cli-tools"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
@@ -56,15 +69,19 @@ base64 = "0.22"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 rfd = "0.15"
 ctrlc = "3.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
 
-# 唯一发布配置：关闭 LTO、提高 codegen-units，链接快（体积略大于 LTO 版）
+# dev 编译速度见仓库根 .cargo/config.toml（debug=1、rust-lld、opt-level=0）
+# CLI 工具需要运行性能时用：cargo run --release --bin xxx
+
+# 发布配置：优先编译速度（opt-level 1 + 高 codegen-units），关闭 LTO
 [profile.release]
 panic = "abort"
-codegen-units = 256
+codegen-units = 512
 incremental = true
 lto = false
-opt-level = 2
+opt-level = 1
 strip = true

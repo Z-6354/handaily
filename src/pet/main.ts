@@ -378,10 +378,8 @@ function requestClickThroughSync() {
 
 function resumeInteractionAfterMainClose() {
   if (document.hidden || editBoundsMode || appExiting || mainWindowVisible) return;
-  ignoreCursorActive = false;
-  void applyClickThrough(false, true);
   if (canRunClickThroughPoll()) {
-    ensureClickThroughPoll();
+    requestClickThroughSync();
   }
   scheduleRestoreInteraction({ focusPet: false, light: true });
 }
@@ -435,15 +433,10 @@ async function restoreNormalInteraction(options?: { focusPet?: boolean; light?: 
     petMovementLog("restore-interaction", movementLogFlags());
   }
   try {
-    if (!light || ignoreCursorActive) {
-      ignoreCursorActive = false;
-      await applyClickThrough(false, true);
-    }
     if (token !== restoreInteractionToken) return;
     if (mainWindowVisible) return;
-    if (token !== restoreInteractionToken) return;
     if (canRunClickThroughPoll()) {
-      ensureClickThroughPoll();
+      requestClickThroughSync();
     }
     const focusPet = options?.focusPet ?? shouldFocusPet();
     if (focusPet && !isUserGestureActive()) {
@@ -457,13 +450,9 @@ async function restoreNormalInteraction(options?: { focusPet?: boolean; light?: 
   } catch (err) {
     if (token !== restoreInteractionToken) return;
     console.error("restoreNormalInteraction failed", err);
-    ignoreCursorActive = false;
-    void applyClickThrough(false, true).then(() => {
-      if (token !== restoreInteractionToken) return;
-      if (canRunClickThroughPoll()) {
-        ensureClickThroughPoll();
-      }
-    });
+    if (canRunClickThroughPoll()) {
+      requestClickThroughSync();
+    }
   }
 }
 
@@ -529,6 +518,7 @@ let ignoreCursorActive = false;
 let clickThroughPoll = 0;
 let clickThroughInterval = 0;
 const CLICK_THROUGH_POLL_MS = 80;
+const EDIT_BOUNDS_POLL_MS = 50;
 
 let prevRightMouseDown = false;
 let prevLeftMouseDown = false;
@@ -537,6 +527,7 @@ let pollLeftDownAt = 0;
 let pollLeftDownClient = { x: 0, y: 0 };
 let rightClickMenuLock = false;
 let editBoundsPollLeftDown = false;
+let editBoundsPollInterval: ReturnType<typeof setInterval> | 0 = 0;
 /** 进入编辑后需先松开菜单点击，避免误触发 poll-outside */
 let editBoundsAwaitMouseUp = false;
 const EDIT_EDGE_HIT_PX = 14;
@@ -872,7 +863,12 @@ async function runClickThroughPollTick() {
     await trackPollPointerDrag(pointer, screen);
   }
 
-  if (shouldDeferClickThrough() || mustCapturePointer()) return;
+  if (shouldDeferClickThrough() || mustCapturePointer()) {
+    if (pointer) {
+      await syncClickThroughState(pointer);
+    }
+    return;
+  }
 
   if (petMenuOpen) {
     await dismissMenuOnOutsideLeftClick();
@@ -1412,6 +1408,7 @@ function applyEditResizeCanvasSync(
     canvas.width = logW;
     canvas.height = logH;
   }
+  clampStageOffset();
 }
 
 function scheduleEditResize(bounds: ResizeBoundsPayload) {
@@ -1586,6 +1583,11 @@ async function runEditBoundsPollTick() {
     return;
   }
 
+  const wasDown = editBoundsPollLeftDown;
+  const edgeDown = down && !wasDown;
+  const edgeUp = !down && wasDown;
+  editBoundsPollLeftDown = down;
+
   if (!down) {
     editBoundsAwaitMouseUp = false;
     if (resizeDragging && pendingResizeBounds) {
@@ -1595,7 +1597,7 @@ async function runEditBoundsPollTick() {
       resizeDragging = false;
       root.classList.remove("edit-bounds-resizing");
       void commitEditResize(bounds, edge);
-      suppressEditBoundsExit(800);
+      suppressEditBoundsExit(400);
     } else if (offsetDragging) {
       clampStageOffset();
       applyStageTransform();
@@ -1607,19 +1609,21 @@ async function runEditBoundsPollTick() {
     }
   }
 
-  const edgeDown = down && !editBoundsPollLeftDown;
-  editBoundsPollLeftDown = down;
-
   if (Date.now() < editBoundsSuppressUntil) return;
   if (Date.now() < menuCloseSuppressUntil) return;
   if (editBoundsAwaitMouseUp) return;
   if (offsetDragging || resizeDragging || exitEditBoundsInFlight) return;
-  if (!edgeDown) return;
+  if (!edgeDown && !edgeUp) return;
 
   try {
     if (await isCursorOutsidePetWindow()) {
-      petMovementLog("outside-check", { outside: true, ...movementLogFlags() });
-      void exitEditBounds("poll-outside");
+      petMovementLog("outside-check", {
+        outside: true,
+        edgeDown,
+        edgeUp,
+        ...movementLogFlags(),
+      });
+      void exitEditBounds(edgeDown ? "poll-outside-down" : "poll-outside-up");
     }
   } catch (err) {
     petMovementLog("outside-check", { outside: "error", error: String(err), ...movementLogFlags() });
@@ -1628,11 +1632,19 @@ async function runEditBoundsPollTick() {
 
 function startEditBoundsPoll() {
   editBoundsPollLeftDown = false;
-  ensureClickThroughPoll();
+  if (editBoundsPollInterval) return;
+  editBoundsPollInterval = window.setInterval(() => {
+    if (!editBoundsMode || document.hidden) return;
+    void runEditBoundsPollTick();
+  }, EDIT_BOUNDS_POLL_MS);
 }
 
 function stopEditBoundsPoll() {
   editBoundsPollLeftDown = false;
+  if (editBoundsPollInterval) {
+    clearInterval(editBoundsPollInterval);
+    editBoundsPollInterval = 0;
+  }
 }
 
 function cancelEditBoundsBlurExit() {
@@ -2176,7 +2188,7 @@ async function enterEditBounds() {
   const enterT0 = performance.now();
   petMovementLog("enter-edit", { phase: "start", ...movementLogFlags() });
   cancelEditBoundsBlurExit();
-  suppressEditBoundsExit(800);
+  suppressEditBoundsExit(350);
   editBoundsAwaitMouseUp = true;
 
   try {
@@ -2184,11 +2196,6 @@ async function enterEditBounds() {
     if (!screenBounds) {
       await refreshScreenBounds();
     }
-    petMovementLog("enter-edit", {
-      phase: "ipc-done",
-      ms: Math.round(performance.now() - enterT0),
-      ...movementLogFlags(),
-    });
 
     resetEditOverlayLayout();
     if (resizeDragging) {
@@ -2201,12 +2208,21 @@ async function enterEditBounds() {
     pendingResizeBounds = null;
     lastResizeKey = "";
 
+    // 先显示编辑框，再异步同步 canvas / layout，避免等待 IPC 才出现 UI
+    setEditBoundsMode(true);
+    startEditBoundsPoll();
+    void petWindow.setFocus().catch(() => {});
+
+    petMovementLog("enter-edit", {
+      phase: "ui-visible",
+      ms: Math.round(performance.now() - enterT0),
+      ...movementLogFlags(),
+    });
+
     await syncCanvasFromWindow(false);
 
     const cfg = await loadConfig();
     stageScale = cfg.scale || 0.8;
-
-    setEditBoundsMode(true);
 
     const converted = convertStageOffsetForOrigin(
       cfg.offset_x ?? 0,
@@ -2225,10 +2241,8 @@ async function enterEditBounds() {
     }
     clampStageOffset();
     applyStageTransform();
-    startEditBoundsPoll();
 
-    void petWindow.setFocus().catch(() => {});
-    suppressEditBoundsExit(400);
+    suppressEditBoundsExit(250);
     pet?.setRenderPaused(false);
     petMovementLog("enter-edit", {
       phase: "ready",
@@ -2548,7 +2562,7 @@ function handlePointerUp(me: MouseEvent) {
 
     const isClick = elapsed <= CLICK_MAX_MS && dist < DRAG_THRESHOLD;
 
-    if (isClick) {
+    if (isClick && hitInteractive(me.clientX, me.clientY)) {
 
       if (windowDragStarted) {
 
@@ -2646,6 +2660,11 @@ stage.addEventListener("mousedown", (e) => {
     suppressEditBoundsExit(1200);
     offsetDragging = false;
     beginOffsetDrag(e.clientX, e.clientY);
+    return;
+  }
+
+  if (!hitInteractive(e.clientX, e.clientY)) {
+    void syncClickThroughState({ x: e.clientX, y: e.clientY });
     return;
   }
 

@@ -14,7 +14,7 @@ use crate::db::character_profiles::CharacterProfileData;
 use crate::persona::{self, PersonaManifest};
 use crate::pet::models::{self, PetModelInfo};
 
-const EMBEDDED_MANIFEST: &str = include_str!("../../../characters/manifest.json");
+const EMBEDDED_MANIFEST: &str = crate::embedded::CHARACTERS_MANIFEST;
 
 const ACTIVE_CHARACTER_KEY: &str = "active_character_id";
 const ACTIVE_SKIN_KEY: &str = "active_skin_id";
@@ -163,11 +163,11 @@ pub struct CharacterWikiImportResult {
 }
 
 pub fn characters_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("characters")
+    crate::data_layout::characters_dir(data_dir)
 }
 
 pub fn manifest_path(data_dir: &Path) -> PathBuf {
-    characters_dir(data_dir).join("manifest.json")
+    crate::data_layout::characters_manifest_path(data_dir)
 }
 
 pub fn seed_user_characters(data_dir: &Path) -> std::io::Result<()> {
@@ -964,7 +964,7 @@ struct PlanWikiFile {
 }
 
 fn load_plan_display_wiki_map(data_dir: &Path) -> HashMap<String, String> {
-    let path = data_dir.join("live2d-plan.json");
+    let path = crate::data_layout::live2d_plan_path(data_dir);
     let Ok(raw) = fs::read_to_string(&path) else {
         return HashMap::new();
     };

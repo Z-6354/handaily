@@ -1,6 +1,5 @@
 //! 从本地 BWIKI SQLite 批量导入舰娘人设（走与 Wiki 导入相同的 AI 流水线）
 
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 use xiaohan_daily_lib::persona::import_reference::{
@@ -9,14 +8,11 @@ use xiaohan_daily_lib::persona::import_reference::{
 };
 use xiaohan_daily_lib::live2d::VaultState;
 
-fn handaily_data_dir() -> Result<PathBuf, String> {
-    let appdata = std::env::var("APPDATA").map_err(|_| "无法读取 APPDATA".to_string())?;
-    Ok(PathBuf::from(appdata).join("xiaohan-daily").join("data"))
-}
+use xiaohan_daily_lib::data_layout;
 
 fn open_handaily_db(data_dir: &std::path::Path) -> Result<rusqlite::Connection, String> {
     std::fs::create_dir_all(data_dir).map_err(|e| e.to_string())?;
-    xiaohan_daily_lib::db::open_and_migrate(&data_dir.join("xiaohan.sqlite")).map_err(|e| e.to_string())
+    xiaohan_daily_lib::db::open_and_migrate(&data_layout::db_path(data_dir)).map_err(|e| e.to_string())
 }
 
 fn list_all_catalog_titles(blhx_path: &std::path::Path) -> Result<Vec<String>, String> {
@@ -119,7 +115,7 @@ async fn run() -> Result<(), String> {
     } else {
         Some(resolve_blhx_db_path()?)
     };
-    let data_dir = handaily_data_dir()?;
+    let data_dir = data_layout::handaily_data_dir()?;
     let _ = xiaohan_daily_lib::prompts::seed_user_prompts(&data_dir);
     let _ = xiaohan_daily_lib::persona::seed_user_personas(&data_dir);
     let _ = xiaohan_daily_lib::character::seed_user_characters(&data_dir);

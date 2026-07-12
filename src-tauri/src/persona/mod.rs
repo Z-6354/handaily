@@ -1,4 +1,4 @@
-//! 人设：仓库 `personas/*.md` + manifest，运行时优先读用户数据目录
+//! 人设：内置 `bundled/roster/personas` + manifest，运行时优先读用户数据目录
 
 pub mod import_reference;
 
@@ -10,23 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::db;
 use crate::db::character_profiles::CharacterProfileData;
 
-const EMBEDDED_MANIFEST: &str = include_str!("../../../personas/manifest.json");
+const EMBEDDED_MANIFEST: &str = crate::embedded::PERSONAS_MANIFEST;
 
-const EMBEDDED_PERSONAS: &[(&str, &str)] = &[
-    ("cheshire", include_str!("../../../personas/cheshire.md")),
-    ("edu", include_str!("../../../personas/edu.md")),
-    ("wushiling", include_str!("../../../personas/wushiling.md")),
-    ("qiye", include_str!("../../../personas/qiye.md")),
-    ("tashigan", include_str!("../../../personas/tashigan.md")),
-];
+const EMBEDDED_PERSONAS: &[(&str, &str)] = crate::embedded::EMBEDDED_PERSONAS_MD;
 
-const EMBEDDED_PROFILES: &[(&str, &str)] = &[
-    ("cheshire", include_str!("../../../personas/cheshire.json")),
-    ("edu", include_str!("../../../personas/edu.json")),
-    ("wushiling", include_str!("../../../personas/wushiling.json")),
-    ("qiye", include_str!("../../../personas/qiye.json")),
-    ("tashigan", include_str!("../../../personas/tashigan.json")),
-];
+const EMBEDDED_PROFILES: &[(&str, &str)] = crate::embedded::EMBEDDED_PERSONAS_JSON;
 
 /// 旧版 Wiki 导入哈希 ID → 内置 slug（含人设 p 前缀与桌宠 m 前缀）
 const LEGACY_BUILTIN_PERSONA_IDS: &[(&str, &str)] = &[
@@ -117,7 +105,7 @@ pub struct PersonaUpdateInput {
 }
 
 pub fn personas_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("personas")
+    crate::data_layout::personas_dir(data_dir)
 }
 
 pub fn manifest_path(data_dir: &Path) -> PathBuf {
@@ -260,7 +248,7 @@ fn write_persona_manifest(data_dir: &Path, manifest: &PersonaManifest) -> Result
     crate::manifest_lock::atomic_write(&manifest_path(data_dir), &json)
 }
 
-fn mutate_persona_manifest<F, T>(data_dir: &Path, f: F) -> Result<T, String>
+pub(crate) fn mutate_persona_manifest<F, T>(data_dir: &Path, f: F) -> Result<T, String>
 where
     F: FnOnce(&mut PersonaManifest) -> Result<T, String>,
 {

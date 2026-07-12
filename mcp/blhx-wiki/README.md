@@ -65,7 +65,7 @@ npm run build
 2. `blhx_sync_ships` `{ "limit": 20 }` — 分批增量抓取（多次调用直至 pending=0）
 3. `blhx_get_ship` `{ "name": "欧根亲王" }` — 查看完整数据
 4. `blhx_export_handaily` `{ "name": "欧根亲王" }` — 获取 HANDAILY 导入包
-5. 在 HANDAILY 人物页使用 Wiki/文本导入，或让 AI 写入 `personas/` 与 `characters/manifest.json`
+5. 在 HANDAILY 人物页使用 Wiki/文本导入，或让 AI 写入 `bundled/roster/personas/` 与 `bundled/roster/characters/manifest.json`
 
 ### Live2D 批量导入（人设 → 模型 → 皮肤）
 

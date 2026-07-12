@@ -24,23 +24,23 @@
     "active": true,
     "targets": ["nsis"],
     "icon": [
-      "icons/32x32.png",
-      "icons/128x128.png",
+      "icons/icon.png",
       "icons/128x128@2x.png",
-      "icons/icon.ico"
+      "icons/128x128.png",
+      "icons/32x32.png"
     ],
     "windows": {
       "nsis": {
         "installerIcon": "icons/icon.ico",
         "uninstallerIcon": "icons/icon.ico",
         "installMode": "currentUser",
-        "languages": ["SimpChinese", "English"]
+        "languages": ["SimpChinese"]
       },
       "allowDowngrades": false
     },
     "copyright": "Copyright © 2026 hanagent",
     "category": "Utility",
-    "shortDescription": "本地活动追踪与日报",
-    "longDescription": "小寒日报：后台采集前台应用使用时长，本地 SQLite 持久化，数据不出本机。"
+    "shortDescription": "桌面 Live2D 桌宠与活动追踪",
+    "longDescription": "小寒桌宠：桌面 Live2D 角色、本地活动追踪与日报，数据不出本机。"
   }
 }

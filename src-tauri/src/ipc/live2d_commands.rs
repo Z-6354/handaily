@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::state::AppState;
 
@@ -1490,4 +1490,59 @@ pub async fn system_get_performance(
     tauri::async_runtime::spawn_blocking(crate::system::performance::capture_snapshot)
         .await
         .map_err(|e| e.to_string())
+}
+
+// ── 角色资源包 ──
+
+#[tauri::command]
+pub async fn roster_pack_pick_zip(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口未就绪".to_string())?;
+
+    // 桌宠置顶会挡住系统文件对话框，先降层并聚焦主窗
+    if let Some(pet) = app.get_webview_window(crate::pet::PET_LABEL) {
+        let _ = pet.set_always_on_top(false);
+    }
+    let _ = window.set_focus();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .run_on_main_thread({
+            let window = window.clone();
+            move || {
+                let picked = rfd::FileDialog::new()
+                    .set_title("选择角色资源包（.zip）")
+                    .add_filter("角色资源包", &["zip"])
+                    .set_parent(&window)
+                    .pick_file()
+                    .map(|p| p.to_string_lossy().to_string());
+                let _ = tx.send(picked);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    let picked = rx.await.map_err(|_| "文件选择已中断".to_string())?;
+
+    crate::pet::sync_pet_topmost(&app);
+    Ok(picked)
+}
+
+#[tauri::command]
+pub async fn roster_pack_import(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    zip_path: String,
+) -> Result<crate::roster_pack::RosterPackImportResult, String> {
+    let data_dir = st.data_dir().to_path_buf();
+    let path = std::path::PathBuf::from(zip_path.trim());
+    if !path.is_file() {
+        return Err("文件不存在".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = crate::roster_pack::import_from_zip(&data_dir, &path, Some(&app))?;
+        let _ = app.emit_to(crate::pet::PET_LABEL, "pet-reload", ());
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

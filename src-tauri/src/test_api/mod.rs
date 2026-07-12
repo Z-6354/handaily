@@ -650,7 +650,7 @@ fn log_test_action(st: &AppState, action: &str, detail: Value) -> Result<(), Str
 }
 
 fn tail_movement_logs(data_dir: &std::path::Path, n: usize) -> Result<Vec<String>, String> {
-    let path = data_dir.join("logs").join("pet-movement.jsonl");
+    let path = crate::data_layout::logs_dir(data_dir).join("pet-movement.jsonl");
     if !path.exists() {
         return Ok(vec![]);
     }
@@ -767,7 +767,7 @@ fn parse_query_bool(query: &str, key: &str) -> Option<bool> {
 }
 
 fn tail_display_logs(data_dir: &std::path::Path, n: usize) -> Result<Vec<String>, String> {
-    let path = data_dir.join("logs").join("pet-display.jsonl");
+    let path = crate::data_layout::logs_dir(data_dir).join("pet-display.jsonl");
     if !path.exists() {
         return Ok(vec![]);
     }

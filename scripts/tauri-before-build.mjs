@@ -16,6 +16,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 /** 影响前端产物的输入路径（相对仓库根） */
 const FE_INPUTS = [
   "src",
+  "bundled",
   "index.html",
   "pet.html",
   "pet-menu.html",

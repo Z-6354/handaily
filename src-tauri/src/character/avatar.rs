@@ -50,7 +50,7 @@ pub struct AvatarImportResult {
 static BLHX_CONN: OnceLock<Mutex<Option<(PathBuf, Connection)>>> = OnceLock::new();
 
 pub fn avatars_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("characters").join("avatars")
+    crate::data_layout::avatars_dir(data_dir)
 }
 
 pub fn resolve_avatar_path(data_dir: &Path, character_id: &str) -> Option<PathBuf> {

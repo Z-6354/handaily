@@ -7,7 +7,10 @@ target/
 src-tauri/target/
 release/
 *.tsbuildinfo
+vite.config.js
 vite.config.d.ts
+
+public/assets/pet/
 
 # Logs & temp
 *.log
@@ -39,7 +42,12 @@ src-tauri/gen/schemas/
 # Local Live2D/Spine model packs (import via app or live2d_import)
 /live2d/
 
+# MCP local generated plans (machine-specific paths)
+mcp/blhx-wiki/plan.json
+mcp/blhx-wiki/plan-test.json
+
 # Local agent/editor tooling
 .agents/
 .cursor/
 .iterative-hardening/
+.specs/

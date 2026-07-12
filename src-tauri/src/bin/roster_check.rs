@@ -3,12 +3,13 @@
 use std::time::Instant;
 
 use xiaohan_daily_lib::character;
+use xiaohan_daily_lib::data_layout;
 use xiaohan_daily_lib::db;
 
 fn main() {
-    let data_dir = xiaohan_daily_lib::live2d_import::handaily_data_dir()
+    let data_dir = data_layout::handaily_data_dir()
         .expect("HANDAILY_DATA_DIR / APPDATA");
-    let db_path = data_dir.join("xiaohan.sqlite");
+    let db_path = data_layout::db_path(&data_dir);
     let db = db::open_and_migrate(&db_path).expect("open db");
 
     let t0 = Instant::now();

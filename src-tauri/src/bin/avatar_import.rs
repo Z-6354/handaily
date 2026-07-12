@@ -1,15 +1,9 @@
 //! 从 BWIKI 图鉴同步人物标签（头像已改为 Wiki URL，不再下载）
 
 use std::env;
-use std::path::PathBuf;
 
 use xiaohan_daily_lib::character::avatar::run_avatar_import_default;
-
-fn handaily_data_dir() -> Result<PathBuf, String> {
-    let appdata = std::env::var("APPDATA").map_err(|_| "无法读取 APPDATA".to_string())?;
-    Ok(PathBuf::from(appdata).join("xiaohan-daily").join("data"))
-}
-
+use xiaohan_daily_lib::data_layout;
 #[tokio::main]
 async fn main() {
     if let Err(e) = run().await {
@@ -44,7 +38,7 @@ async fn run() -> Result<(), String> {
         i += 1;
     }
 
-    let data_dir = handaily_data_dir()?;
+    let data_dir = data_layout::handaily_data_dir()?;
     let result = run_avatar_import_default(&data_dir, limit, true, true).await?;
     println!("{}", result.message);
     Ok(())

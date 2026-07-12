@@ -15,6 +15,16 @@ function Get-CargoTargetDir {
     Join-Path (Get-ProjectRoot) "src-tauri\target"
 }
 
+function Initialize-RustBuildEnv {
+    $jobs = [Environment]::ProcessorCount
+    if ($jobs -lt 1) { $jobs = 4 }
+    $env:CARGO_BUILD_JOBS = "$jobs"
+    $env:CARGO_INCREMENTAL = "1"
+    if (Get-Command sccache -ErrorAction SilentlyContinue) {
+        $env:RUSTC_WRAPPER = "sccache"
+    }
+}
+
 function Initialize-MsvcEnvironment {
     if (Get-Command rc.exe -ErrorAction SilentlyContinue) { return $true }
     $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
