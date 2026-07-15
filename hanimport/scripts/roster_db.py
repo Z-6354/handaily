@@ -7,6 +7,7 @@ Commands:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,8 @@ import sqlite3
 import sys
 import zipfile
 from pathlib import Path
+
+from line_skin_match import apply_lines_by_skin, merge_meta_json
 
 SKIN_SUFFIX = re.compile(
     r"_(?:\d+|h|g|painting|idol|younv|summer|school|winter|swimsuit|wedding|newyear|cn|jp|en|super)$",
@@ -256,6 +259,182 @@ def pick_skin_title(assets: list, skin_index: int | None, fallback: str) -> str:
     return fallback
 
 
+def _skin_row_dicts(conn: sqlite3.Connection, cid: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM skins WHERE character_id=? ORDER BY sort_order, id", (cid,)
+    ).fetchall()
+    return [{k: r[k] for k in r.keys()} for r in rows]
+
+
+def _wiki_line_groups(row: sqlite3.Row, ship_cols: set[str]) -> list[dict]:
+    if "lines_by_skin_json" not in ship_cols:
+        return []
+    try:
+        raw = row["lines_by_skin_json"]
+    except (IndexError, KeyError):
+        return []
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _apply_lines_import(
+    conn: sqlite3.Connection,
+    cid: str,
+    groups: list[dict],
+    flat_raw: list,
+    stats: dict,
+) -> None:
+    """Write per-skin lines + meta; update stats counters / report lists."""
+    skins = _skin_row_dicts(conn, cid)
+    if not skins:
+        return
+
+    def _bump(key: str, n: int = 1) -> None:
+        stats[key] = int(stats.get(key) or 0) + n
+
+    report_cap = 40
+
+    def _note(bucket: str, item: dict) -> None:
+        lst = stats.setdefault(bucket, [])
+        if len(lst) < report_cap:
+            lst.append(item)
+
+    if groups:
+        report = apply_lines_by_skin(groups, skins, lines_rows_from_wiki)
+        by_id = {s["id"]: s for s in skins}
+        for a in report["assignments"]:
+            sk = by_id.get(a["skin_id"]) or {"id": a["skin_id"], "character_id": cid}
+            meta = merge_meta_json(
+                sk.get("meta_json"),
+                {
+                    "status": a["status"],
+                    "wiki_skin": a.get("wiki_skin"),
+                    "matched_by": a.get("matched_by"),
+                },
+            )
+            upsert_skin(
+                conn,
+                {
+                    **{k: sk.get(k) for k in (
+                        "id", "character_id", "name_zh", "name_en", "skin_index",
+                        "pet_model_id", "kanmusu_dir", "sort_order", "is_default",
+                    )},
+                    "id": a["skin_id"],
+                    "character_id": cid,
+                    "name_zh": sk.get("name_zh") or a["skin_id"],
+                    "meta_json": meta,
+                    "lines": a["lines"],
+                },
+                replace_lines=True,
+            )
+            if a["status"] == "ready":
+                _bump("skins_lines_ok")
+            else:
+                _bump("skins_lines_empty")
+        for u in report["wiki_unmatched"]:
+            _bump("wiki_skins_unmatched")
+            _note(
+                "lines_report",
+                {"type": "wiki_unmatched", "character_id": cid, **u},
+            )
+        for sid in report["roster_unmatched_ids"]:
+            sk = by_id.get(sid)
+            if not sk:
+                continue
+            _bump("roster_skins_unmatched")
+            meta = merge_meta_json(
+                sk.get("meta_json"),
+                {
+                    "status": "unmatched",
+                    "wiki_skin": None,
+                    "matched_by": None,
+                },
+            )
+            upsert_skin(
+                conn,
+                {
+                    "id": sid,
+                    "character_id": cid,
+                    "name_zh": sk.get("name_zh") or sid,
+                    "name_en": sk.get("name_en") or "",
+                    "skin_index": sk.get("skin_index"),
+                    "pet_model_id": sk.get("pet_model_id") or "",
+                    "kanmusu_dir": sk.get("kanmusu_dir") or "",
+                    "sort_order": sk.get("sort_order") or 0,
+                    "is_default": sk.get("is_default"),
+                    "meta_json": meta,
+                    "lines": [],
+                },
+                replace_lines=False,
+            )
+            _note(
+                "lines_report",
+                {"type": "roster_unmatched", "character_id": cid, "skin_id": sid},
+            )
+        return
+
+    # Flat-only / legacy wiki rows
+    lines = lines_rows_from_wiki(flat_raw)
+    for sk in skins:
+        is_def = bool(sk.get("is_default")) or str(sk.get("id") or "").endswith(
+            "-default"
+        )
+        if is_def and lines:
+            meta = merge_meta_json(
+                sk.get("meta_json"),
+                {"status": "stale_flat", "wiki_skin": "default", "matched_by": "default"},
+            )
+            upsert_skin(
+                conn,
+                {
+                    "id": sk["id"],
+                    "character_id": cid,
+                    "name_zh": sk.get("name_zh") or sk["id"],
+                    "name_en": sk.get("name_en") or "",
+                    "skin_index": sk.get("skin_index"),
+                    "pet_model_id": sk.get("pet_model_id") or "",
+                    "kanmusu_dir": sk.get("kanmusu_dir") or "",
+                    "sort_order": sk.get("sort_order") or 0,
+                    "is_default": True,
+                    "meta_json": meta,
+                    "lines": lines,
+                },
+                replace_lines=True,
+            )
+            _bump("skins_lines_ok")
+        else:
+            meta = merge_meta_json(
+                sk.get("meta_json"),
+                {
+                    "status": "stale_flat" if is_def else "empty",
+                    "wiki_skin": None,
+                    "matched_by": None,
+                },
+            )
+            upsert_skin(
+                conn,
+                {
+                    "id": sk["id"],
+                    "character_id": cid,
+                    "name_zh": sk.get("name_zh") or sk["id"],
+                    "name_en": sk.get("name_en") or "",
+                    "skin_index": sk.get("skin_index"),
+                    "pet_model_id": sk.get("pet_model_id") or "",
+                    "kanmusu_dir": sk.get("kanmusu_dir") or "",
+                    "sort_order": sk.get("sort_order") or 0,
+                    "is_default": sk.get("is_default"),
+                    "meta_json": meta,
+                    "lines": [],
+                },
+                replace_lines=False,
+            )
+            if not is_def:
+                _bump("skins_lines_empty")
+
+
 def lines_rows_from_wiki(raw_lines: list) -> list[dict]:
     out = []
     for i, item in enumerate(raw_lines or []):
@@ -386,6 +565,7 @@ def upsert_skin(conn: sqlite3.Connection, row: dict, replace_lines: bool) -> Non
           kanmusu_dir=CASE WHEN excluded.kanmusu_dir!='' THEN excluded.kanmusu_dir ELSE skins.kanmusu_dir END,
           sort_order=excluded.sort_order,
           is_default=excluded.is_default,
+          meta_json=excluded.meta_json,
           updated_at=datetime('now')
         """,
         (
@@ -487,12 +667,75 @@ def cmd_import_bundled_seed(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_id_filter(only_ids: list[str] | str | None) -> set[str] | None:
+    if only_ids is None or only_ids == "":
+        return None
+    if isinstance(only_ids, str):
+        parts = [x.strip() for x in only_ids.replace(";", ",").split(",") if x.strip()]
+    else:
+        parts = [str(x).strip() for x in only_ids if str(x).strip()]
+    return set(parts) if parts else None
+
+
+def _stable_wiki_id(cn: str) -> str:
+    """无拼音 slug 时用稳定 hash id（与历史 AppData pXXXXXXXX 风格一致）。"""
+    digest = hashlib.md5((cn or "").encode("utf-8")).hexdigest()[:8]
+    return f"p{digest}"
+
+
+def _build_cn_to_slug(
+    conn: sqlite3.Connection,
+    wiki: sqlite3.Connection,
+    alias_map: dict[str, str],
+) -> dict[str, str]:
+    """中文名 → 优先拼音 / 已有 id。"""
+    rev: dict[str, str] = {}
+    for slug, cn in alias_map.items():
+        cn = (cn or "").strip()
+        slug = (slug or "").strip()
+        if cn and slug and cn not in rev:
+            rev[cn] = slug
+    try:
+        for row in wiki.execute(
+            "SELECT folder, wiki_title, display_name FROM live2d_mappings"
+        ):
+            base, _ = strip_skin(row["folder"] or "")
+            for key in ((row["display_name"] or "").strip(), (row["wiki_title"] or "").strip()):
+                if key and base and key not in rev:
+                    rev[key] = base
+    except sqlite3.Error:
+        pass
+    for row in conn.execute("SELECT id, name_zh, wiki_title FROM characters"):
+        cid = row["id"]
+        for key in ((row["name_zh"] or "").strip(), (row["wiki_title"] or "").strip()):
+            if key and cid and key not in rev:
+                rev[key] = cid
+    return rev
+
+
+def _resolve_character_id(cn: str, cn_to_slug: dict[str, str]) -> str:
+    cn = (cn or "").strip()
+    if not cn:
+        return _stable_wiki_id("unknown")
+    if cn in cn_to_slug:
+        return cn_to_slug[cn]
+    return _stable_wiki_id(cn)
+
+
 def run_import_wiki(
     db: Path | None = None,
     wiki_db: Path | None = None,
     unpacked: Path | None = None,
     en_map: Path | None = None,
+    only_ids: list[str] | str | None = None,
+    scope: str = "all",
 ) -> dict:
+    """从 BWIKI sqlite 写入自用库。
+
+    scope:
+      - all（默认）：导入 ships 表全部舰船（阵营/CV/稀有度/台词等）
+      - unpacked：旧行为，仅扫 data/model/unpacked 文件夹
+    """
     db = Path(db) if db else default_local_db()
     wiki_db = Path(wiki_db) if wiki_db else (repo_root() / "mcp/blhx-wiki/data/blhx.sqlite")
     unpacked = Path(unpacked) if unpacked else (repo_root() / "data/model/unpacked")
@@ -502,53 +745,282 @@ def run_import_wiki(
         **LIVE2D_ALIASES,
         **load_json(repo_root() / "mcp/blhx-wiki/data/live2d-aliases.json", {}),
     }
+    only_set = _parse_id_filter(only_ids)
+    scope = (scope or "all").strip().lower()
+    if scope not in ("all", "unpacked"):
+        scope = "all"
+
     if not wiki_db.is_file():
         return {"ok": False, "error": f"wiki db missing: {wiki_db}"}
-    if not unpacked.is_dir():
-        return {"ok": False, "error": f"unpacked missing: {unpacked}"}
 
     conn = connect(db)
     apply_schema(conn)
     wiki = sqlite3.connect(str(wiki_db))
     wiki.row_factory = sqlite3.Row
     ship_cols = {r[1] for r in wiki.execute("PRAGMA table_info(ships)")}
-    has_cv = "cv" in ship_cols
-    select_cols = "wiki_title, display_name, aliases_json, lines_json, assets_json"
-    if has_cv:
-        select_cols += ", cv"
+    select_cols = [
+        "wiki_title",
+        "display_name",
+        "aliases_json",
+        "lines_json",
+        "assets_json",
+    ]
+    for opt in ("cv", "faction", "ship_type", "rarity", "persona_reference", "lines_by_skin_json"):
+        if opt in ship_cols:
+            select_cols.append(opt)
+    select_sql = ", ".join(select_cols)
 
+    cn_to_slug = _build_cn_to_slug(conn, wiki, alias_map)
     pet_models = appdata_data_dir() / "pet-models"
-    folders = sorted(p.name for p in unpacked.iterdir() if p.is_dir() and not p.name.startswith("."))
-    upserted = []
+    upserted: list[dict] = []
+    chars_seen: set[str] = set()
+    lines_stats: dict = {
+        "skins_lines_ok": 0,
+        "skins_lines_empty": 0,
+        "wiki_skins_unmatched": 0,
+        "roster_skins_unmatched": 0,
+        "lines_report": [],
+    }
+
+    def import_ship_row(row: sqlite3.Row) -> str | None:
+        display = (row["display_name"] or row["wiki_title"] or "").strip()
+        wiki_title = (row["wiki_title"] or display).strip()
+        if not display:
+            return None
+        cid = _resolve_character_id(display, cn_to_slug)
+        if only_set:
+            matched = False
+            for oid in only_set:
+                if oid == cid or oid == display or alias_map.get(oid) == display:
+                    if oid in alias_map:
+                        cid = oid
+                    matched = True
+                    break
+            if not matched:
+                return None
+
+        aliases = json.loads(row["aliases_json"] or "[]")
+        english = pick_english(aliases, en_map_data.get(cid, "") or en_map_data.get(display, ""))
+        keys = set(row.keys())
+        cv = clean_cv(row["cv"] or "") if "cv" in keys else ""
+        faction = (row["faction"] or "").strip() if "faction" in keys else ""
+        ship_type = (row["ship_type"] or "").strip() if "ship_type" in keys else ""
+        rarity = (row["rarity"] or "").strip() if "rarity" in keys else ""
+        desc = ""
+        if "persona_reference" in keys and row["persona_reference"]:
+            desc = str(row["persona_reference"]).strip()
+            if len(desc) > 4000:
+                desc = desc[:4000].rstrip() + "…"
+
+        upsert_character(
+            conn,
+            {
+                "id": cid,
+                "name_zh": display,
+                "name_en": english,
+                "wiki_title": wiki_title,
+                "cv": cv,
+                "faction": faction,
+                "ship_type": ship_type,
+                "rarity": rarity,
+                "persona_id": cid,
+                "source": "wiki",
+                "description": desc,
+            },
+        )
+        lines_raw = json.loads(row["lines_json"] or "[]")
+        if not isinstance(lines_raw, list):
+            lines_raw = []
+        default_skin_id = skin_db_id(cid, "default")
+        upsert_skin(
+            conn,
+            {
+                "id": default_skin_id,
+                "character_id": cid,
+                "name_zh": "默认",
+                "name_en": "",
+                "skin_index": 0,
+                "pet_model_id": "",
+                "kanmusu_dir": "",
+                "sort_order": 0,
+                "is_default": True,
+                "lines": [],
+            },
+            replace_lines=False,
+        )
+        # 换装条目（有 assets 时）
+        assets = json.loads(row["assets_json"] or "[]")
+        if isinstance(assets, list):
+            for i, asset in enumerate(assets):
+                if not isinstance(asset, dict):
+                    continue
+                title = pick_skin_title([asset], None, "") or ""
+                if not title or title in ("默认",):
+                    continue
+                sid = f"{cid}-skin{i + 1}"
+                upsert_skin(
+                    conn,
+                    {
+                        "id": sid,
+                        "character_id": cid,
+                        "name_zh": title,
+                        "name_en": "",
+                        "skin_index": i + 1,
+                        "pet_model_id": "",
+                        "kanmusu_dir": "",
+                        "sort_order": i + 1,
+                        "is_default": False,
+                        "lines": [],
+                    },
+                    replace_lines=False,
+                )
+
+        groups = _wiki_line_groups(row, ship_cols)
+        _apply_lines_import(conn, cid, groups, lines_raw, lines_stats)
+        line_n = conn.execute(
+            "SELECT count(*) FROM skin_lines WHERE skin_id IN (SELECT id FROM skins WHERE character_id=?)",
+            (cid,),
+        ).fetchone()[0]
+
+        cn_to_slug[display] = cid
+        chars_seen.add(cid)
+        upserted.append(
+            {
+                "character_id": cid,
+                "name_zh": display,
+                "name_en": english,
+                "faction": faction,
+                "cv": cv,
+                "lines": line_n,
+            }
+        )
+        return cid
+
+    # —— 全量：wiki ships ——
+    if scope == "all":
+        for row in wiki.execute(f"SELECT {select_sql} FROM ships ORDER BY display_name"):
+            import_ship_row(row)
+
+    # —— 解包目录：绑定模型路径（并在 unpacked 模式下作为主键来源）——
+    if unpacked.is_dir():
+        folders = sorted(
+            p.name for p in unpacked.iterdir() if p.is_dir() and not p.name.startswith(".")
+        )
+    else:
+        folders = []
+        if scope == "unpacked":
+            conn.close()
+            wiki.close()
+            return {"ok": False, "error": f"unpacked missing: {unpacked}"}
 
     for folder in folders:
         base, suffix = strip_skin(folder)
+        if only_set and base not in only_set and folder not in only_set:
+            continue
         skin_index = int(suffix) if suffix.isdigit() else (0 if not suffix else None)
         cn = alias_map.get(base)
         row = None
         if cn:
             row = wiki.execute(
-                f"SELECT {select_cols} FROM ships WHERE display_name=? OR wiki_title=?",
+                f"SELECT {select_sql} FROM ships WHERE display_name=? OR wiki_title=?",
                 (cn, cn),
             ).fetchone()
-        if row is None:
-            display = cn or base
-            wiki_title = display
-            aliases = []
-            lines_raw = []
-            assets = []
-            cv = ""
+        if scope == "unpacked":
+            if row is not None:
+                cid = import_ship_row(row) or base
+            else:
+                display = cn or base
+                cid = base
+                if only_set and cid not in only_set:
+                    continue
+                upsert_character(
+                    conn,
+                    {
+                        "id": cid,
+                        "name_zh": display,
+                        "name_en": en_map_data.get(cid, ""),
+                        "wiki_title": display,
+                        "persona_id": cid,
+                        "source": "unpacked",
+                    },
+                )
+                chars_seen.add(cid)
         else:
-            display = row["display_name"] or row["wiki_title"]
-            wiki_title = row["wiki_title"] or display
-            aliases = json.loads(row["aliases_json"] or "[]")
-            lines_raw = json.loads(row["lines_json"] or "[]")
-            assets = json.loads(row["assets_json"] or "[]")
-            cv = clean_cv(row["cv"] or "") if has_cv else ""
+            # all：用中文挂到已有角色，否则用 folder base 作 id
+            if row is not None:
+                display = (row["display_name"] or row["wiki_title"] or "").strip()
+                cid = _resolve_character_id(display, cn_to_slug)
+                if cid not in chars_seen:
+                    import_ship_row(row)
+            else:
+                cid = base
+                if cid not in chars_seen:
+                    upsert_character(
+                        conn,
+                        {
+                            "id": cid,
+                            "name_zh": cn or base,
+                            "name_en": en_map_data.get(cid, ""),
+                            "wiki_title": cn or base,
+                            "persona_id": cid,
+                            "source": "unpacked",
+                        },
+                    )
+                    chars_seen.add(cid)
 
-        english = pick_english(aliases, en_map_data.get(base, ""))
-        skin_name_zh = pick_skin_title(assets, skin_index, skin_label(suffix))
-        lines = lines_rows_from_wiki(lines_raw)
+        skin_name_zh = (
+            pick_skin_title(
+                json.loads(row["assets_json"] or "[]") if row else [],
+                skin_index,
+                skin_label(suffix),
+            )
+            if row
+            else skin_label(suffix)
+        )
+        # Per-skin lines only — never copy whole-ship flat lines onto every folder
+        lines: list[dict] = []
+        meta_json = "{}"
+        if row is not None:
+            groups = _wiki_line_groups(row, ship_cols)
+            fake_skin = {
+                "id": folder,
+                "name_zh": skin_name_zh,
+                "kanmusu_dir": folder,
+                "pet_model_id": "",
+                "is_default": skin_index in (None, 0) and not suffix,
+            }
+            if groups:
+                from line_skin_match import match_wiki_group_to_skin
+
+                for g in groups:
+                    sk, how = match_wiki_group_to_skin(g, [fake_skin])
+                    if sk is not None:
+                        lines = lines_rows_from_wiki(g.get("lines") or [])
+                        meta_json = merge_meta_json(
+                            None,
+                            {
+                                "status": "ready" if lines else "empty",
+                                "wiki_skin": g.get("skin"),
+                                "matched_by": how,
+                            },
+                        )
+                        break
+                else:
+                    meta_json = merge_meta_json(
+                        None,
+                        {"status": "unmatched", "wiki_skin": None, "matched_by": None},
+                    )
+            elif skin_index in (None, 0) and not suffix:
+                flat = json.loads(row["lines_json"] or "[]")
+                lines = lines_rows_from_wiki(flat if isinstance(flat, list) else [])
+                meta_json = merge_meta_json(
+                    None,
+                    {
+                        "status": "stale_flat" if lines else "empty",
+                        "wiki_skin": "default",
+                        "matched_by": "default",
+                    },
+                )
 
         pet_model_id = ""
         if (pet_models / folder).is_dir():
@@ -556,69 +1028,84 @@ def run_import_wiki(
         elif (pet_models / f"skin-{folder}").is_dir():
             pet_model_id = f"skin-{folder}"
 
-        upsert_character(
-            conn,
-            {
-                "id": base,
-                "name_zh": display,
-                "name_en": english,
-                "wiki_title": wiki_title,
-                "cv": cv,
-                "persona_id": base,
-                "source": "wiki",
-            },
-        )
+        # 角色 id：优先中文已解析
+        if row is not None:
+            display = (row["display_name"] or row["wiki_title"] or "").strip()
+            cid = _resolve_character_id(display, cn_to_slug)
+        else:
+            cid = base
+
         upsert_skin(
             conn,
             {
                 "id": folder,
-                "character_id": base,
+                "character_id": cid,
                 "name_zh": skin_name_zh,
                 "name_en": "",
                 "skin_index": skin_index,
                 "pet_model_id": pet_model_id,
                 "kanmusu_dir": folder,
                 "sort_order": skin_index or 0,
-                "is_default": False,
+                "is_default": skin_index in (None, 0) and not suffix,
+                "meta_json": meta_json,
                 "lines": lines,
             },
-            replace_lines=True,
-        )
-        upserted.append(
-            {
-                "folder": folder,
-                "character_id": base,
-                "name_zh": display,
-                "name_en": english,
-                "skin_name_zh": skin_name_zh,
-                "lines": len(lines),
-                "cv": cv,
-            }
+            replace_lines=bool(lines),
         )
 
-    # apply seed patches (optional)
-    seed_chars = load_json(roster_dir() / "seed" / "characters.json", [])
-    for c in seed_chars if isinstance(seed_chars, list) else []:
-        if isinstance(c, dict) and c.get("id"):
-            upsert_character(conn, {**c, "name_zh": c.get("name_zh") or c.get("name") or c["id"]})
+    if only_set and scope == "all":
+        # 保证点名 id 即使 wiki 无匹配也至少尝试一次（拼音别名）
+        for oid in sorted(only_set):
+            if oid in chars_seen:
+                continue
+            cn = alias_map.get(oid)
+            if not cn:
+                continue
+            row = wiki.execute(
+                f"SELECT {select_sql} FROM ships WHERE display_name=? OR wiki_title=?",
+                (cn, cn),
+            ).fetchone()
+            if row:
+                import_ship_row(row)
 
-    seed_skins = load_json(roster_dir() / "seed" / "skins.json", [])
-    for s in seed_skins if isinstance(seed_skins, list) else []:
-        if isinstance(s, dict) and s.get("id") and s.get("character_id"):
-            upsert_skin(
-                conn,
-                {
-                    **s,
-                    "name_zh": s.get("name_zh") or s.get("name") or s["id"],
-                    "lines": s.get("lines") or [],
-                },
-                replace_lines=bool(s.get("lines")),
-            )
+    if only_set is None and scope == "all":
+        seed_chars = load_json(roster_dir() / "seed" / "characters.json", [])
+        for c in seed_chars if isinstance(seed_chars, list) else []:
+            if isinstance(c, dict) and c.get("id"):
+                upsert_character(
+                    conn, {**c, "name_zh": c.get("name_zh") or c.get("name") or c["id"]}
+                )
+        seed_skins = load_json(roster_dir() / "seed" / "skins.json", [])
+        for s in seed_skins if isinstance(seed_skins, list) else []:
+            if isinstance(s, dict) and s.get("id") and s.get("character_id"):
+                upsert_skin(
+                    conn,
+                    {
+                        **s,
+                        "name_zh": s.get("name_zh") or s.get("name") or s["id"],
+                        "lines": s.get("lines") or [],
+                    },
+                    replace_lines=bool(s.get("lines")),
+                )
 
     conn.commit()
+    char_count = conn.execute("SELECT count(*) FROM characters").fetchone()[0]
     conn.close()
     wiki.close()
-    return {"ok": True, "db": str(db), "upserted": upserted, "count": len(upserted)}
+    return {
+        "ok": True,
+        "db": str(db),
+        "scope": scope,
+        "upserted": len(upserted),
+        "character_total": char_count,
+        "sample": upserted[:8],
+        "only_ids": sorted(only_set) if only_set else None,
+        "skins_lines_ok": lines_stats["skins_lines_ok"],
+        "skins_lines_empty": lines_stats["skins_lines_empty"],
+        "wiki_skins_unmatched": lines_stats["wiki_skins_unmatched"],
+        "roster_skins_unmatched": lines_stats["roster_skins_unmatched"],
+        "lines_report": lines_stats["lines_report"],
+    }
 
 
 def cmd_import_wiki(args: argparse.Namespace) -> int:
@@ -627,6 +1114,8 @@ def cmd_import_wiki(args: argparse.Namespace) -> int:
         wiki_db=Path(args.wiki_db),
         unpacked=Path(args.unpacked),
         en_map=Path(args.en_map),
+        only_ids=getattr(args, "ids", None) or None,
+        scope=getattr(args, "scope", None) or "all",
     )
     emit(result)
     return 0 if result.get("ok") else 1
@@ -692,7 +1181,14 @@ def run_sync_appdata(
     data_dir: Path | None = None,
     ids: str = "",
     force_lines: bool = False,
+    replace: bool = True,
 ) -> dict:
+    """同步自用库 → AppData characters/manifest.json。
+
+    replace=True（默认）：AppData 角色列表改成「本次同步的自用库角色」
+    （不再把旧的八百多个 wiki 角色粘在一起）。
+    replace=False：仅 upsert，保留 AppData 里其它角色。
+    """
     db = Path(db) if db else default_local_db()
     data_dir = Path(data_dir) if data_dir else appdata_data_dir()
     if not db.is_file():
@@ -701,7 +1197,10 @@ def run_sync_appdata(
     manifest_path = data_dir / "characters" / "manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     existing = load_json(manifest_path, {"version": 1, "default_id": "", "characters": []})
-    by_id = {c["id"]: c for c in existing.get("characters", []) if isinstance(c, dict)}
+    if replace:
+        by_id: dict = {}
+    else:
+        by_id = {c["id"]: c for c in existing.get("characters", []) if isinstance(c, dict)}
 
     char_ids = [r["id"] for r in conn.execute("SELECT id FROM characters ORDER BY id")]
     if ids:
@@ -713,7 +1212,7 @@ def run_sync_appdata(
         char = character_to_manifest(conn, cid)
         if not char:
             continue
-        prev = by_id.get(cid)
+        prev = None if replace else by_id.get(cid)
         if prev and not force_lines:
             # keep user-edited lines if present
             prev_skins = {s.get("id"): s for s in (prev.get("skins") or []) if isinstance(s, dict)}
@@ -736,9 +1235,16 @@ def run_sync_appdata(
                     shutil.rmtree(dst)
                 shutil.copytree(src, dst)
 
+    before = len(existing.get("characters") or [])
     existing["characters"] = dedupe_characters_by_name(list(by_id.values()))
-    if not existing.get("default_id") and existing["characters"]:
+    # 全量覆盖时 default 落到自用库第一个；若仍在名单里则保留原 default
+    old_default = existing.get("default_id") or ""
+    if old_default and any(c.get("id") == old_default for c in existing["characters"]):
+        existing["default_id"] = old_default
+    elif existing["characters"]:
         existing["default_id"] = existing["characters"][0]["id"]
+    else:
+        existing["default_id"] = ""
     manifest_path.write_text(
         json.dumps(existing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -782,7 +1288,14 @@ def run_sync_appdata(
         encoding="utf-8",
     )
     conn.close()
-    return {"ok": True, "manifest": str(manifest_path), "synced": synced}
+    return {
+        "ok": True,
+        "manifest": str(manifest_path),
+        "synced": synced,
+        "replace": replace,
+        "before_count": before,
+        "after_count": len(existing["characters"]),
+    }
 
 
 def cmd_sync_appdata(args: argparse.Namespace) -> int:
@@ -791,6 +1304,7 @@ def cmd_sync_appdata(args: argparse.Namespace) -> int:
         data_dir=Path(args.data_dir) if args.data_dir else None,
         ids=args.ids or "",
         force_lines=bool(args.force_lines),
+        replace=not bool(getattr(args, "merge", False)),
     )
     emit(result)
     return 0 if result.get("ok") else 1
@@ -1005,11 +1519,28 @@ def main() -> int:
         type=Path,
         default=repo_root() / "data/wiki/ship-en-names.json",
     )
+    p_imp.add_argument(
+        "--ids",
+        type=str,
+        default="",
+        help="仅同步这些角色 id（逗号分隔），默认全部",
+    )
+    p_imp.add_argument(
+        "--scope",
+        choices=("all", "unpacked"),
+        default="all",
+        help="all=Wiki 全舰船；unpacked=仅已解包目录",
+    )
 
     p_sync = sub.add_parser("sync-appdata")
     p_sync.add_argument("--data-dir", type=Path, default=None)
     p_sync.add_argument("--ids", type=str, default="")
     p_sync.add_argument("--force-lines", action="store_true")
+    p_sync.add_argument(
+        "--merge",
+        action="store_true",
+        help="合并进 AppData 现有角色（默认改为覆盖：仅保留本次同步的自用库角色）",
+    )
 
     p_pub = sub.add_parser("publish-bundled")
     p_pub.add_argument("--ids", type=str, default="", help="override allowlist")
