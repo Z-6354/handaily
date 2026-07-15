@@ -5,14 +5,10 @@
   let metaPath = "";
   let offset = 0;
   let limit = 48;
-  let avatarJobId = null;
-  let avatarPollTimer = null;
-  let avatarToastHidden = false;
-  let avatarAutoStarted = false;
-  let linesJobId = null;
-  let linesPollTimer = null;
-  let linesToastHidden = false;
-  let linesAutoStarted = false;
+  let pipelineJobId = null;
+  let pipelinePollTimer = null;
+  let pipelineToastHidden = false;
+  let pipelineAutoStarted = false;
   let total = 0;
   let selectedCharId = null;
   let selectedSkinId = null;
@@ -89,7 +85,6 @@
     $("db-bundled").classList.toggle("active", db === "bundled");
     $("bundled-badge").hidden = db !== "bundled";
     const localOnly = db === "local";
-    $("btn-import-wiki").disabled = !localOnly;
     $("btn-sync-appdata").disabled = !localOnly;
     $("btn-publish").disabled = !localOnly;
     offset = 0;
@@ -97,13 +92,10 @@
     selectedSkinId = null;
     selectedLineId = null;
     creatingChar = false;
-    avatarAutoStarted = false;
-    linesAutoStarted = false;
-    avatarToastHidden = false;
-    linesToastHidden = false;
+    pipelineAutoStarted = false;
+    pipelineToastHidden = false;
     if (db !== "local") {
-      showAvatarToast(false);
-      showLinesToast(false);
+      showPipelineToast(false);
     }
     clearDetail();
     refreshAll();
@@ -195,30 +187,33 @@
     $("btn-prev").disabled = offset <= 0;
     $("btn-next").disabled = offset + limit >= total;
 
-    if (db === "local" && !avatarAutoStarted) {
-      avatarAutoStarted = true;
-      maybeStartAvatarFetch(true);
-    }
-    if (db === "local" && !linesAutoStarted) {
-      linesAutoStarted = true;
-      maybeStartWikiLinesFetch(true);
+    if (db === "local" && !pipelineAutoStarted) {
+      pipelineAutoStarted = true;
+      maybeStartWikiPipeline(true);
     }
   }
 
-  function showAvatarToast(show) {
-    const el = $("avatar-toast");
+  const PHASE_TITLE = {
+    characters: "Wiki 补齐 · 同步角色",
+    avatars_skins: "Wiki 补齐 · 头像与皮肤",
+    lines: "Wiki 补齐 · 导入台词",
+    done: "Wiki 补齐 · 完成",
+  };
+
+  function showPipelineToast(show) {
+    const el = $("pipeline-toast");
     if (!el) return;
-    if (avatarToastHidden && show) return;
+    if (pipelineToastHidden && show) return;
     el.hidden = !show;
   }
 
-  function renderAvatarToast(job) {
+  function renderPipelineToast(job) {
     if (!job) return;
-    const title = $("avatar-toast-title");
-    const sub = $("avatar-toast-sub");
-    const fill = $("avatar-toast-fill");
-    const counts = $("avatar-toast-counts");
-    const btn = $("avatar-toast-pause");
+    const title = $("pipeline-toast-title");
+    const sub = $("pipeline-toast-sub");
+    const fill = $("pipeline-toast-fill");
+    const counts = $("pipeline-toast-counts");
+    const btn = $("pipeline-toast-pause");
     const total = job.total || 0;
     const current = job.current || 0;
     const pct = total ? Math.round((100 * current) / total) : 0;
@@ -226,32 +221,34 @@
     counts.textContent =
       `${current}/${total} · 成功 ${job.ok_count || 0} · 跳过 ${job.skip_count || 0} · 失败 ${job.fail_count || 0}`;
 
+    const phaseLabel = PHASE_TITLE[job.phase] || "Wiki 补齐";
     if (job.status === "paused") {
-      title.textContent = "头像补齐 · 已暂停";
+      title.textContent = phaseLabel + " · 已暂停";
+      btn.hidden = false;
       btn.textContent = "继续";
       sub.textContent = job.current_item ? `当前：${job.current_item}` : "队列已暂停";
     } else if (job.status === "done") {
-      title.textContent = "补齐完成";
+      title.textContent = PHASE_TITLE.done;
       btn.hidden = true;
-      sub.textContent = `成功 ${job.ok_count || 0} · 跳过 ${job.skip_count || 0} · 失败 ${job.fail_count || 0}`;
+      sub.textContent = `台词就绪 ${job.ok_count || 0} · 空 ${job.skip_count || 0} · 未匹配 ${job.fail_count || 0}`;
     } else if (job.status === "error") {
-      title.textContent = "头像补齐失败";
+      title.textContent = "Wiki 补齐失败";
       btn.hidden = true;
       sub.textContent = job.error || "未知错误";
     } else {
-      title.textContent = "头像补齐";
+      title.textContent = phaseLabel;
       btn.hidden = false;
       btn.textContent = "暂停";
       sub.textContent = job.current_item
         ? `当前：${job.current_item}`
-        : "正在从 Wiki 下载到本地…";
+        : "角色 → 头像/皮肤 → 台词";
     }
-    showAvatarToast(true);
+    showPipelineToast(true);
   }
 
-  async function pollAvatarJob(jobId) {
-    avatarJobId = jobId;
-    if (avatarPollTimer) clearInterval(avatarPollTimer);
+  async function pollPipelineJob(jobId) {
+    pipelineJobId = jobId;
+    if (pipelinePollTimer) clearInterval(pipelinePollTimer);
     const tick = async () => {
       try {
         const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
@@ -259,23 +256,19 @@
         const data = await res.json();
         const job = data.job;
         if (!job) return;
-        renderAvatarToast(job);
+        renderPipelineToast(job);
         if (job.status === "done" || job.status === "error") {
-          clearInterval(avatarPollTimer);
-          avatarPollTimer = null;
+          clearInterval(pipelinePollTimer);
+          pipelinePollTimer = null;
           await loadCharacters();
+          if (selectedCharId) await loadCharacterDetail(selectedCharId);
           if (job.status === "done") {
             setTimeout(() => {
-              avatarToastHidden = false;
-              showAvatarToast(false);
-            }, 3200);
+              pipelineToastHidden = false;
+              showPipelineToast(false);
+            }, 4200);
           }
-        } else if (
-          job.ok_count > 0 &&
-          job.current &&
-          job.current % 8 === 0
-        ) {
-          // refresh grid occasionally so new faces appear
+        } else if (job.phase === "avatars_skins" && job.ok_count > 0) {
           await loadCharacters();
         }
       } catch (_e) {
@@ -283,10 +276,10 @@
       }
     };
     await tick();
-    avatarPollTimer = setInterval(tick, 500);
+    pipelinePollTimer = setInterval(tick, 600);
   }
 
-  async function maybeStartAvatarFetch(force) {
+  async function maybeStartWikiPipeline(force) {
     if (db !== "local") return;
     try {
       const jobsRes = await fetch("/api/jobs?limit=20");
@@ -294,136 +287,32 @@
         const payload = await jobsRes.json();
         const active = (payload.jobs || []).find(
           (j) =>
-            j.kind === "fetch-avatars" &&
+            j.kind === "roster-wiki-pipeline" &&
             ["queued", "running", "paused"].includes(j.status)
         );
         if (active) {
-          avatarToastHidden = false;
-          await pollAvatarJob(active.id);
+          pipelineToastHidden = false;
+          await pollPipelineJob(active.id);
           return;
         }
       }
       if (!force) return;
-      const data = await rosterFetch("/api/roster/ops/fetch-avatars", {
+      const data = await rosterFetch("/api/roster/ops/wiki-pipeline", {
         method: "POST",
-        body: { missing_only: true },
+        body: {},
       });
       if (data.job_id) {
-        avatarToastHidden = false;
-        await pollAvatarJob(data.job_id);
+        pipelineToastHidden = false;
+        await pollPipelineJob(data.job_id);
       }
     } catch (e) {
       if (e.message !== "cancelled") {
-        appendLog("头像补齐启动失败: " + (e.message || e), "err");
+        appendLog("Wiki 补齐启动失败: " + (e.message || e), "err");
       }
     }
   }
 
-  function showLinesToast(show) {
-    const el = $("lines-toast");
-    if (!el) return;
-    if (linesToastHidden && show) return;
-    el.hidden = !show;
-  }
-
-  function renderLinesToast(job) {
-    if (!job) return;
-    const title = $("lines-toast-title");
-    const sub = $("lines-toast-sub");
-    const fill = $("lines-toast-fill");
-    const counts = $("lines-toast-counts");
-    const btn = $("lines-toast-pause");
-    const total = job.total || 0;
-    const current = job.current || 0;
-    const pct = total ? Math.round((100 * current) / total) : 0;
-    fill.style.width = pct + "%";
-    counts.textContent =
-      `${current}/${total} · 成功 ${job.ok_count || 0} · 跳过 ${job.skip_count || 0} · 失败 ${job.fail_count || 0}`;
-
-    if (job.status === "paused") {
-      title.textContent = "台词按皮补齐 · 已暂停";
-      btn.textContent = "继续";
-      sub.textContent = job.current_item ? `当前：${job.current_item}` : "队列已暂停";
-    } else if (job.status === "done") {
-      title.textContent = "台词按皮补齐 · 完成";
-      btn.textContent = "暂停";
-      sub.textContent = "已写入 Wiki 库；请再「导入 Wiki」同步到自用库";
-    } else if (job.status === "error") {
-      title.textContent = "台词按皮补齐 · 失败";
-      sub.textContent = job.error || "未知错误";
-    } else {
-      title.textContent = "台词按皮补齐";
-      btn.textContent = "暂停";
-      sub.textContent = job.current_item
-        ? `正在抓取：${job.current_item}`
-        : "准备队列…";
-    }
-    showLinesToast(true);
-  }
-
-  async function pollLinesJob(jobId) {
-    linesJobId = jobId;
-    if (linesPollTimer) {
-      clearInterval(linesPollTimer);
-      linesPollTimer = null;
-    }
-    const tick = async () => {
-      try {
-        const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
-        if (!res.ok) return;
-        const data = await res.json();
-        const job = data.job || data;
-        renderLinesToast(job);
-        if (job.status === "done" || job.status === "error") {
-          clearInterval(linesPollTimer);
-          linesPollTimer = null;
-          if (job.status === "done") {
-            setTimeout(() => {
-              linesToastHidden = false;
-              showLinesToast(false);
-            }, 4200);
-          }
-        }
-      } catch (_e) {
-        /* ignore */
-      }
-    };
-    await tick();
-    linesPollTimer = setInterval(tick, 600);
-  }
-
-  async function maybeStartWikiLinesFetch(force) {
-    if (db !== "local") return;
-    try {
-      const jobsRes = await fetch("/api/jobs?limit=20");
-      if (jobsRes.ok) {
-        const payload = await jobsRes.json();
-        const active = (payload.jobs || []).find(
-          (j) =>
-            j.kind === "fetch-wiki-lines" &&
-            ["queued", "running", "paused"].includes(j.status)
-        );
-        if (active) {
-          linesToastHidden = false;
-          await pollLinesJob(active.id);
-          return;
-        }
-      }
-      if (!force) return;
-      const data = await rosterFetch("/api/roster/ops/fetch-wiki-lines", {
-        method: "POST",
-        body: { missing_only: true },
-      });
-      if (data.job_id) {
-        linesToastHidden = false;
-        await pollLinesJob(data.job_id);
-      }
-    } catch (e) {
-      if (e.message !== "cancelled") {
-        appendLog("台词按皮补齐启动失败: " + (e.message || e), "err");
-      }
-    }
-  }
+  /* pipeline toast owns auto fill */
 
   async function selectCharacter(id) {
     creatingChar = false;
@@ -853,14 +742,6 @@
       }
       await refreshAll();
       if (selectedCharId) await loadCharacterDetail(selectedCharId);
-      if (data.avatar_job_id) {
-        avatarToastHidden = false;
-        await pollAvatarJob(data.avatar_job_id);
-      }
-      if (data.wiki_lines_job_id) {
-        linesToastHidden = false;
-        await pollLinesJob(data.wiki_lines_job_id);
-      }
       return data;
     } catch (e) {
       if (e.message === "cancelled") {
@@ -927,13 +808,6 @@
     fillEnOnBlur($("f-name-en"), () => ($("f-id").value || "").trim());
     fillEnOnBlur($("s-name-en"), () => ($("s-id").value || "").trim());
 
-    $("btn-import-wiki").addEventListener("click", () => {
-      if (db !== "local") {
-        appendLog("导入 Wiki 仅支持自用库，请切回自用库", "err");
-        return;
-      }
-      runOp("导入 Wiki", "/api/roster/ops/import-wiki", {});
-    });
     $("btn-sync-appdata").addEventListener("click", () => {
       if (db !== "local") {
         appendLog("同步 AppData 仅支持自用库，请切回自用库", "err");
@@ -946,45 +820,27 @@
       runOp("补齐空英文名", "/api/roster/ops/fill-english", {});
     });
 
-    $("avatar-toast-close")?.addEventListener("click", () => {
-      avatarToastHidden = true;
-      showAvatarToast(false);
+    $("pipeline-toast-close")?.addEventListener("click", () => {
+      pipelineToastHidden = true;
+      showPipelineToast(false);
     });
-    $("avatar-toast-pause")?.addEventListener("click", async () => {
-      if (!avatarJobId) return;
-      const btn = $("avatar-toast-pause");
+    $("pipeline-toast-pause")?.addEventListener("click", async () => {
+      if (!pipelineJobId) return;
+      const btn = $("pipeline-toast-pause");
       const action = btn.textContent === "继续" ? "resume" : "pause";
       try {
-        const res = await fetch(`/api/jobs/${encodeURIComponent(avatarJobId)}/${action}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
+        const res = await fetch(
+          `/api/jobs/${encodeURIComponent(pipelineJobId)}/${action}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: "{}",
+          }
+        );
         const data = await res.json();
-        if (data.job) renderAvatarToast(data.job);
+        if (data.job) renderPipelineToast(data.job);
       } catch (e) {
-        appendLog("头像任务控制失败: " + (e.message || e), "err");
-      }
-    });
-
-    $("lines-toast-close")?.addEventListener("click", () => {
-      linesToastHidden = true;
-      showLinesToast(false);
-    });
-    $("lines-toast-pause")?.addEventListener("click", async () => {
-      if (!linesJobId) return;
-      const btn = $("lines-toast-pause");
-      const action = btn.textContent === "继续" ? "resume" : "pause";
-      try {
-        const res = await fetch(`/api/jobs/${encodeURIComponent(linesJobId)}/${action}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        const data = await res.json();
-        if (data.job) renderLinesToast(data.job);
-      } catch (e) {
-        appendLog("台词任务控制失败: " + (e.message || e), "err");
+        appendLog("Wiki 补齐控制失败: " + (e.message || e), "err");
       }
     });
   }

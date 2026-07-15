@@ -26,6 +26,7 @@ WRITE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 LOCAL_ONLY_OPS = frozenset(
     {
         "import-wiki",
+        "wiki-pipeline",
         "sync-appdata",
         "publish-bundled",
         "fetch-avatars",
@@ -601,39 +602,15 @@ def _ops_local(
 
         jid = start_fetch_wiki_lines_job(body)
         return 200, {"ok": True, "job_id": jid}
+    elif op == "wiki-pipeline":
+        from wiki_pipeline_jobs import start_wiki_pipeline_job
+
+        jid = start_wiki_pipeline_job(body)
+        return 200, {"ok": True, "job_id": jid}
     else:
         return 404, {"ok": False, "error": f"unknown op: {op}"}
     code = 200 if result.get("ok") else 400
-    # After wiki import, enqueue avatar + wiki-lines fetch for local DB
-    if op == "import-wiki" and result.get("ok"):
-        try:
-            from avatar_jobs import start_fetch_avatars_job
-
-            jid = start_fetch_avatars_job(
-                {
-                    "missing_only": True,
-                    "ids": body.get("ids") or "",
-                    "db_path": body.get("db_path"),
-                    "wiki_db": body.get("wiki_db"),
-                }
-            )
-            result = {**result, "avatar_job_id": jid}
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            from wiki_lines_jobs import start_fetch_wiki_lines_job
-
-            jid2 = start_fetch_wiki_lines_job(
-                {
-                    "missing_only": True,
-                    "ids": body.get("ids") or "",
-                    "db_path": body.get("db_path"),
-                    "wiki_db": body.get("wiki_db"),
-                }
-            )
-            result = {**result, "wiki_lines_job_id": jid2}
-        except Exception:  # noqa: BLE001
-            pass
+    # import-wiki kept for CLI/debug; UI uses wiki-pipeline (no auto side jobs)
     return code, result
 
 

@@ -195,10 +195,12 @@
 }
 
 .lines-toast {
-  bottom: 148px;
-  z-index: 201;
+  /* unused: single pipeline toast */
+  display: none;
 }
 
+#pipeline-toast-fill,
+#avatar-toast-fill,
 #lines-toast-fill {
   height: 100%;
   width: 0%;
@@ -250,7 +252,8 @@
   margin-bottom: 10px;
 }
 
-#avatar-toast-fill {
+#avatar-toast-fill,
+#pipeline-toast-fill {
   height: 100%;
   width: 0%;
   background: var(--accent);
