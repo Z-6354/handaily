@@ -8,6 +8,7 @@ import type {
   ShipLineGroup,
   ShipRecord,
   ShipSection,
+  ShipSkinSlot,
   SyncStats,
 } from "./types.js";
 import { repoRoot } from "./repoRoot.js";
@@ -89,6 +90,7 @@ export class BlhxDatabase {
       );
     `);
     this.ensureColumn("ships", "lines_by_skin_json", "TEXT NOT NULL DEFAULT '[]'");
+    this.ensureColumn("ships", "skins_json", "TEXT NOT NULL DEFAULT '[]'");
   }
 
   private ensureColumn(table: string, column: string, decl: string): void {
@@ -214,11 +216,11 @@ export class BlhxDatabase {
         `
       INSERT INTO ships (
         wiki_title, wiki_url, display_name, aliases_json, rarity, faction, ship_type,
-        cv, character_info_json, sections_json, lines_json, lines_by_skin_json, assets_json,
+        cv, character_info_json, sections_json, lines_json, lines_by_skin_json, skins_json, assets_json,
         persona_reference, html_hash, fetched_at
       ) VALUES (
         @wiki_title, @wiki_url, @display_name, @aliases_json, @rarity, @faction, @ship_type,
-        @cv, @character_info_json, @sections_json, @lines_json, @lines_by_skin_json, @assets_json,
+        @cv, @character_info_json, @sections_json, @lines_json, @lines_by_skin_json, @skins_json, @assets_json,
         @persona_reference, @html_hash, @fetched_at
       )
       ON CONFLICT(wiki_title) DO UPDATE SET
@@ -233,6 +235,7 @@ export class BlhxDatabase {
         sections_json = excluded.sections_json,
         lines_json = excluded.lines_json,
         lines_by_skin_json = excluded.lines_by_skin_json,
+        skins_json = excluded.skins_json,
         assets_json = excluded.assets_json,
         persona_reference = excluded.persona_reference,
         html_hash = excluded.html_hash,
@@ -252,6 +255,7 @@ export class BlhxDatabase {
         sections_json: JSON.stringify(record.sections),
         lines_json: JSON.stringify(record.lines),
         lines_by_skin_json: JSON.stringify(record.linesBySkin ?? []),
+        skins_json: JSON.stringify(record.skins ?? []),
         assets_json: JSON.stringify(record.assets),
         persona_reference: record.personaReference,
         html_hash: record.htmlHash,
@@ -422,10 +426,16 @@ function catalogRowToEntry(r: Record<string, unknown>): CatalogEntry {
 
 function rowToShip(r: Record<string, unknown>): ShipRecord {
   let linesBySkin: ShipLineGroup[] = [];
+  let skins: ShipSkinSlot[] = [];
   try {
     linesBySkin = JSON.parse(String(r.lines_by_skin_json ?? "[]")) as ShipLineGroup[];
   } catch {
     linesBySkin = [];
+  }
+  try {
+    skins = JSON.parse(String(r.skins_json ?? "[]")) as ShipSkinSlot[];
+  } catch {
+    skins = [];
   }
   return {
     wikiTitle: String(r.wiki_title),
@@ -440,6 +450,7 @@ function rowToShip(r: Record<string, unknown>): ShipRecord {
     sections: JSON.parse(String(r.sections_json)) as ShipSection[],
     lines: JSON.parse(String(r.lines_json)) as ShipLine[],
     linesBySkin: Array.isArray(linesBySkin) ? linesBySkin : [],
+    skins: Array.isArray(skins) ? skins : [],
     assets: JSON.parse(String(r.assets_json)) as ShipAsset[],
     personaReference: String(r.persona_reference),
     fetchedAt: String(r.fetched_at),

@@ -39,13 +39,19 @@ def test_list_missing(tmp_path: Path):
         CREATE TABLE ships (
           wiki_title TEXT PRIMARY KEY,
           display_name TEXT,
-          lines_by_skin_json TEXT DEFAULT '[]'
+          lines_by_skin_json TEXT DEFAULT '[]',
+          skins_json TEXT DEFAULT '[]'
         )
         """
     )
     w.execute(
-        "INSERT INTO ships(wiki_title, display_name, lines_by_skin_json) VALUES (?,?,?)",
-        ("有了", "有了", json.dumps([{"skin": "default", "lines": [{"k": 1}]}])),
+        "INSERT INTO ships(wiki_title, display_name, lines_by_skin_json, skins_json) VALUES (?,?,?,?)",
+        (
+            "有了",
+            "有了",
+            json.dumps([{"skin": "default", "lines": [{"k": 1}]}]),
+            json.dumps([{"key": "default", "label": "通常"}]),
+        ),
     )
     w.commit()
     w.close()

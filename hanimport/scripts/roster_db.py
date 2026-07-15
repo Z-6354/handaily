@@ -280,6 +280,76 @@ def _wiki_line_groups(row: sqlite3.Row, ship_cols: set[str]) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _wiki_skin_slots(row: sqlite3.Row, ship_cols: set[str]) -> list[dict]:
+    if "skins_json" not in ship_cols:
+        return []
+    try:
+        raw = row["skins_json"]
+    except (IndexError, KeyError):
+        return []
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def _upsert_skins_from_slots(
+    conn: sqlite3.Connection, cid: str, slots: list[dict]
+) -> None:
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        key = str(slot.get("key") or "").strip()
+        label = str(slot.get("label") or key).strip()
+        kind = str(slot.get("kind") or "skin")
+        if not key or kind == "retrofit" or "改造" in label:
+            continue
+        sort_order = int(slot.get("sort_order") or 0)
+        if key == "default" or kind == "default":
+            sid = skin_db_id(cid, "default")
+            is_default = True
+            name_zh = "默认" if label in ("通常", "默认", "") else label
+            skin_index = 0
+        elif key == "oath" or kind == "oath":
+            sid = f"{cid}-oath"
+            is_default = False
+            name_zh = label or "誓约"
+            skin_index = 100 + sort_order
+        else:
+            sid = f"{cid}-{key}"
+            is_default = False
+            name_zh = label or key
+            skin_index = sort_order
+        meta_obj: dict = {
+            "slot_key": key,
+            "lines_import": {
+                "status": "empty",
+                "wiki_skin": label,
+                "matched_by": "slot",
+            },
+        }
+        if slot.get("image_url"):
+            meta_obj["wiki_image_url"] = slot.get("image_url")
+        upsert_skin(
+            conn,
+            {
+                "id": sid,
+                "character_id": cid,
+                "name_zh": name_zh,
+                "name_en": "",
+                "skin_index": skin_index,
+                "pet_model_id": "",
+                "kanmusu_dir": "",
+                "sort_order": sort_order,
+                "is_default": is_default,
+                "meta_json": json.dumps(meta_obj, ensure_ascii=False),
+                "lines": [],
+            },
+            replace_lines=False,
+        )
+
+
 def _apply_lines_import(
     conn: sqlite3.Connection,
     cid: str,
@@ -765,7 +835,15 @@ def run_import_wiki(
         "lines_json",
         "assets_json",
     ]
-    for opt in ("cv", "faction", "ship_type", "rarity", "persona_reference", "lines_by_skin_json"):
+    for opt in (
+        "cv",
+        "faction",
+        "ship_type",
+        "rarity",
+        "persona_reference",
+        "lines_by_skin_json",
+        "skins_json",
+    ):
         if opt in ship_cols:
             select_cols.append(opt)
     select_sql = ", ".join(select_cols)
@@ -831,49 +909,53 @@ def run_import_wiki(
         lines_raw = json.loads(row["lines_json"] or "[]")
         if not isinstance(lines_raw, list):
             lines_raw = []
-        default_skin_id = skin_db_id(cid, "default")
-        upsert_skin(
-            conn,
-            {
-                "id": default_skin_id,
-                "character_id": cid,
-                "name_zh": "默认",
-                "name_en": "",
-                "skin_index": 0,
-                "pet_model_id": "",
-                "kanmusu_dir": "",
-                "sort_order": 0,
-                "is_default": True,
-                "lines": [],
-            },
-            replace_lines=False,
-        )
-        # 换装条目（有 assets 时）
-        assets = json.loads(row["assets_json"] or "[]")
-        if isinstance(assets, list):
-            for i, asset in enumerate(assets):
-                if not isinstance(asset, dict):
-                    continue
-                title = pick_skin_title([asset], None, "") or ""
-                if not title or title in ("默认",):
-                    continue
-                sid = f"{cid}-skin{i + 1}"
-                upsert_skin(
-                    conn,
-                    {
-                        "id": sid,
-                        "character_id": cid,
-                        "name_zh": title,
-                        "name_en": "",
-                        "skin_index": i + 1,
-                        "pet_model_id": "",
-                        "kanmusu_dir": "",
-                        "sort_order": i + 1,
-                        "is_default": False,
-                        "lines": [],
-                    },
-                    replace_lines=False,
-                )
+        slots = _wiki_skin_slots(row, ship_cols)
+        if slots:
+            _upsert_skins_from_slots(conn, cid, slots)
+        else:
+            default_skin_id = skin_db_id(cid, "default")
+            upsert_skin(
+                conn,
+                {
+                    "id": default_skin_id,
+                    "character_id": cid,
+                    "name_zh": "默认",
+                    "name_en": "",
+                    "skin_index": 0,
+                    "pet_model_id": "",
+                    "kanmusu_dir": "",
+                    "sort_order": 0,
+                    "is_default": True,
+                    "lines": [],
+                },
+                replace_lines=False,
+            )
+            # legacy: assets only when no TabContainer skins_json
+            assets = json.loads(row["assets_json"] or "[]")
+            if isinstance(assets, list):
+                for i, asset in enumerate(assets):
+                    if not isinstance(asset, dict):
+                        continue
+                    title = pick_skin_title([asset], None, "") or ""
+                    if not title or title in ("默认",) or "改造" in title:
+                        continue
+                    sid = f"{cid}-skin{i + 1}"
+                    upsert_skin(
+                        conn,
+                        {
+                            "id": sid,
+                            "character_id": cid,
+                            "name_zh": title,
+                            "name_en": "",
+                            "skin_index": i + 1,
+                            "pet_model_id": "",
+                            "kanmusu_dir": "",
+                            "sort_order": i + 1,
+                            "is_default": False,
+                            "lines": [],
+                        },
+                        replace_lines=False,
+                    )
 
         groups = _wiki_line_groups(row, ship_cols)
         _apply_lines_import(conn, cid, groups, lines_raw, lines_stats)

@@ -176,7 +176,9 @@ export function parseShipPage(
   const aliases = extractPageAliases(html, displayName);
   const characterInfo = extractCharacterInfo(html);
   const sections = extractPersonaSections(html);
-  const linesBySkin = extractShipLinesBySkin(html);
+  const skins = extractIllustrationSkins(html);
+  const rawLineGroups = extractShipLinesBySkin(html);
+  const linesBySkin = bindLinesToSkinSlots(skins, rawLineGroups);
   const lines = flattenShipLineGroups(linesBySkin);
   const assets = extractAssets(html, displayName);
   const cv = extractCv(html);
@@ -202,6 +204,7 @@ export function parseShipPage(
     sections,
     lines,
     linesBySkin,
+    skins,
     assets,
     personaReference,
     fetchedAt: new Date().toISOString(),
@@ -303,6 +306,105 @@ function cleanSectionText(text: string): string {
     .join("\n");
 }
 
+function classifyTabLabel(label: string): {
+  kind: "default" | "skin" | "oath" | "retrofit" | "other";
+  keyHint: string | null;
+} {
+  const t = normalizeText(label);
+  if (!t) return { kind: "other", keyHint: null };
+  if (t === "通常" || t === "默认" || /^default$/i.test(t)) {
+    return { kind: "default", keyHint: "default" };
+  }
+  if (t.includes("改造")) return { kind: "retrofit", keyHint: null };
+  if (t.includes("誓约")) return { kind: "oath", keyHint: "oath" };
+  const m = t.match(/^换装\s*(\d+)$/);
+  if (m) return { kind: "skin", keyHint: `skin${m[1]}` };
+  if (t.startsWith("换装")) return { kind: "skin", keyHint: null };
+  return { kind: "other", keyHint: null };
+}
+
+/**
+ * Illustration skins from TabContainer (通常 / 换装N / 誓约).
+ * Drops 改造 and empty tab_con (no image).
+ */
+export function extractIllustrationSkins(
+  html: string
+): import("./types.js").ShipSkinSlot[] {
+  const slots: import("./types.js").ShipSkinSlot[] = [];
+  const containerRegex =
+    /<div\b[^>]*class="[^"]*TabContainer[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?=<div\b[^>]*class="[^"]*TabContainer|<\/|$)/gi;
+  // Fallback: search all TabContainers more loosely
+  let blocks: string[] = [];
+  for (const m of html.matchAll(
+    /<div\b[^>]*class="[^"]*\bTabContainer\b[^"]*"[^>]*>([\s\S]*?)<div\b[^>]*class="[^"]*\bContentbox2\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi
+  )) {
+    blocks.push(m[0]);
+  }
+  if (!blocks.length) {
+    // simpler: split by TabContainer occurrences
+    const idxs = [...html.matchAll(/class="[^"]*\bTabContainer\b[^"]*"/gi)].map(
+      (m) => m.index ?? 0
+    );
+    for (let i = 0; i < idxs.length; i++) {
+      const start = idxs[i];
+      const end = i + 1 < idxs.length ? idxs[i + 1] : Math.min(html.length, start + 80_000);
+      blocks.push(html.slice(start, end));
+    }
+  }
+
+  let best: import("./types.js").ShipSkinSlot[] = [];
+  for (const block of blocks) {
+    const labels = [...block.matchAll(/<li\b[^>]*class="[^"]*\btab_li\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi)].map(
+      (m) => normalizeText(stripHtmlTags(m[1] ?? ""))
+    );
+    const cons = [...block.matchAll(/<div\b[^>]*class="[^"]*\btab_con\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi)].map(
+      (m) => m[1] ?? ""
+    );
+    if (!labels.length) continue;
+    const parsed: import("./types.js").ShipSkinSlot[] = [];
+    let skinSeq = 0;
+    const n = Math.max(labels.length, cons.length);
+    for (let i = 0; i < n; i++) {
+      const label = labels[i] || "";
+      const con = cons[i] || "";
+      const { kind, keyHint } = classifyTabLabel(label);
+      if (kind === "retrofit" || kind === "other") continue;
+      const img = con.match(/<img\b[^>]*>/i)?.[0] ?? "";
+      const image_url =
+        img.match(/\bsrc="(https:\/\/[^"]+)"/i)?.[1] ??
+        img.match(/\bsrc="(\/\/[^"]+)"/i)?.[1] ??
+        null;
+      const image_alt = img.match(/\balt="([^"]*)"/i)?.[1] ?? null;
+      const hasArt = Boolean(image_url);
+      if (!hasArt) continue; // empty tab_con — drop (incl. empty 誓约 / 改造已滤)
+      let key = keyHint;
+      if (kind === "skin") {
+        skinSeq += 1;
+        key = keyHint && /^skin\d+$/.test(keyHint) ? keyHint : `skin${skinSeq}`;
+      }
+      if (!key) continue;
+      parsed.push({
+        key,
+        label: label || key,
+        kind: kind === "default" ? "default" : kind === "oath" ? "oath" : "skin",
+        image_url: image_url?.startsWith("//") ? `https:${image_url}` : image_url,
+        image_alt,
+        sort_order: parsed.length,
+      });
+    }
+    // Prefer the container that has 通常/换装
+    const score =
+      (parsed.some((s) => s.kind === "default") ? 10 : 0) +
+      parsed.filter((s) => s.kind === "skin").length;
+    const bestScore =
+      (best.some((s) => s.kind === "default") ? 10 : 0) +
+      best.filter((s) => s.kind === "skin").length;
+    if (score > bestScore) best = parsed;
+  }
+  void containerRegex;
+  return best;
+}
+
 function classifySkinTitle(title: string): {
   skin: string;
   skin_kind: import("./types.js").ShipLineSkinKind;
@@ -318,6 +420,63 @@ function classifySkinTitle(title: string): {
     return { skin: t, skin_kind: "retrofit" };
   }
   return { skin: t, skin_kind: "skin" };
+}
+
+/**
+ * Attach line groups to illustration slots; drop 改造 line panels.
+ */
+export function bindLinesToSkinSlots(
+  skins: import("./types.js").ShipSkinSlot[],
+  groups: import("./types.js").ShipLineGroup[]
+): import("./types.js").ShipLineGroup[] {
+  if (!skins.length) {
+    return groups.filter((g) => g.skin_kind !== "retrofit");
+  }
+  const usable = groups.filter((g) => g.skin_kind !== "retrofit");
+  const defaults = usable.filter((g) => g.skin_kind === "default");
+  const oaths = usable.filter((g) => g.skin_kind === "oath");
+  const others = usable.filter(
+    (g) => g.skin_kind !== "default" && g.skin_kind !== "oath"
+  );
+
+  const out: import("./types.js").ShipLineGroup[] = [];
+  let otherIdx = 0;
+  for (const slot of skins) {
+    let src: import("./types.js").ShipLineGroup | undefined;
+    if (slot.kind === "default") {
+      src = defaults.shift();
+    } else if (slot.kind === "oath") {
+      src = oaths.shift();
+    } else {
+      src = others[otherIdx++];
+    }
+    if (!src) {
+      out.push({
+        skin: slot.label,
+        skin_kind:
+          slot.kind === "default"
+            ? "default"
+            : slot.kind === "oath"
+              ? "oath"
+              : "skin",
+        lines: [],
+        slot_key: slot.key,
+      });
+      continue;
+    }
+    out.push({
+      ...src,
+      skin: slot.label,
+      skin_kind:
+        slot.kind === "default"
+          ? "default"
+          : slot.kind === "oath"
+            ? "oath"
+            : "skin",
+      slot_key: slot.key,
+    });
+  }
+  return out;
 }
 
 function parseLinesFromFragment(fragment: string): import("./types.js").ShipLine[] {

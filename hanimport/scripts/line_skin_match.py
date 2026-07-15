@@ -44,8 +44,27 @@ def match_wiki_group_to_skin(
     skins: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Return (skin_row, matched_by) or (None, None)."""
+    slot_key = str(group.get("slot_key") or "").strip()
+    if slot_key:
+        for sk in skins:
+            sid = str(sk.get("id") or "")
+            try:
+                meta = json.loads(sk.get("meta_json") or "{}")
+            except (TypeError, json.JSONDecodeError):
+                meta = {}
+            if meta.get("slot_key") == slot_key:
+                return sk, "slot_key"
+            if slot_key == "default" and (
+                sk.get("is_default") or sid.endswith("-default")
+            ):
+                return sk, "slot_key"
+            if sid.endswith(f"-{slot_key}"):
+                return sk, "slot_key"
+
     skin_key = str(group.get("skin") or "")
     skin_kind = str(group.get("skin_kind") or "other")
+    if skin_kind == "retrofit" or "改造" in skin_key:
+        return None, None
     if _is_default_wiki_skin(skin_key, skin_kind):
         for sk in skins:
             if sk.get("is_default") or str(sk.get("id") or "").endswith("-default"):
@@ -55,6 +74,12 @@ def match_wiki_group_to_skin(
         return None, None
 
     wiki_norm = normalize_skin_label(skin_key)
+    # 通常 ↔ 默认
+    if wiki_norm in ("通常", "默认"):
+        for sk in skins:
+            if sk.get("is_default") or str(sk.get("id") or "").endswith("-default"):
+                return sk, "default"
+
     best: tuple[int, dict[str, Any], str] | None = None
     for sk in skins:
         for field, how in (

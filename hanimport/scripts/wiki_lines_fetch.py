@@ -44,7 +44,11 @@ def ensure_lines_by_skin_column(wiki_db: Path) -> None:
             conn.execute(
                 "ALTER TABLE ships ADD COLUMN lines_by_skin_json TEXT NOT NULL DEFAULT '[]'"
             )
-            conn.commit()
+        if "skins_json" not in cols:
+            conn.execute(
+                "ALTER TABLE ships ADD COLUMN skins_json TEXT NOT NULL DEFAULT '[]'"
+            )
+        conn.commit()
     finally:
         conn.close()
 
@@ -60,6 +64,7 @@ def _groups_nonempty(raw: str | None) -> bool:
 def ship_has_lines_by_skin(
     wiki_db: Path, *, wiki_title: str = "", name_zh: str = ""
 ) -> bool:
+    """Skip when both TabContainer skins and per-skin lines are present."""
     if not wiki_db.is_file():
         return False
     keys = []
@@ -74,17 +79,25 @@ def ship_has_lines_by_skin(
         cols = {r[1] for r in conn.execute("PRAGMA table_info(ships)")}
         if "lines_by_skin_json" not in cols:
             return False
+        has_skins_col = "skins_json" in cols
         for key in keys:
             row = conn.execute(
-                """
-                SELECT lines_by_skin_json FROM ships
+                f"""
+                SELECT lines_by_skin_json
+                {", skins_json" if has_skins_col else ""}
+                FROM ships
                 WHERE wiki_title = ? OR display_name = ?
                 LIMIT 1
                 """,
                 (key, key),
             ).fetchone()
-            if row and _groups_nonempty(row[0]):
-                return True
+            if not row:
+                continue
+            if not _groups_nonempty(row[0]):
+                continue
+            if has_skins_col and not _groups_nonempty(row[1] if len(row) > 1 else None):
+                continue
+            return True
     finally:
         conn.close()
     return False
@@ -188,12 +201,14 @@ def save_ship_lines(
     display_name: str,
     groups: list,
     lines: list,
+    skins: list | None = None,
 ) -> None:
     ensure_lines_by_skin_column(wiki_db)
     conn = sqlite3.connect(str(wiki_db))
     try:
         groups_json = json.dumps(groups, ensure_ascii=False)
         lines_json = json.dumps(lines, ensure_ascii=False)
+        skins_json = json.dumps(skins or [], ensure_ascii=False)
         row = conn.execute(
             "SELECT wiki_title FROM ships WHERE wiki_title=? OR display_name=? LIMIT 1",
             (wiki_title, display_name),
@@ -202,10 +217,10 @@ def save_ship_lines(
         if row:
             conn.execute(
                 """
-                UPDATE ships SET lines_by_skin_json=?, lines_json=?, fetched_at=?
+                UPDATE ships SET lines_by_skin_json=?, lines_json=?, skins_json=?, fetched_at=?
                 WHERE wiki_title=?
                 """,
-                (groups_json, lines_json, now, row[0]),
+                (groups_json, lines_json, skins_json, now, row[0]),
             )
         else:
             url = (
@@ -217,8 +232,8 @@ def save_ship_lines(
                 INSERT INTO ships(
                   wiki_title, wiki_url, display_name, aliases_json,
                   character_info_json, sections_json, lines_json, lines_by_skin_json,
-                  assets_json, persona_reference, html_hash, fetched_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                  skins_json, assets_json, persona_reference, html_hash, fetched_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     wiki_title,
@@ -229,6 +244,7 @@ def save_ship_lines(
                     "[]",
                     lines_json,
                     groups_json,
+                    skins_json,
                     "[]",
                     "",
                     "",
@@ -249,24 +265,27 @@ def fetch_one(ch: dict[str, str], *, wiki_db: Path | None = None) -> dict[str, A
     if ship_has_lines_by_skin(
         wiki_db, wiki_title=page, name_zh=ch.get("name_zh") or ""
     ):
-        return {"status": "skipped", "reason": "already has lines_by_skin"}
+        return {"status": "skipped", "reason": "already has skins+lines_by_skin"}
     try:
         time.sleep(_REQUEST_DELAY)
         html = fetch_wiki_html(page)
         parsed = parse_lines_via_node(html)
         groups = parsed.get("groups") or []
         lines = parsed.get("lines") or []
-        if not groups:
-            return {"status": "error", "error": "no line groups parsed"}
+        skins = parsed.get("skins") or []
+        if not skins and not groups:
+            return {"status": "error", "error": "no skins/line groups parsed"}
         save_ship_lines(
             wiki_db,
             wiki_title=page,
             display_name=ch.get("name_zh") or page,
             groups=groups,
             lines=lines,
+            skins=skins,
         )
         return {
             "status": "ok",
+            "skins": len(skins),
             "groups": len(groups),
             "lines": len(lines),
         }
