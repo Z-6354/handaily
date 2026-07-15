@@ -23,6 +23,7 @@ from roster_db import (
     connect,
     default_local_db,
     list_character_ids_needing_lines,
+    merge_roster_duplicates_by_name,
     purge_folder_like_skins,
     run_import_wiki,
 )
@@ -100,9 +101,13 @@ def run_wiki_pipeline_job(job_id: str, body: dict[str, Any]) -> None:
         conn = connect(db_path)
         apply_schema(conn)
         purged = purge_folder_like_skins(conn)
+        merged = merge_roster_duplicates_by_name(conn)
         conn.commit()
         conn.close()
-        append_log(job_id, f"purge folder-like skins={purged}")
+        append_log(
+            job_id,
+            f"purge folder-like skins={purged} merge_name_dupes={merged}",
+        )
 
         r2 = run_import_wiki(
             db=db_path,

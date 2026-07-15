@@ -39,6 +39,41 @@ LIVE2D_ALIASES = {
     "aierdeliqi": "埃尔德里奇",
 }
 
+# 多拼音别名共用中文名时的权威角色 id（避免 aijiang / aijier 双开）
+ALIAS_PRIMARY_BY_CN: dict[str, str] = {
+    "埃吉尔": "aijiang",
+}
+
+
+def preferred_slug_for_cn(cn: str, alias_map: dict[str, str] | None = None) -> str | None:
+    """同一中文名下多个拼音别名 → 唯一权威 id。"""
+    cn = (cn or "").strip()
+    if not cn:
+        return None
+    alias_map = alias_map or LIVE2D_ALIASES
+    slugs = [s for s, c in alias_map.items() if (c or "").strip() == cn and s]
+    if not slugs:
+        return None
+    primary = ALIAS_PRIMARY_BY_CN.get(cn)
+    if primary and primary in slugs:
+        return primary
+    for s, c in alias_map.items():
+        if (c or "").strip() == cn and s:
+            return s
+    return slugs[0]
+
+
+def alias_redirect_id(cid: str, alias_map: dict[str, str] | None = None) -> str:
+    """若 cid 是次要别名，改写成权威 id。"""
+    cid = (cid or "").strip()
+    alias_map = alias_map or LIVE2D_ALIASES
+    cn = (alias_map.get(cid) or "").strip()
+    if not cn:
+        return cid
+    pref = preferred_slug_for_cn(cn, alias_map)
+    return pref or cid
+
+
 HASH_PERSONA_ID = re.compile(r"^p[0-9a-f]{8}$", re.I)
 
 
@@ -854,30 +889,134 @@ def _stable_wiki_id(cn: str) -> str:
     return f"p{digest}"
 
 
+def _remap_skin_id(old_id: str, donor_cid: str, canon_cid: str) -> str:
+    if old_id == donor_cid:
+        return canon_cid
+    prefix = donor_cid + "-"
+    if old_id.startswith(prefix):
+        return canon_cid + "-" + old_id[len(prefix) :]
+    return f"{canon_cid}-{old_id}"
+
+
+def _merge_character_into(
+    conn: sqlite3.Connection, donor_cid: str, canon_cid: str
+) -> None:
+    """Move skins/lines from donor → canon, then delete donor character."""
+    if donor_cid == canon_cid:
+        return
+    donor_skins = conn.execute(
+        "SELECT * FROM skins WHERE character_id=?", (donor_cid,)
+    ).fetchall()
+    for sk in donor_skins:
+        old_id = str(sk["id"])
+        new_id = _remap_skin_id(old_id, donor_cid, canon_cid)
+        existing = conn.execute(
+            "SELECT * FROM skins WHERE id=?", (new_id,)
+        ).fetchone()
+        if existing:
+            # fill empty bind fields on canon
+            pet = (existing["pet_model_id"] or "") or (sk["pet_model_id"] or "")
+            kdir = (existing["kanmusu_dir"] or "") or (sk["kanmusu_dir"] or "")
+            conn.execute(
+                "UPDATE skins SET pet_model_id=?, kanmusu_dir=?, updated_at=datetime('now') WHERE id=?",
+                (pet, kdir, new_id),
+            )
+            tgt_n = conn.execute(
+                "SELECT count(*) FROM skin_lines WHERE skin_id=?", (new_id,)
+            ).fetchone()[0]
+            if tgt_n == 0:
+                conn.execute(
+                    "UPDATE skin_lines SET skin_id=? WHERE skin_id=?",
+                    (new_id, old_id),
+                )
+            else:
+                conn.execute("DELETE FROM skin_lines WHERE skin_id=?", (old_id,))
+            conn.execute("DELETE FROM skins WHERE id=?", (old_id,))
+        else:
+            # rename via insert+line move+delete (PK change)
+            cols = [d[0] for d in conn.execute("PRAGMA table_info(skins)").fetchall()]
+            row = {k: sk[k] for k in sk.keys()}
+            row["id"] = new_id
+            row["character_id"] = canon_cid
+            placeholders = ",".join("?" for _ in cols)
+            conn.execute(
+                f"INSERT INTO skins({','.join(cols)}) VALUES ({placeholders})",
+                tuple(row.get(c) for c in cols),
+            )
+            conn.execute(
+                "UPDATE skin_lines SET skin_id=? WHERE skin_id=?",
+                (new_id, old_id),
+            )
+            conn.execute("DELETE FROM skins WHERE id=?", (old_id,))
+    # any leftover
+    conn.execute("DELETE FROM skins WHERE character_id=?", (donor_cid,))
+    conn.execute("DELETE FROM characters WHERE id=?", (donor_cid,))
+
+
+def merge_roster_duplicates_by_name(
+    conn: sqlite3.Connection, alias_map: dict[str, str] | None = None
+) -> int:
+    """合并同中文名多角色行（如 aijiang+aijier）。返回合并掉的 donor 数。"""
+    from collections import defaultdict
+
+    alias_map = alias_map or LIVE2D_ALIASES
+    by_name: dict[str, list[str]] = defaultdict(list)
+    for row in conn.execute("SELECT id, name_zh FROM characters"):
+        name = (row["name_zh"] or "").strip()
+        if name:
+            by_name[name].append(str(row["id"]))
+    merged = 0
+    for name, ids in by_name.items():
+        if len(ids) < 2:
+            continue
+        pref = preferred_slug_for_cn(name, alias_map)
+        if pref and pref in ids:
+            canon = pref
+        else:
+            canon = max(
+                ids,
+                key=lambda i: conn.execute(
+                    "SELECT count(*) FROM skins WHERE character_id=?", (i,)
+                ).fetchone()[0],
+            )
+        for donor in ids:
+            if donor == canon:
+                continue
+            _merge_character_into(conn, donor, canon)
+            merged += 1
+    return merged
+
+
 def _build_cn_to_slug(
     conn: sqlite3.Connection,
     wiki: sqlite3.Connection,
     alias_map: dict[str, str],
 ) -> dict[str, str]:
-    """中文名 → 优先拼音 / 已有 id。"""
+    """中文名 → 权威拼音 / 已有 id。"""
     rev: dict[str, str] = {}
-    for slug, cn in alias_map.items():
+    # 先按中文聚合别名，写入权威 slug（避免 aijiang/aijier 谁先谁后）
+    seen_cn: set[str] = set()
+    for _slug, cn in alias_map.items():
         cn = (cn or "").strip()
-        slug = (slug or "").strip()
-        if cn and slug and cn not in rev:
-            rev[cn] = slug
+        if not cn or cn in seen_cn:
+            continue
+        seen_cn.add(cn)
+        pref = preferred_slug_for_cn(cn, alias_map)
+        if pref:
+            rev[cn] = pref
     try:
         for row in wiki.execute(
             "SELECT folder, wiki_title, display_name FROM live2d_mappings"
         ):
             base, _ = strip_skin(row["folder"] or "")
+            base = alias_redirect_id(base, alias_map)
             for key in ((row["display_name"] or "").strip(), (row["wiki_title"] or "").strip()):
                 if key and base and key not in rev:
                     rev[key] = base
     except sqlite3.Error:
         pass
     for row in conn.execute("SELECT id, name_zh, wiki_title FROM characters"):
-        cid = row["id"]
+        cid = alias_redirect_id(str(row["id"] or ""), alias_map)
         for key in ((row["name_zh"] or "").strip(), (row["wiki_title"] or "").strip()):
             if key and cid and key not in rev:
                 rev[key] = cid
@@ -889,7 +1028,7 @@ def _resolve_character_id(cn: str, cn_to_slug: dict[str, str]) -> str:
     if not cn:
         return _stable_wiki_id("unknown")
     if cn in cn_to_slug:
-        return cn_to_slug[cn]
+        return alias_redirect_id(cn_to_slug[cn])
     return _stable_wiki_id(cn)
 
 
@@ -966,13 +1105,19 @@ def bind_unpacked_models(
         if cn:
             cid = cn_to_slug.get(cn) or _resolve_character_id(cn, cn_to_slug)
         if not cid:
-            # folder base may already be character id
+            redirected = alias_redirect_id(base, alias_map)
             if conn.execute(
+                "SELECT 1 FROM characters WHERE id=?", (redirected,)
+            ).fetchone():
+                cid = redirected
+            elif redirected != base and conn.execute(
                 "SELECT 1 FROM characters WHERE id=?", (base,)
             ).fetchone():
-                cid = base
+                cid = alias_redirect_id(base, alias_map)
             else:
                 continue
+        else:
+            cid = alias_redirect_id(cid, alias_map)
         if only_set and cid not in only_set and base not in only_set:
             continue
         sid = resolve_bind_skin_id(conn, cid, suffix)
@@ -1040,6 +1185,8 @@ def run_import_wiki(
 
     conn = connect(db)
     apply_schema(conn)
+    # 先合并同名别名双开（aijiang/aijier），再继续导入
+    merge_roster_duplicates_by_name(conn, alias_map)
     wiki = sqlite3.connect(str(wiki_db))
     wiki.row_factory = sqlite3.Row
     ship_cols = {r[1] for r in wiki.execute("PRAGMA table_info(ships)")}
@@ -1088,7 +1235,7 @@ def run_import_wiki(
             for oid in only_set:
                 if oid == cid or oid == display or alias_map.get(oid) == display:
                     if oid in alias_map:
-                        cid = oid
+                        cid = alias_redirect_id(oid, alias_map)
                     matched = True
                     break
             if not matched:
