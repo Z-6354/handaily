@@ -18,7 +18,14 @@ from job_store import (
     is_pause_requested,
     update_job,
 )
-from roster_db import apply_schema, connect, default_local_db, run_import_wiki
+from roster_db import (
+    apply_schema,
+    connect,
+    default_local_db,
+    list_character_ids_needing_lines,
+    purge_folder_like_skins,
+    run_import_wiki,
+)
 from wiki_lines_fetch import (
     default_wiki_db as lines_wiki_db,
     fetch_one as fetch_lines_one,
@@ -38,54 +45,99 @@ def run_wiki_pipeline_job(job_id: str, body: dict[str, Any]) -> None:
         if body.get("wiki_db")
         else (lines_wiki_db() if lines_wiki_db().is_file() else avatar_wiki_db())
     )
-    update_job(job_id, status="running", phase="characters", current=0, total=3)
-    append_log(job_id, f"pipeline start db={db_path} wiki={wiki_db}")
+    force = bool(body.get("force"))
+    incremental = not force
+    update_job(job_id, status="running", phase="characters", current=0, total=1)
+    append_log(
+        job_id,
+        f"pipeline start db={db_path} wiki={wiki_db} incremental={incremental}",
+    )
 
     try:
-        # Phase 1 — characters only
+        # Phase 1 — characters
         _wait_if_paused(job_id)
         update_job(
             job_id,
             status="running",
             phase="characters",
-            current=1,
+            current=0,
+            total=1,
             current_item="同步角色",
+            ok_count=0,
+            fail_count=0,
+            skip_count=0,
         )
         r1 = run_import_wiki(
             db=db_path,
             wiki_db=wiki_db,
             phases={"characters"},
+            incremental=incremental,
         )
         if not r1.get("ok"):
             raise RuntimeError(r1.get("error") or "characters phase failed")
         append_log(job_id, f"characters ok upserted={r1.get('upserted')}")
-        update_job(job_id, ok_count=int(r1.get("upserted") or 0))
+        update_job(
+            job_id,
+            current=1,
+            total=1,
+            ok_count=int(r1.get("upserted") or 0),
+            current_item="角色完成",
+        )
 
-        # Phase 2 — skins + bind + avatars
+        # Phase 2 — purge dirty + skins + bind + avatars
         _wait_if_paused(job_id)
         update_job(
             job_id,
             status="running",
             phase="avatars_skins",
-            current=2,
-            current_item="头像与皮肤",
+            current=0,
+            total=1,
+            current_item="清理脏皮 / 同步皮肤",
+            ok_count=0,
+            fail_count=0,
+            skip_count=0,
         )
+        conn = connect(db_path)
+        apply_schema(conn)
+        purged = purge_folder_like_skins(conn)
+        conn.commit()
+        conn.close()
+        append_log(job_id, f"purge folder-like skins={purged}")
+
         r2 = run_import_wiki(
             db=db_path,
             wiki_db=wiki_db,
             phases={"skins", "bind"},
+            incremental=incremental,
         )
         if not r2.get("ok"):
             raise RuntimeError(r2.get("error") or "skins phase failed")
         append_log(
             job_id,
-            f"skins ok bound_models={r2.get('bound_models')} upserted={r2.get('upserted')}",
+            f"skins updated={r2.get('skins_updated')} skipped={r2.get('skins_skipped')} "
+            f"bound={r2.get('bound_models')}",
+        )
+        update_job(
+            job_id,
+            skip_count=int(r2.get("skins_skipped") or 0),
+            ok_count=int(r2.get("skins_updated") or 0),
         )
 
         conn = connect(db_path)
         apply_schema(conn)
         avatars = list_missing_character_ids(conn)
         conn.close()
+        av_total = len(avatars)
+        update_job(
+            job_id,
+            phase="avatars_skins",
+            current=0,
+            total=max(av_total, 1),
+            current_item="头像" if av_total else "头像已齐",
+            ok_count=0,
+            fail_count=0,
+            skip_count=0,
+        )
         av_ok = av_fail = av_skip = 0
         for i, ch in enumerate(avatars, start=1):
             _wait_if_paused(job_id)
@@ -93,6 +145,8 @@ def run_wiki_pipeline_job(job_id: str, body: dict[str, Any]) -> None:
                 job_id,
                 status="running",
                 phase="avatars_skins",
+                current=i,
+                total=av_total,
                 current_item=ch.get("name_zh") or ch["id"],
             )
             result = fetch_one(ch, wiki_db=wiki_db)
@@ -113,35 +167,41 @@ def run_wiki_pipeline_job(job_id: str, body: dict[str, Any]) -> None:
                 time.sleep(0.05)
         append_log(job_id, f"avatars ok={av_ok} skip={av_skip} fail={av_fail}")
 
-        # Phase 3 — fetch missing wiki lines then import lines into roster
+        # Phase 3 — fetch missing wiki lines then selective lines import
         _wait_if_paused(job_id)
-        update_job(
-            job_id,
-            status="running",
-            phase="lines",
-            current=3,
-            current_item="导入台词",
-            ok_count=0,
-            fail_count=0,
-            skip_count=0,
-        )
         conn = connect(db_path)
         apply_schema(conn)
         targets = list_missing_line_targets(conn, wiki_db)
         conn.close()
+        fetch_total = len(targets)
+        update_job(
+            job_id,
+            status="running",
+            phase="lines",
+            current=0,
+            total=max(fetch_total, 1),
+            current_item="抓取台词" if fetch_total else "Wiki 台词已齐",
+            ok_count=0,
+            fail_count=0,
+            skip_count=0,
+        )
+        fetched_ids: list[str] = []
         ln_ok = ln_fail = ln_skip = 0
-        for ch in targets:
+        for i, ch in enumerate(targets, start=1):
             _wait_if_paused(job_id)
             update_job(
                 job_id,
                 status="running",
                 phase="lines",
+                current=i,
+                total=fetch_total,
                 current_item=f"抓取 {ch.get('name_zh') or ch['id']}",
             )
             result = fetch_lines_one(ch, wiki_db=wiki_db)
             st = result.get("status")
             if st == "ok":
                 ln_ok += 1
+                fetched_ids.append(ch["id"])
             elif st == "skipped":
                 ln_skip += 1
             else:
@@ -154,29 +214,50 @@ def run_wiki_pipeline_job(job_id: str, body: dict[str, Any]) -> None:
             )
         append_log(job_id, f"wiki-lines fetch ok={ln_ok} skip={ln_skip} fail={ln_fail}")
 
-        _wait_if_paused(job_id)
+        conn = connect(db_path)
+        apply_schema(conn)
+        need_lines = set(list_character_ids_needing_lines(conn))
+        conn.close()
+        if force:
+            line_ids: list[str] | None = None  # all
+        else:
+            line_ids = sorted(set(fetched_ids) | need_lines)
+
         update_job(job_id, current_item="写入台词")
-        r3 = run_import_wiki(
-            db=db_path,
-            wiki_db=wiki_db,
-            phases={"lines"},
-        )
-        if not r3.get("ok"):
-            raise RuntimeError(r3.get("error") or "lines phase failed")
+        if line_ids is not None and len(line_ids) == 0:
+            append_log(job_id, "lines import skipped (nothing needed)")
+            r3 = {
+                "ok": True,
+                "skins_lines_ok": 0,
+                "skins_lines_empty": 0,
+                "wiki_skins_unmatched": 0,
+                "roster_skins_unmatched": 0,
+            }
+        else:
+            r3 = run_import_wiki(
+                db=db_path,
+                wiki_db=wiki_db,
+                phases={"lines"},
+                only_ids=line_ids,
+                incremental=incremental,
+            )
+            if not r3.get("ok"):
+                raise RuntimeError(r3.get("error") or "lines phase failed")
         append_log(
             job_id,
             "lines import "
             f"ok={r3.get('skins_lines_ok')} empty={r3.get('skins_lines_empty')} "
             f"wiki_unmatched={r3.get('wiki_skins_unmatched')} "
-            f"roster_unmatched={r3.get('roster_skins_unmatched')}",
+            f"roster_unmatched={r3.get('roster_skins_unmatched')} "
+            f"ids={len(line_ids) if line_ids is not None else 'all'}",
         )
 
         update_job(
             job_id,
             status="done",
             phase="done",
-            current=3,
-            total=3,
+            current=1,
+            total=1,
             current_item="",
             ok_count=int(r3.get("skins_lines_ok") or 0),
             fail_count=int(r3.get("roster_skins_unmatched") or 0)
@@ -188,6 +269,9 @@ def run_wiki_pipeline_job(job_id: str, body: dict[str, Any]) -> None:
                     "skins_lines_empty": r3.get("skins_lines_empty"),
                     "wiki_skins_unmatched": r3.get("wiki_skins_unmatched"),
                     "roster_skins_unmatched": r3.get("roster_skins_unmatched"),
+                    "skins_skipped": r2.get("skins_skipped"),
+                    "skins_updated": r2.get("skins_updated"),
+                    "purged_folder_skins": purged,
                 }
             ],
         )

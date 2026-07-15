@@ -239,9 +239,15 @@
       title.textContent = phaseLabel;
       btn.hidden = false;
       btn.textContent = "暂停";
+      const tip =
+        job.phase === "avatars_skins"
+          ? "头像队列 / 皮肤增量"
+          : job.phase === "lines"
+            ? "台词抓取与写入"
+            : "角色 → 头像/皮肤 → 台词";
       sub.textContent = job.current_item
-        ? `当前：${job.current_item}`
-        : "角色 → 头像/皮肤 → 台词";
+        ? `${job.current_item}`
+        : tip;
     }
     showPipelineToast(true);
   }

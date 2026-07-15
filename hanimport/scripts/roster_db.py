@@ -310,11 +310,89 @@ def _delete_skins_not_in(
     return deleted
 
 
+def expected_skin_ids_from_slots(cid: str, slots: list[dict]) -> set[str]:
+    """Wiki skins_json → 权威 skin id 集合（不写库）。"""
+    keep: set[str] = set()
+    for slot in slots:
+        if not isinstance(slot, dict):
+            continue
+        key = str(slot.get("key") or "").strip()
+        label = str(slot.get("label") or key).strip()
+        kind = str(slot.get("kind") or "skin")
+        if not key or kind == "retrofit" or "改造" in label:
+            continue
+        if key == "default" or kind == "default":
+            keep.add(skin_db_id(cid, "default"))
+        elif key == "oath" or kind == "oath":
+            keep.add(f"{cid}-oath")
+        else:
+            keep.add(f"{cid}-{key}")
+    return keep
+
+
+def local_skin_ids(conn: sqlite3.Connection, cid: str) -> set[str]:
+    return {
+        str(r[0])
+        for r in conn.execute(
+            "SELECT id FROM skins WHERE character_id=?", (cid,)
+        )
+    }
+
+
+def character_skins_in_sync(
+    conn: sqlite3.Connection, cid: str, slots: list[dict]
+) -> bool:
+    keep = expected_skin_ids_from_slots(cid, slots)
+    if not keep:
+        return False
+    return local_skin_ids(conn, cid) == keep
+
+
+def purge_folder_like_skins(conn: sqlite3.Connection) -> int:
+    """删除 id 不以 {character_id}- 开头的解包脏皮（如 aijier_3）。"""
+    rows = conn.execute("SELECT character_id, id FROM skins").fetchall()
+    deleted = 0
+    for cid, sid in rows:
+        cid_s, sid_s = str(cid), str(sid)
+        if sid_s == cid_s or sid_s.startswith(cid_s + "-"):
+            continue
+        conn.execute("DELETE FROM skins WHERE id=?", (sid_s,))
+        deleted += 1
+    return deleted
+
+
+def list_character_ids_needing_lines(conn: sqlite3.Connection) -> list[str]:
+    """本地仍有空/未匹配台词的角色（用于增量写入）。"""
+    need: list[str] = []
+    for (cid,) in conn.execute("SELECT id FROM characters ORDER BY id"):
+        skins = conn.execute(
+            "SELECT id, meta_json FROM skins WHERE character_id=?",
+            (cid,),
+        ).fetchall()
+        if not skins:
+            continue
+        for sid, meta_raw in skins:
+            n = conn.execute(
+                "SELECT count(*) FROM skin_lines WHERE skin_id=?", (sid,)
+            ).fetchone()[0]
+            status = ""
+            try:
+                meta = json.loads(meta_raw or "{}")
+                status = str((meta.get("lines_import") or {}).get("status") or "")
+            except json.JSONDecodeError:
+                status = ""
+            if n == 0 or status in ("empty", "unmatched", "stale_flat"):
+                need.append(str(cid))
+                break
+    return need
+
+
 def _upsert_skins_from_slots(
     conn: sqlite3.Connection, cid: str, slots: list[dict]
 ) -> set[str]:
     """按 Wiki TabContainer 槽位 upsert 皮肤，并删除旧错误项。返回保留的 skin id。"""
-    keep: set[str] = set()
+    keep = expected_skin_ids_from_slots(cid, slots)
+    # re-walk slots for upsert metadata (keep already computed)
     for slot in slots:
         if not isinstance(slot, dict):
             continue
@@ -927,6 +1005,7 @@ def run_import_wiki(
     only_ids: list[str] | str | None = None,
     scope: str = "all",
     phases: set[str] | list[str] | str | None = None,
+    incremental: bool = False,
 ) -> dict:
     """从 BWIKI sqlite 写入自用库。
 
@@ -935,6 +1014,7 @@ def run_import_wiki(
       - unpacked：旧行为，仅扫 data/model/unpacked 文件夹
 
     phases: characters | skins | lines | bind（默认全部）
+    incremental: 皮肤已与 skins_json 对齐则跳过该角色
     """
     db = Path(db) if db else default_local_db()
     wiki_db = Path(wiki_db) if wiki_db else (repo_root() / "mcp/blhx-wiki/data/blhx.sqlite")
@@ -993,6 +1073,8 @@ def run_import_wiki(
         "wiki_skins_unmatched": 0,
         "roster_skins_unmatched": 0,
         "lines_report": [],
+        "skins_skipped": 0,
+        "skins_updated": 0,
     }
 
     def import_ship_row(row: sqlite3.Row) -> str | None:
@@ -1048,9 +1130,16 @@ def run_import_wiki(
 
         if do_skins:
             slots = _wiki_skin_slots(row, ship_cols)
-            if slots:
+            if (
+                incremental
+                and slots
+                and character_skins_in_sync(conn, cid, slots)
+            ):
+                lines_stats["skins_skipped"] = int(lines_stats["skins_skipped"]) + 1
+            elif slots:
                 # 权威皮肤清单：整角色替换（删除以往错误/残留皮肤），非纯增量
                 _upsert_skins_from_slots(conn, cid, slots)
+                lines_stats["skins_updated"] = int(lines_stats["skins_updated"]) + 1
             else:
                 keep_legacy: set[str] = set()
                 default_skin_id = skin_db_id(cid, "default")
@@ -1234,6 +1323,8 @@ def run_import_wiki(
         "scope": scope,
         "phases": sorted(phase_set),
         "bound_models": bind_n,
+        "skins_skipped": lines_stats.get("skins_skipped", 0),
+        "skins_updated": lines_stats.get("skins_updated", 0),
         "upserted": len(upserted),
         "character_total": char_count,
         "sample": upserted[:8],
