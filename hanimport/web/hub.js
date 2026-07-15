@@ -99,20 +99,18 @@
     await HanShell.mount({ active: "hub" });
 
     try {
-      var st = await fetch("/api/status").then(function (r) {
-        return r.json();
-      });
-      renderEnv(st);
+      var stRes = await fetch("/api/status");
+      if (!stRes.ok) throw new Error("status " + stRes.status);
+      renderEnv(await stRes.json());
     } catch (_err) {
       var env = document.getElementById("env-summary");
       if (env) env.textContent = "无法读取环境状态";
     }
 
     try {
-      var jobs = await fetch("/api/jobs?limit=10").then(function (r) {
-        return r.json();
-      });
-      renderJobs(jobs);
+      var jobsRes = await fetch("/api/jobs?limit=10");
+      if (!jobsRes.ok) throw new Error("jobs " + jobsRes.status);
+      renderJobs(await jobsRes.json());
     } catch (_err) {
       var recent = document.getElementById("recent-jobs");
       if (recent) recent.textContent = "无法加载最近任务";

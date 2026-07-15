@@ -76,6 +76,8 @@ hantransfer/release/
 .cursor/
 .iterative-hardening/
 .specs/
+.worktrees/
+.superpowers/sdd/
 
 # Design-system extraction caches (hanimport Apple hub redesign)
 .extract-design-system/

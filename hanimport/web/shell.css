@@ -13,9 +13,11 @@ body {
   top: 0;
   z-index: 100;
   height: var(--nav-height);
-  background: var(--surface);
+  background: rgba(255, 255, 255, 0.78);
   border-bottom: 1px solid var(--hairline);
   box-sizing: border-box;
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
 }
 
 .app-shell-inner {
@@ -46,7 +48,6 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  flex: 1;
 }
 
 .app-nav a {
@@ -69,11 +70,8 @@ body {
   font-weight: 600;
 }
 
-.app-shell-spacer {
-  flex: 1;
-}
-
 .status-dot {
+  margin-left: auto;
   flex-shrink: 0;
   display: block;
   width: 8px;

@@ -42,7 +42,6 @@
         '<nav class="app-nav" aria-label="主导航">' +
         navMarkup(active) +
         "</nav>" +
-        '<span class="app-shell-spacer" aria-hidden="true"></span>' +
         '<a class="status-dot" href="/" aria-label="环境状态"></a>' +
         "</div>";
 
@@ -50,6 +49,7 @@
 
       try {
         var res = await fetch("/api/status");
+        if (!res.ok) throw new Error("status " + res.status);
         var data = await res.json();
         var dot = header.querySelector(".status-dot");
         if (!dot) return;
