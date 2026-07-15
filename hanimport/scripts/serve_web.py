@@ -211,7 +211,7 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
     try:
         input_raw = (body.get("input") or "").strip()
         if not input_raw:
-            update_job(job_id, status="error", error="input required")
+            update_job(job_id, status="error", phase="", error="input required")
             append_log(job_id, "error: input required")
             return
 
@@ -220,6 +220,7 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
             update_job(
                 job_id,
                 status="error",
+                phase="",
                 error="UnityPy 未安装。请运行 hanimport/scripts/setup-env.bat",
             )
             append_log(job_id, "error: UnityPy not installed")
@@ -227,7 +228,7 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
 
         input_path = Path(input_raw)
         if not input_path.exists():
-            update_job(job_id, status="error", error=f"路径不存在: {input_path}")
+            update_job(job_id, status="error", phase="", error=f"路径不存在: {input_path}")
             append_log(job_id, f"error: path missing {input_path}")
             return
 
@@ -243,7 +244,7 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
         if allowed is not None:
             bundles = [b for b in bundles if b["slug"].lower() in allowed]
         if not bundles:
-            update_job(job_id, status="error", error="未找到 AssetBundle 文件")
+            update_job(job_id, status="error", phase="", error="未找到 AssetBundle 文件")
             append_log(job_id, "error: no bundles found")
             return
 
@@ -295,7 +296,13 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
                 results.append({"slug": slug, "input": b["path"], "ok": False, "error": str(exc)})
                 update_job(job_id, ok_count=ok_count, fail_count=fail_count, results=list(results))
                 if not continue_on_error:
-                    update_job(job_id, status="error", error=str(exc), current_item=slug)
+                    update_job(
+                        job_id,
+                        status="error",
+                        phase="",
+                        error=str(exc),
+                        current_item=slug,
+                    )
                     return
 
         if generate_config and not dry_run:
@@ -304,12 +311,19 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
                 for r in results
                 if r.get("ok") and r.get("output_dir")
             ]
+            # Phase-local counters: snapshot unpack totals, then reset so config
+            # ok/fail are independent (avoids ~2× ok_count on unpack_then_config).
+            append_log(job_id, f"解包阶段完成 ok={ok_count} fail={fail_count}")
+            ok_count = 0
+            fail_count = 0
             update_job(
                 job_id,
                 phase="config",
                 current=0,
                 total=len(config_targets),
                 current_item="",
+                ok_count=0,
+                fail_count=0,
             )
             append_log(job_id, f"生成配置：{len(config_targets)} 个")
             for i, folder in enumerate(config_targets, 1):
@@ -334,6 +348,11 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
                 except Exception as exc:  # noqa: BLE001
                     fail_count += 1
                     append_log(job_id, f"  失败: {exc}")
+                    if "bundle not found" in str(exc).lower():
+                        append_log(
+                            job_id,
+                            f"  cubism: missing bundle; check src={src_dir}",
+                        )
                     results.append(
                         {
                             "phase": "config",
@@ -346,13 +365,19 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
                         job_id, ok_count=ok_count, fail_count=fail_count, results=list(results)
                     )
                     if not continue_on_error:
-                        update_job(job_id, status="error", error=str(exc), current_item=folder.name)
+                        update_job(
+                            job_id,
+                            status="error",
+                            phase="",
+                            error=str(exc),
+                            current_item=folder.name,
+                        )
                         return
 
         update_job(
             job_id,
             status="done",
-            phase="unpack" if dry_run else ("" if not generate_config else "config"),
+            phase="",
             current_item="",
             ok_count=ok_count,
             fail_count=fail_count,
@@ -361,7 +386,7 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
         )
         append_log(job_id, f"完成 ok={ok_count} fail={fail_count}")
     except Exception as exc:  # noqa: BLE001
-        update_job(job_id, status="error", error=str(exc))
+        update_job(job_id, status="error", phase="", error=str(exc))
         append_log(job_id, f"error: {exc}")
 
 
@@ -369,18 +394,19 @@ def run_config_job(job_id: str, body: dict[str, Any]) -> None:
     try:
         input_raw = (body.get("input") or "").strip()
         if not input_raw:
-            update_job(job_id, status="error", error="input required")
+            update_job(job_id, status="error", phase="", error="input required")
             append_log(job_id, "error: input required")
             return
 
         input_path = Path(input_raw)
         if not input_path.exists():
-            update_job(job_id, status="error", error=f"路径不存在: {input_path}")
+            update_job(job_id, status="error", phase="", error=f"路径不存在: {input_path}")
             append_log(job_id, f"error: path missing {input_path}")
             return
 
         dry_run = bool(body.get("dry_run"))
         force = bool(body.get("force"))
+        # Optional body.src overrides Cubism AssetBundle lookup root.
         src_raw = (body.get("src") or "").strip()
         src_dir = Path(src_raw) if src_raw else (repo_root() / "data/model/azurlane/custom")
 
@@ -397,6 +423,7 @@ def run_config_job(job_id: str, body: dict[str, Any]) -> None:
             update_job(
                 job_id,
                 status="error",
+                phase="",
                 error="未找到模型目录（需含 .skel 或 .moc3）",
             )
             append_log(job_id, "error: no spine/cubism folders")
@@ -447,15 +474,26 @@ def run_config_job(job_id: str, body: dict[str, Any]) -> None:
             except Exception as exc:  # noqa: BLE001
                 fail_count += 1
                 append_log(job_id, f"  失败: {exc}")
+                if kind == "cubism" and "bundle not found" in str(exc).lower():
+                    append_log(
+                        job_id,
+                        f"  cubism: missing bundle; check src={src_dir}",
+                    )
                 results.append({"slug": folder.name, "ok": False, "error": str(exc)})
                 update_job(job_id, ok_count=ok_count, fail_count=fail_count, results=list(results))
-                update_job(job_id, status="error", error=str(exc), current_item=folder.name)
+                update_job(
+                    job_id,
+                    status="error",
+                    phase="",
+                    error=str(exc),
+                    current_item=folder.name,
+                )
                 return
 
         update_job(
             job_id,
             status="done",
-            phase="config",
+            phase="",
             current_item="",
             ok_count=ok_count,
             fail_count=fail_count,
@@ -464,7 +502,7 @@ def run_config_job(job_id: str, body: dict[str, Any]) -> None:
         )
         append_log(job_id, f"配置完成 ok={ok_count} fail={fail_count}")
     except Exception as exc:  # noqa: BLE001
-        update_job(job_id, status="error", error=str(exc))
+        update_job(job_id, status="error", phase="", error=str(exc))
         append_log(job_id, f"error: {exc}")
 
 
