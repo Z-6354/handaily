@@ -27,22 +27,7 @@
 
   function summarize(data) {
     if (!data || typeof data !== "object") return String(data);
-    const keys = [
-      "ok",
-      "filled",
-      "error",
-      "message",
-      "counts",
-      "allowlist",
-      "bundled_db",
-      "deleted",
-      "scope",
-      "upserted",
-      "character_total",
-      "before_count",
-      "after_count",
-      "replace",
-    ];
+    const keys = ["ok", "filled", "error", "message", "counts", "allowlist", "bundled_db", "deleted"];
     const pick = {};
     for (const k of keys) {
       if (k in data) pick[k] = data[k];
@@ -95,7 +80,6 @@
     $("db-bundled").classList.toggle("active", db === "bundled");
     $("bundled-badge").hidden = db !== "bundled";
     const localOnly = db === "local";
-    $("btn-wiki-current").disabled = !localOnly;
     $("btn-import-wiki").disabled = !localOnly;
     $("btn-sync-appdata").disabled = !localOnly;
     $("btn-publish").disabled = !localOnly;
@@ -617,50 +601,19 @@
     fillEnOnBlur($("f-name-en"), () => ($("f-id").value || "").trim());
     fillEnOnBlur($("s-name-en"), () => ($("s-id").value || "").trim());
 
-    $("btn-wiki-current").addEventListener("click", () => {
-      if (db !== "local") {
-        appendLog("Wiki 同步仅支持自用库，请切回自用库", "err");
-        return;
-      }
-      const id = selectedCharId || ($("f-id").value || "").trim();
-      if (!id) {
-        appendLog("请先在左侧选中一个角色", "err");
-        return;
-      }
-      runOp(`Wiki 同步 ${id}`, "/api/roster/ops/import-wiki", {
-        ids: id,
-        scope: "all",
-      });
-    });
     $("btn-import-wiki").addEventListener("click", () => {
       if (db !== "local") {
         appendLog("导入 Wiki 仅支持自用库，请切回自用库", "err");
         return;
       }
-      if (
-        !confirm(
-          "将从 BWIKI 本地库导入全部舰船（阵营、CV、稀有度、台词等）到自用库。\n可能有八百多条，确认？"
-        )
-      ) {
-        appendLog("导入已取消", "muted");
-        return;
-      }
-      runOp("导入 Wiki 全部角色", "/api/roster/ops/import-wiki", { scope: "all" });
+      runOp("导入 Wiki", "/api/roster/ops/import-wiki", {});
     });
     $("btn-sync-appdata").addEventListener("click", () => {
       if (db !== "local") {
-        appendLog("导入到桌宠仅支持自用库，请切回自用库", "err");
+        appendLog("同步 AppData 仅支持自用库，请切回自用库", "err");
         return;
       }
-      if (
-        !confirm(
-          "将用自用库角色覆盖 AppData 角色列表（去掉历史大量 wiki 条目，只保留自用库）。\n确认导入？"
-        )
-      ) {
-        appendLog("导入已取消", "muted");
-        return;
-      }
-      runOp("导入角色到桌宠", "/api/roster/ops/sync-appdata", { replace: true });
+      runOp("同步 AppData", "/api/roster/ops/sync-appdata", {});
     });
     $("btn-publish").addEventListener("click", onPublish);
     $("btn-fill-english").addEventListener("click", () => {
