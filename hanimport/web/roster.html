@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>角色库 — 小寒导入器</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="roster.css" />
+</head>
+<body>
+  <div class="roster-wrap">
+    <nav class="topnav">
+      <a href="/">解包</a> · <a href="/roster" class="active">角色库</a>
+    </nav>
+
+    <header class="roster-header">
+      <div>
+        <h1>角色库</h1>
+        <p class="sub">浏览与增删改角色 / 皮肤 / 台词 · 运维导入与发布</p>
+      </div>
+      <div class="db-switch" role="group" aria-label="库切换">
+        <button type="button" id="db-local" class="db-btn active" data-db="local">自用库</button>
+        <button type="button" id="db-bundled" class="db-btn" data-db="bundled">自带库</button>
+      </div>
+    </header>
+
+    <div class="meta-bar">
+      <span id="meta-path" class="muted path">…</span>
+      <span id="bundled-badge" class="badge warn" hidden>预览库 · 写入需确认</span>
+      <span id="meta-counts" class="muted"></span>
+    </div>
+
+    <div class="ops-bar">
+      <button type="button" id="btn-import-wiki">导入 Wiki</button>
+      <button type="button" id="btn-sync-appdata">同步 AppData</button>
+      <button type="button" id="btn-publish">发布自带库</button>
+      <button type="button" id="btn-fill-english">补齐空英文名</button>
+    </div>
+
+    <div class="roster-grid">
+      <section class="panel col-list">
+        <div class="panel-head">
+          <h2>角色</h2>
+          <button type="button" id="btn-new-char" class="primary">新建</button>
+        </div>
+        <input id="char-search" type="text" placeholder="搜索 id / 中文 / 英文" />
+        <ul id="char-list" class="item-list"></ul>
+        <div class="pager">
+          <button type="button" id="btn-prev" disabled>上一页</button>
+          <span id="pager-label" class="muted"></span>
+          <button type="button" id="btn-next" disabled>下一页</button>
+        </div>
+      </section>
+
+      <section class="panel col-detail">
+        <div class="panel-head">
+          <h2>角色详情</h2>
+          <div class="actions-inline">
+            <button type="button" id="btn-save-char" class="primary" disabled>保存</button>
+            <button type="button" id="btn-del-char" disabled>删除</button>
+          </div>
+        </div>
+        <div id="char-empty" class="muted placeholder">选择左侧角色，或点「新建」</div>
+        <form id="char-form" class="form" hidden>
+          <label>id（创建后不可改）
+            <input id="f-id" type="text" autocomplete="off" />
+          </label>
+          <label>中文名
+            <input id="f-name-zh" type="text" />
+          </label>
+          <label>英文名（空则 = id）
+            <input id="f-name-en" type="text" />
+          </label>
+          <label>Wiki 标题
+            <input id="f-wiki" type="text" />
+          </label>
+          <label>CV
+            <input id="f-cv" type="text" />
+          </label>
+          <label>阵营
+            <input id="f-faction" type="text" />
+          </label>
+          <label>舰种
+            <input id="f-ship-type" type="text" />
+          </label>
+          <label>稀有度
+            <input id="f-rarity" type="text" />
+          </label>
+          <label>persona_id
+            <input id="f-persona" type="text" />
+          </label>
+          <label>备注
+            <textarea id="f-desc" rows="3"></textarea>
+          </label>
+        </form>
+
+        <div class="skins-block" id="skins-block" hidden>
+          <div class="panel-head">
+            <h2>皮肤</h2>
+            <button type="button" id="btn-new-skin">新建皮肤</button>
+          </div>
+          <ul id="skin-list" class="item-list compact"></ul>
+          <form id="skin-form" class="form nested" hidden>
+            <label>皮肤 id
+              <input id="s-id" type="text" />
+            </label>
+            <label>中文名
+              <input id="s-name-zh" type="text" />
+            </label>
+            <label>英文名（空则 = id）
+              <input id="s-name-en" type="text" />
+            </label>
+            <label>pet_model_id
+              <input id="s-pet" type="text" />
+            </label>
+            <label>kanmusu_dir
+              <input id="s-kanmusu" type="text" />
+            </label>
+            <label>sort_order
+              <input id="s-sort" type="number" value="0" />
+            </label>
+            <label class="check">
+              <input id="s-default" type="checkbox" />
+              默认皮肤
+            </label>
+            <div class="actions-inline">
+              <button type="button" id="btn-save-skin" class="primary">保存皮肤</button>
+              <button type="button" id="btn-del-skin">删除皮肤</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel col-lines">
+        <div class="panel-head">
+          <h2>台词</h2>
+          <button type="button" id="btn-new-line" disabled>新建台词</button>
+        </div>
+        <div id="lines-empty" class="muted placeholder">先选中皮肤</div>
+        <ul id="line-list" class="item-list compact"></ul>
+        <form id="line-form" class="form nested" hidden>
+          <label>label
+            <input id="l-label" type="text" />
+          </label>
+          <label>wiki_key
+            <input id="l-wiki-key" type="text" />
+          </label>
+          <label>text
+            <textarea id="l-text" rows="4"></textarea>
+          </label>
+          <label>animation
+            <input id="l-anim" type="text" />
+          </label>
+          <label>sort_order
+            <input id="l-sort" type="number" value="0" />
+          </label>
+          <div class="actions-inline">
+            <button type="button" id="btn-save-line" class="primary">保存台词</button>
+            <button type="button" id="btn-del-line">删除台词</button>
+          </div>
+        </form>
+      </section>
+    </div>
+
+    <section class="panel log-panel">
+      <h2>日志</h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
+  <script src="roster.js"></script>
+</body>
+</html>

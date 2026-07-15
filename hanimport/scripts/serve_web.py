@@ -10,7 +10,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = ROOT.parent
@@ -19,6 +19,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from job_store import append_log, create_job, get_job, update_job  # noqa: E402
+import roster_api  # noqa: E402
 
 WEB_DIR = ROOT / "web"
 UNPACK_SCRIPT = SCRIPTS_DIR / "unpack_bundle.py"
@@ -523,10 +524,69 @@ class Handler(BaseHTTPRequestHandler):
     def _read_json(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length) if length else b"{}"
+        if not raw.strip():
+            return {}
         return json.loads(raw.decode("utf-8"))
 
+    def _parse_path_query(self) -> tuple[str, dict[str, str]]:
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        query: dict[str, str] = {}
+        for key, values in parse_qs(parsed.query, keep_blank_values=True).items():
+            if values:
+                query[key] = values[0]
+        return path, query
+
+    def _dispatch_roster(self, method: str) -> bool:
+        path, query = self._parse_path_query()
+        if not path.startswith("/api/roster"):
+            return False
+        body: dict[str, Any] = {}
+        if method in ("POST", "PUT", "DELETE", "PATCH"):
+            try:
+                body = self._read_json()
+            except json.JSONDecodeError:
+                self._send_json(400, {"ok": False, "error": "invalid JSON"})
+                return True
+        try:
+            code, payload = roster_api.handle(method, path, query, body)
+        except Exception as exc:  # noqa: BLE001
+            self._send_json(500, {"ok": False, "error": str(exc)})
+            return True
+        self._send_json(code, payload)
+        return True
+
+    def _serve_static(self, path: str) -> None:
+        if path in ("/", "/index.html"):
+            file_path = WEB_DIR / "index.html"
+        elif path in ("/roster", "/roster.html"):
+            file_path = WEB_DIR / "roster.html"
+        elif path in ("/style.css", "/app.js", "/roster.js", "/roster.css"):
+            file_path = WEB_DIR / path.lstrip("/")
+        else:
+            self.send_error(404)
+            return
+
+        if not file_path.is_file():
+            self.send_error(404)
+            return
+        content = file_path.read_bytes()
+        ctype = "text/html; charset=utf-8"
+        if file_path.suffix == ".css":
+            ctype = "text/css; charset=utf-8"
+        elif file_path.suffix == ".js":
+            ctype = "application/javascript; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(content)))
+        self.end_headers()
+        self.wfile.write(content)
+
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
+        if self._dispatch_roster("GET"):
+            return
+
+        path, _query = self._parse_path_query()
         if path == "/api/status":
             root = repo_root()
             self._send_json(
@@ -555,38 +615,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "job": snap})
             return
 
-        file_path = WEB_DIR / "index.html"
-        if path == "/" or path == "/index.html":
-            file_path = WEB_DIR / "index.html"
-        elif path.startswith("/"):
-            rel = path.lstrip("/")
-            # Roster static assets reserved for a later task (Phase 2).
-            if rel in ("style.css", "app.js") or rel.startswith("roster"):
-                file_path = WEB_DIR / rel
-            else:
-                self.send_error(404)
-                return
-        else:
-            self.send_error(404)
-            return
-
-        if not file_path.is_file():
-            self.send_error(404)
-            return
-        content = file_path.read_bytes()
-        ctype = "text/html; charset=utf-8"
-        if file_path.suffix == ".css":
-            ctype = "text/css; charset=utf-8"
-        elif file_path.suffix == ".js":
-            ctype = "application/javascript; charset=utf-8"
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
+        self._serve_static(path)
 
     def do_POST(self) -> None:
-        path = urlparse(self.path).path
+        if self._dispatch_roster("POST"):
+            return
+
+        path, _query = self._parse_path_query()
         try:
             body = self._read_json()
         except json.JSONDecodeError:
@@ -733,6 +768,16 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
+        self.send_error(404)
+
+    def do_PUT(self) -> None:
+        if self._dispatch_roster("PUT"):
+            return
+        self.send_error(404)
+
+    def do_DELETE(self) -> None:
+        if self._dispatch_roster("DELETE"):
+            return
         self.send_error(404)
 
 
