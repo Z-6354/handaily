@@ -20,6 +20,7 @@ from roster_db import (
 )
 from avatar_fetch import avatar_public_url
 from skin_probe import enrich_skin
+import json
 
 WRITE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 LOCAL_ONLY_OPS = frozenset(
@@ -47,6 +48,30 @@ def require_write(db: str, body: dict) -> str | None:
 
 def _row_to_dict(row) -> dict:
     return {k: row[k] for k in row.keys()}
+
+
+def _attach_lines_status(skin: dict, line_count: int = 0) -> dict:
+    out = dict(skin)
+    status = None
+    wiki_skin = None
+    try:
+        meta = json.loads(skin.get("meta_json") or "{}")
+        li = meta.get("lines_import") if isinstance(meta, dict) else None
+        if isinstance(li, dict):
+            status = li.get("status")
+            wiki_skin = li.get("wiki_skin")
+    except (TypeError, json.JSONDecodeError):
+        pass
+    if not status:
+        status = "ready" if line_count > 0 else "empty"
+    out["lines_status"] = status
+    out["lines_wiki_skin"] = wiki_skin
+    out["lines_count"] = line_count
+    return out
+
+
+def _enrich_full_skin(skin: dict, line_count: int = 0) -> dict:
+    return _attach_lines_status(enrich_skin(skin), line_count)
 
 
 def _db_key(query: dict, body: dict) -> str:
@@ -142,8 +167,19 @@ def _get_character(db: str, cid: str) -> tuple[int, dict]:
         row = conn.execute("SELECT * FROM characters WHERE id=?", (cid,)).fetchone()
         if not row:
             return 404, {"ok": False, "error": f"character not found: {cid}"}
+        counts = {
+            r["skin_id"]: r["n"]
+            for r in conn.execute(
+                """
+                SELECT skin_id, count(*) AS n FROM skin_lines
+                WHERE skin_id IN (SELECT id FROM skins WHERE character_id=?)
+                GROUP BY skin_id
+                """,
+                (cid,),
+            )
+        }
         skins = [
-            enrich_skin(_row_to_dict(s))
+            _enrich_full_skin(_row_to_dict(s), counts.get(s["id"], 0))
             for s in conn.execute(
                 "SELECT * FROM skins WHERE character_id=? ORDER BY sort_order, id",
                 (cid,),
@@ -168,10 +204,19 @@ def _skin_matches_filter(skin: dict, filt: str) -> bool:
         return (
             skin.get("pet_status") == "ready" and skin.get("kanmusu_status") == "ready"
         )
-    if filt in ("unbound", "ready"):
+    if filt in ("unbound", "ready") and filt != "ready":
         return (
             skin.get("pet_status") == filt or skin.get("kanmusu_status") == filt
         )
+    if filt == "ready":
+        # ambiguous historically used for asset ready — keep dual meaning via pet/km
+        return (
+            skin.get("pet_status") == "ready" or skin.get("kanmusu_status") == "ready"
+        )
+    if filt == "lines_issue":
+        return skin.get("lines_status") in ("empty", "unmatched", "stale_flat")
+    if filt == "lines_ready":
+        return skin.get("lines_status") == "ready"
     return True
 
 
@@ -212,9 +257,18 @@ def _list_skins(db: str, query: dict) -> tuple[int, dict]:
             params.extend([like] * 8)
         sql += " ORDER BY s.character_id, s.sort_order, s.id"
         rows = conn.execute(sql, params).fetchall()
+        ids = [r["id"] for r in rows]
+        counts: dict[str, int] = {}
+        if ids:
+            placeholders = ",".join("?" * len(ids))
+            for r in conn.execute(
+                f"SELECT skin_id, count(*) AS n FROM skin_lines WHERE skin_id IN ({placeholders}) GROUP BY skin_id",
+                ids,
+            ):
+                counts[r["skin_id"]] = r["n"]
         enriched = []
         for r in rows:
-            d = enrich_skin(_row_to_dict(r))
+            d = _enrich_full_skin(_row_to_dict(r), counts.get(r["id"], 0))
             if _skin_matches_filter(d, filt):
                 enriched.append(d)
         total = len(enriched)

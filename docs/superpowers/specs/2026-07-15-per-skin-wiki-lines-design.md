@@ -1,7 +1,7 @@
 # 按皮导入 Wiki 台词 — 设计
 
 **日期**: 2026-07-15  
-**状态**: 已批准（brainstorm）  
+**状态**: 已实现（v1）  
 **来源**: 用户选 C（抓取+导入）· 匹配 C（规范化宽松）· 标识 C（回执+UI）· 实现思路 1  
 **相关**: `2026-07-14-unified-character-skins-design.md`（原「本轮不做皮肤子集」由此作废）；roster browser / skin dual-columns
 

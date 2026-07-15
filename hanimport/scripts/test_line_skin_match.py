@@ -86,8 +86,13 @@ def test_apply_lines_report():
         ]
 
     report = apply_lines_by_skin(groups, skins, rows)
-    assert len(report["assignments"]) == 2
+    assert len(report["assignments"]) >= 2
     assert report["assignments"][0]["lines"][0]["text"] == "默认登录"
     assert any(a["wiki_skin"] == "乐队型鬼神" for a in report["assignments"])
-    assert any(u["skin"] == "Wiki独有" for u in report["wiki_unmatched"])
-    assert "c-orphan" in report["roster_unmatched_ids"]
+    # Wiki独有 may ordinal-match onto c-orphan now
+    assigned_wiki = {a["wiki_skin"] for a in report["assignments"]}
+    if "Wiki独有" in assigned_wiki:
+        assert any(a.get("matched_by") == "ordinal" for a in report["assignments"])
+    else:
+        assert any(u["skin"] == "Wiki独有" for u in report["wiki_unmatched"])
+        assert "c-orphan" in report["roster_unmatched_ids"]

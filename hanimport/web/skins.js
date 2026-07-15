@@ -32,6 +32,30 @@
     );
   }
 
+  function linesCell(status, wikiSkin, count) {
+    const map = {
+      ready: "就绪",
+      empty: "缺台词",
+      unmatched: "未匹配",
+      stale_flat: "旧复制",
+    };
+    const label = map[status] || status || "缺台词";
+    const tip = [label, count != null ? `${count}条` : null, wikiSkin ? `Wiki:${wikiSkin}` : null]
+      .filter(Boolean)
+      .join(" · ");
+    const cls =
+      status === "ready"
+        ? "probe-ready"
+        : status === "unmatched" || status === "stale_flat"
+          ? "probe-missing"
+          : "probe-unbound";
+    return (
+      `<span class="probe-cell ${cls}" title="${escapeHtml(tip)}">` +
+      `<span class="probe-dot" aria-hidden="true"></span>` +
+      `<span class="probe-label">${escapeHtml(label)}</span></span>`
+    );
+  }
+
   function qs() {
     const params = new URLSearchParams(location.search);
     return params;
@@ -93,6 +117,7 @@
         `</div></td>` +
         `<td>${statusCell(sk.pet_status, sk.pet_model_id || "")}</td>` +
         `<td>${statusCell(sk.kanmusu_status, sk.kanmusu_dir || "")}</td>` +
+        `<td>${linesCell(sk.lines_status, sk.lines_wiki_skin, sk.lines_count)}</td>` +
         `<td><a class="text-link" href="${rosterHref}">角色库</a></td>`;
       tbody.appendChild(tr);
     }

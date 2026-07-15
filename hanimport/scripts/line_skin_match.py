@@ -115,10 +115,11 @@ def apply_lines_by_skin(
       }
     """
     assignments: list[dict[str, Any]] = []
-    wiki_unmatched: list[dict[str, Any]] = []
     claimed: set[str] = set()
+    claimed_wiki: set[int] = set()
 
-    for g in groups or []:
+    indexed = list(enumerate(groups or []))
+    for gi, g in indexed:
         if not isinstance(g, dict):
             continue
         raw_lines = g.get("lines") or []
@@ -126,16 +127,12 @@ def apply_lines_by_skin(
         sk, how = match_wiki_group_to_skin(g, skins)
         wiki_skin = str(g.get("skin") or "")
         if sk is None:
-            wiki_unmatched.append(
-                {
-                    "skin": wiki_skin,
-                    "skin_kind": g.get("skin_kind"),
-                    "line_count": len(rows),
-                }
-            )
             continue
         sid = str(sk.get("id") or "")
+        if sid in claimed:
+            continue
         claimed.add(sid)
+        claimed_wiki.add(gi)
         status = "ready" if rows else "empty"
         assignments.append(
             {
@@ -144,6 +141,53 @@ def apply_lines_by_skin(
                 "matched_by": how,
                 "lines": rows,
                 "status": status,
+            }
+        )
+
+    # Ordinal fallback: Wiki skin panels ↔ roster skins still unclaimed
+    # (BWIKI assets are often named 换装N without the real title).
+    leftover_wiki = [
+        (gi, g)
+        for gi, g in indexed
+        if gi not in claimed_wiki and isinstance(g, dict)
+        and str(g.get("skin_kind") or "") in ("skin", "retrofit", "oath", "other")
+        and not _is_default_wiki_skin(str(g.get("skin") or ""), str(g.get("skin_kind") or ""))
+    ]
+    leftover_skins = [
+        sk
+        for sk in skins
+        if str(sk.get("id") or "") not in claimed and not sk.get("is_default")
+    ]
+    for (gi, g), sk in zip(leftover_wiki, leftover_skins):
+        sid = str(sk.get("id") or "")
+        if not sid or sid in claimed:
+            continue
+        rows = lines_rows_fn(g.get("lines") or [])
+        claimed.add(sid)
+        claimed_wiki.add(gi)
+        assignments.append(
+            {
+                "skin_id": sid,
+                "wiki_skin": str(g.get("skin") or ""),
+                "matched_by": "ordinal",
+                "lines": rows,
+                "status": "ready" if rows else "empty",
+            }
+        )
+
+    wiki_unmatched: list[dict[str, Any]] = []
+    for gi, g in indexed:
+        if gi in claimed_wiki or not isinstance(g, dict):
+            continue
+        if _is_default_wiki_skin(str(g.get("skin") or ""), str(g.get("skin_kind") or "")):
+            # default should have matched; if not, still report
+            pass
+        rows = lines_rows_fn(g.get("lines") or [])
+        wiki_unmatched.append(
+            {
+                "skin": str(g.get("skin") or ""),
+                "skin_kind": g.get("skin_kind"),
+                "line_count": len(rows),
             }
         )
 

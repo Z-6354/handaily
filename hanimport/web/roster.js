@@ -32,7 +32,7 @@
 
   function summarize(data) {
     if (!data || typeof data !== "object") return String(data);
-    const keys = ["ok", "filled", "error", "message", "counts", "allowlist", "bundled_db", "deleted"];
+    const keys = ["ok", "filled", "error", "message", "counts", "allowlist", "bundled_db", "deleted", "skins_lines_ok", "skins_lines_empty", "wiki_skins_unmatched", "roster_skins_unmatched"];
     const pick = {};
     for (const k of keys) {
       if (k in data) pick[k] = data[k];
@@ -441,6 +441,27 @@
     );
   }
 
+  function linesStatusDot(status, wikiSkin, count) {
+    const map = {
+      ready: "就绪",
+      empty: "缺台词",
+      unmatched: "未匹配",
+      stale_flat: "旧复制",
+    };
+    const label = map[status] || status || "缺台词";
+    const tipParts = [label];
+    if (count != null) tipParts.push(`${count} 条`);
+    if (wikiSkin) tipParts.push(`Wiki: ${wikiSkin}`);
+    const tip = tipParts.join(" · ");
+    const cls = status === "ready" ? "probe-ready" : status === "unmatched" || status === "stale_flat" ? "probe-missing" : "probe-unbound";
+    return (
+      `<span class="probe-cell ${cls}" title="${escapeHtml(tip)}">` +
+      `<span class="probe-dot" aria-hidden="true"></span>` +
+      `<span class="probe-label">${escapeHtml(label)}</span>` +
+      `</span>`
+    );
+  }
+
   function renderSkins(skins) {
     const list = $("skin-list");
     list.innerHTML = "";
@@ -462,6 +483,7 @@
         `</td>` +
         `<td>${statusDot("pet", sk.pet_status, sk.pet_model_id || "")}</td>` +
         `<td>${statusDot("km", sk.kanmusu_status, sk.kanmusu_dir || "")}</td>` +
+        `<td>${linesStatusDot(sk.lines_status, sk.lines_wiki_skin, sk.lines_count)}</td>` +
         `<td class="skin-pick">编辑</td>`;
       tr.addEventListener("click", () => selectSkin(sk));
       list.appendChild(tr);
@@ -698,6 +720,18 @@
     try {
       const data = await rosterFetch(path, { method: "POST", body: body || {} });
       appendLog(`${name} 完成 ` + summarize(data), "ok");
+      if (
+        name.includes("Wiki") &&
+        (data.wiki_skins_unmatched || data.roster_skins_unmatched || data.skins_lines_empty)
+      ) {
+        appendLog(
+          `台词需检查：Wiki未匹配 ${data.wiki_skins_unmatched || 0} · 库皮未匹配 ${data.roster_skins_unmatched || 0} · 空台词 ${data.skins_lines_empty || 0}`,
+          "err"
+        );
+        for (const item of (data.lines_report || []).slice(0, 12)) {
+          appendLog("  · " + JSON.stringify(item), "muted");
+        }
+      }
       await refreshAll();
       if (selectedCharId) await loadCharacterDetail(selectedCharId);
       if (data.avatar_job_id) {
