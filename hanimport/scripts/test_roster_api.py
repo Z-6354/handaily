@@ -145,6 +145,68 @@ def test_skins_and_lines_crud(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert code == 200
 
 
+def test_list_skins_with_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    db = tmp_path / "local.sqlite"
+    conn = connect(db)
+    apply_schema(conn)
+    conn.execute(
+        "INSERT INTO characters(id,name_zh,name_en) VALUES (?,?,?)",
+        ("edu", "恶毒", "edu"),
+    )
+    conn.execute(
+        """
+        INSERT INTO skins(id,character_id,name_zh,name_en,pet_model_id,kanmusu_dir,sort_order,is_default)
+        VALUES (?,?,?,?,?,?,?,?)
+        """,
+        ("edu", "edu", "默认", "edu", "edu_pet", "edu_km", 0, 1),
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("HANDAILY_ROSTER_DB", str(db))
+
+    live = tmp_path / "live2d"
+    live.mkdir()
+    pet = live / "edu_pet"
+    pet.mkdir()
+    (pet / "edu.skel").write_bytes(b"1")
+    (pet / "edu.atlas").write_text("a", encoding="utf-8")
+    monkeypatch.setenv("HANDAILY_LIVE2D_PATH", str(live))
+    monkeypatch.setenv("HANDAILY_MODEL_UNPACKED", str(tmp_path / "unpacked"))
+    (tmp_path / "unpacked").mkdir()
+
+    code, payload = handle("GET", "/api/roster/skins", {"db": "local", "limit": "10"}, {})
+    assert code == 200
+    assert payload["total"] == 1
+    sk = payload["skins"][0]
+    assert sk["pet_status"] == "ready"
+    assert sk["kanmusu_status"] == "missing"
+    assert sk["character_name_zh"] == "恶毒"
+
+    code, payload = handle(
+        "GET", "/api/roster/characters/edu", {"db": "local"}, {}
+    )
+    assert code == 200
+    assert payload["skins"][0]["pet_status"] == "ready"
+
+    code, payload = handle(
+        "GET",
+        "/api/roster/skins",
+        {"db": "local", "filter": "missing"},
+        {},
+    )
+    assert code == 200
+    assert payload["total"] == 1
+
+    code, payload = handle(
+        "GET",
+        "/api/roster/skins",
+        {"db": "local", "filter": "dual_ready"},
+        {},
+    )
+    assert code == 200
+    assert payload["total"] == 0
+
+
 def test_ops_fill_english_and_local_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db = tmp_path / "local.sqlite"
     conn = connect(db)

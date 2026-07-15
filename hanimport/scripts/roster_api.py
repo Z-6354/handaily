@@ -19,6 +19,7 @@ from roster_db import (
     upsert_skin,
 )
 from avatar_fetch import avatar_public_url
+from skin_probe import enrich_skin
 
 WRITE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
 LOCAL_ONLY_OPS = frozenset(
@@ -142,7 +143,7 @@ def _get_character(db: str, cid: str) -> tuple[int, dict]:
         if not row:
             return 404, {"ok": False, "error": f"character not found: {cid}"}
         skins = [
-            _row_to_dict(s)
+            enrich_skin(_row_to_dict(s))
             for s in conn.execute(
                 "SELECT * FROM skins WHERE character_id=? ORDER BY sort_order, id",
                 (cid,),
@@ -153,6 +154,78 @@ def _get_character(db: str, cid: str) -> tuple[int, dict]:
             "db": db,
             "character": _row_to_dict(row),
             "skins": skins,
+        }
+    finally:
+        conn.close()
+
+
+def _skin_matches_filter(skin: dict, filt: str) -> bool:
+    if not filt:
+        return True
+    if filt == "missing":
+        return skin.get("pet_status") == "missing" or skin.get("kanmusu_status") == "missing"
+    if filt == "dual_ready":
+        return (
+            skin.get("pet_status") == "ready" and skin.get("kanmusu_status") == "ready"
+        )
+    if filt in ("unbound", "ready"):
+        return (
+            skin.get("pet_status") == filt or skin.get("kanmusu_status") == filt
+        )
+    return True
+
+
+def _list_skins(db: str, query: dict) -> tuple[int, dict]:
+    q = (query.get("q") or "").strip()
+    cid = (query.get("character_id") or "").strip()
+    filt = (query.get("filter") or query.get("status") or "").strip()
+    try:
+        offset = max(0, int(query.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = min(500, max(1, int(query.get("limit") or 50)))
+    except (TypeError, ValueError):
+        limit = 50
+
+    _path, conn = _open(db)
+    try:
+        sql = """
+            SELECT s.*, c.name_zh AS character_name_zh, c.name_en AS character_name_en
+            FROM skins s
+            JOIN characters c ON c.id = s.character_id
+            WHERE 1=1
+        """
+        params: list = []
+        if cid:
+            sql += " AND s.character_id = ?"
+            params.append(cid)
+        if q:
+            like = f"%{q}%"
+            sql += """
+                AND (
+                  s.id LIKE ? OR s.name_zh LIKE ? OR s.name_en LIKE ?
+                  OR s.pet_model_id LIKE ? OR s.kanmusu_dir LIKE ?
+                  OR c.name_zh LIKE ? OR c.name_en LIKE ? OR c.id LIKE ?
+                )
+            """
+            params.extend([like] * 8)
+        sql += " ORDER BY s.character_id, s.sort_order, s.id"
+        rows = conn.execute(sql, params).fetchall()
+        enriched = []
+        for r in rows:
+            d = enrich_skin(_row_to_dict(r))
+            if _skin_matches_filter(d, filt):
+                enriched.append(d)
+        total = len(enriched)
+        page = enriched[offset : offset + limit]
+        return 200, {
+            "ok": True,
+            "db": db,
+            "skins": page,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
         }
     finally:
         conn.close()
@@ -526,8 +599,11 @@ def handle(
             return _delete_character(db, cid)
 
     m = re.fullmatch(r"/api/roster/skins", path)
-    if m and method == "POST":
-        return _create_skin(db, body)
+    if m:
+        if method == "GET":
+            return _list_skins(db, query)
+        if method == "POST":
+            return _create_skin(db, body)
 
     m = re.fullmatch(r"/api/roster/skins/([^/]+)", path)
     if m:
