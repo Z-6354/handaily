@@ -39,6 +39,13 @@ def get_job(job_id: str) -> dict[str, Any] | None:
         return dict(j) if j else None
 
 
+def list_jobs(limit: int = 20) -> list[dict[str, Any]]:
+    n = max(1, min(int(limit), 50))
+    with _lock:
+        items = sorted(_JOBS.values(), key=lambda j: j["updated_at"], reverse=True)
+        return [dict(j) for j in items[:n]]
+
+
 def update_job(job_id: str, **fields: Any) -> None:
     with _lock:
         j = _JOBS.get(job_id)

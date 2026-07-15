@@ -18,7 +18,7 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from job_store import append_log, create_job, get_job, update_job  # noqa: E402
+from job_store import append_log, create_job, get_job, list_jobs, update_job  # noqa: E402
 import roster_api  # noqa: E402
 
 WEB_DIR = ROOT / "web"
@@ -587,6 +587,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         path, _query = self._parse_path_query()
+        if path == "/api/jobs":
+            raw = _query.get("limit", "20")
+            try:
+                lim = int(raw)
+            except ValueError:
+                lim = 20
+            self._send_json(200, {"ok": True, "jobs": list_jobs(lim)})
+            return
+
         if path == "/api/status":
             root = repo_root()
             self._send_json(
