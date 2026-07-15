@@ -20,6 +20,22 @@ export interface ShipLine {
   lang: string;
   text: string;
   audioUrl: string | null;
+  /** Present when flattened from a by-skin group. */
+  skin?: string;
+}
+
+export type ShipLineSkinKind =
+  | "default"
+  | "skin"
+  | "retrofit"
+  | "oath"
+  | "other";
+
+/** One Wiki 台词 panel (通常 / 换装名 / 改造 / 誓约). */
+export interface ShipLineGroup {
+  skin: string;
+  skin_kind: ShipLineSkinKind;
+  lines: ShipLine[];
 }
 
 export interface ShipAsset {
@@ -46,6 +62,8 @@ export interface ShipRecord {
   characterInfo: CharacterInfoField[];
   sections: ShipSection[];
   lines: ShipLine[];
+  /** Per-panel lines when scraped; empty if legacy-only. */
+  linesBySkin: ShipLineGroup[];
   assets: ShipAsset[];
   personaReference: string;
   fetchedAt: string;

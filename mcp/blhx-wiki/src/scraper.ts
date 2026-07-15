@@ -176,7 +176,8 @@ export function parseShipPage(
   const aliases = extractPageAliases(html, displayName);
   const characterInfo = extractCharacterInfo(html);
   const sections = extractPersonaSections(html);
-  const lines = extractShipLines(html);
+  const linesBySkin = extractShipLinesBySkin(html);
+  const lines = flattenShipLineGroups(linesBySkin);
   const assets = extractAssets(html, displayName);
   const cv = extractCv(html);
   const personaReference = buildPersonaReference({
@@ -200,6 +201,7 @@ export function parseShipPage(
     characterInfo,
     sections,
     lines,
+    linesBySkin,
     assets,
     personaReference,
     fetchedAt: new Date().toISOString(),
@@ -301,13 +303,29 @@ function cleanSectionText(text: string): string {
     .join("\n");
 }
 
-export function extractShipLines(html: string): import("./types.js").ShipLine[] {
-  const section = extractWikiSection(html, "舰船台词") ?? html;
+function classifySkinTitle(title: string): {
+  skin: string;
+  skin_kind: import("./types.js").ShipLineSkinKind;
+} {
+  const t = normalizeText(title);
+  if (!t || t === "通常" || t === "默认" || /^default$/i.test(t)) {
+    return { skin: "default", skin_kind: "default" };
+  }
+  if (t.includes("誓约")) {
+    return { skin: t, skin_kind: "oath" };
+  }
+  if (t.includes("改造") || /\.改$/.test(t) || /改$/.test(t)) {
+    return { skin: t, skin_kind: "retrofit" };
+  }
+  return { skin: t, skin_kind: "skin" };
+}
+
+function parseLinesFromFragment(fragment: string): import("./types.js").ShipLine[] {
   const lines: import("./types.js").ShipLine[] = [];
   const rowRegex =
     /<tr[^>]*data-key="([^"]+)"[^>]*>[\s\S]*?<th[^>]*>([\s\S]*?)<\/th>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>[\s\S]*?<\/tr>/g;
 
-  for (const match of section.matchAll(rowRegex)) {
+  for (const match of fragment.matchAll(rowRegex)) {
     const key = match[1]?.trim();
     if (!key || SKIP_LINE_KEYS.has(key)) continue;
     const label = normalizeText(stripHtmlTags(match[2] ?? ""));
@@ -317,6 +335,7 @@ export function extractShipLines(html: string): import("./types.js").ShipLine[] 
         stripHtmlTags(cell.match(/class="ship_word_line"[^>]*>([\s\S]*?)<\/p>/)?.[1] ?? "")
       ) || normalizeText(stripHtmlTags(cell));
     if (!text || text.length < 2) continue;
+    if (key === "desc" || label === "皮肤描述") continue;
     const lang =
       cell.match(/data-lang="([^"]+)"/)?.[1] ??
       cell.match(/class="ship_word_line"[^>]*data-lang="([^"]+)"/)?.[1] ??
@@ -328,9 +347,9 @@ export function extractShipLines(html: string): import("./types.js").ShipLine[] 
   }
 
   if (lines.length === 0) {
-    for (const block of iterShipWordBlocks(section)) {
+    for (const block of iterShipWordBlocks(fragment)) {
       const key = block.match(/data-key="([^"]+)"/)?.[1];
-      if (!key || SKIP_LINE_KEYS.has(key)) continue;
+      if (!key || SKIP_LINE_KEYS.has(key) || key === "desc") continue;
       const text = normalizeText(
         stripHtmlTags(block.match(/class="ship_word_line"[^>]*>([\s\S]*?)<\/p>/)?.[1] ?? "")
       );
@@ -349,6 +368,93 @@ export function extractShipLines(html: string): import("./types.js").ShipLine[] 
   }
 
   return dedupeLines(lines);
+}
+
+function collectPaneTitles(section: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const spanRegex = /<span\b([^>]*)>([\s\S]*?)<\/span>/gi;
+  for (const match of section.matchAll(spanRegex)) {
+    const attrs = match[1] ?? "";
+    if (!/panel-title/i.test(attrs)) continue;
+    const target = attrs.match(/data-target="#([^"]+)"/)?.[1];
+    if (!target) continue;
+    const title = normalizeText(stripHtmlTags(match[2] ?? ""));
+    if (title) map.set(target, title);
+  }
+  return map;
+}
+
+/**
+ * Split BWIKI 舰船台词 into default + per-skin tab panels.
+ */
+export function extractShipLinesBySkin(
+  html: string
+): import("./types.js").ShipLineGroup[] {
+  const section = extractWikiSection(html, "舰船台词");
+  if (!section) {
+    const flat = parseLinesFromFragment(html);
+    return flat.length
+      ? [{ skin: "default", skin_kind: "default", lines: flat }]
+      : [];
+  }
+
+  const paneTitles = collectPaneTitles(section);
+  const merged = new Map<string, import("./types.js").ShipLineGroup>();
+
+  const tableRegex =
+    /<table\b[^>]*class="[^"]*table-ShipWordsTable[^"]*"[^>]*>([\s\S]*?)<\/table>/gi;
+  let matchedTables = 0;
+  for (const match of section.matchAll(tableRegex)) {
+    matchedTables++;
+    const tableBody = match[1] ?? "";
+    const before = section.slice(0, match.index ?? 0);
+    let paneId: string | null = null;
+    for (const m of before.matchAll(/<div\b([^>]*\btab-pane\b[^>]*)>/gi)) {
+      const id = m[1]?.match(/\bid="([^"]+)"/)?.[1];
+      if (id) paneId = id;
+    }
+    const rawTitle = paneId ? paneTitles.get(paneId) ?? "" : "default";
+    const { skin, skin_kind } = classifySkinTitle(rawTitle || "default");
+    const lines = parseLinesFromFragment(tableBody);
+    if (!lines.length) continue;
+    const prev = merged.get(skin);
+    if (prev) {
+      prev.lines = dedupeLines([...prev.lines, ...lines]);
+    } else {
+      merged.set(skin, { skin, skin_kind, lines });
+    }
+  }
+
+  if (!matchedTables) {
+    const flat = parseLinesFromFragment(section);
+    return flat.length
+      ? [{ skin: "default", skin_kind: "default", lines: flat }]
+      : [];
+  }
+
+  const groups = [...merged.values()];
+  groups.sort((a, b) => {
+    if (a.skin === "default") return -1;
+    if (b.skin === "default") return 1;
+    return a.skin.localeCompare(b.skin, "zh");
+  });
+  return groups;
+}
+
+export function flattenShipLineGroups(
+  groups: import("./types.js").ShipLineGroup[]
+): import("./types.js").ShipLine[] {
+  const lines: import("./types.js").ShipLine[] = [];
+  for (const g of groups) {
+    for (const line of g.lines) {
+      lines.push({ ...line, skin: g.skin });
+    }
+  }
+  return dedupeLines(lines);
+}
+
+export function extractShipLines(html: string): import("./types.js").ShipLine[] {
+  return flattenShipLineGroups(extractShipLinesBySkin(html));
 }
 
 function iterShipWordBlocks(section: string): string[] {
@@ -370,7 +476,7 @@ function iterShipWordBlocks(section: string): string[] {
 function dedupeLines(lines: import("./types.js").ShipLine[]): import("./types.js").ShipLine[] {
   const seen = new Set<string>();
   return lines.filter((l) => {
-    const k = `${l.key}|${l.lang}|${l.text}`;
+    const k = `${l.skin ?? ""}|${l.key}|${l.lang}|${l.text}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;
