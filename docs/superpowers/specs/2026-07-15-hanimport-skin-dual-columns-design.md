@@ -1,7 +1,7 @@
 # hanimport 皮肤双列清单（桌宠 / 舰娘）— 设计
 
 **日期**: 2026-07-15  
-**状态**: 已批准（brainstorm；用户授权写完计划后开工）  
+**状态**: 已实现（v1）  
 **来源**: 清单展示 A · 详情摘要+全库页 3 · 实现方案 A（扩展 roster）  
 **相关**: 角色库 `2026-07-15-hanimport-roster-browser-design.md`；头像网格 `2026-07-15-hanimport-roster-avatar-grid-design.md`；统一皮肤 `2026-07-14-unified-character-skins-design.md`
 
