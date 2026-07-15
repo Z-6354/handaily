@@ -96,12 +96,13 @@
 }
 
 #env-summary {
-  padding: 16px 18px;
+  padding: 18px 20px;
   background: var(--surface);
   border: 1px solid var(--hairline);
-  border-radius: var(--radius);
+  border-radius: 18px;
+  box-shadow: var(--shadow-card);
   font-size: 0.9375rem;
-  line-height: 1.6;
+  line-height: 1.65;
 }
 
 #env-summary.warn-text {
@@ -114,7 +115,8 @@
   gap: 1px;
   background: var(--hairline);
   border: 1px solid var(--hairline);
-  border-radius: var(--radius);
+  border-radius: 18px;
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 
@@ -172,11 +174,13 @@
 
 .empty-state {
   margin: 0;
-  padding: 20px;
+  padding: 28px 20px;
   text-align: center;
   background: var(--surface);
   border: 1px solid var(--hairline);
-  border-radius: var(--radius);
+  border-radius: 18px;
+  box-shadow: var(--shadow-card);
+  color: var(--muted);
 }
 
 .empty-state a {

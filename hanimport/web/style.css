@@ -81,10 +81,19 @@ input[type="text"] {
   width: 100%;
   margin-top: 6px;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: 10px;
   border: 1px solid var(--hairline);
-  background: var(--surface);
+  background: var(--bg);
   color: var(--text);
+  font: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.2);
+  background: var(--surface);
 }
 
 .actions {
@@ -97,13 +106,20 @@ button {
   border: 1px solid var(--hairline);
   background: var(--surface);
   color: var(--text);
-  padding: 10px 16px;
-  border-radius: 8px;
+  padding: 9px 16px;
+  border-radius: 980px;
   cursor: pointer;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
 }
 
-button:hover { border-color: var(--accent); }
+button:hover { border-color: rgba(0, 0, 0, 0.18); background: rgba(0, 0, 0, 0.02); }
+
+button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.28);
+}
 
 button.primary {
   background: var(--accent);
@@ -112,10 +128,13 @@ button.primary {
   font-weight: 600;
 }
 
-button.primary:hover { background: var(--accent-hover); }
+button.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
 
 button:disabled {
-  opacity: 0.55;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
