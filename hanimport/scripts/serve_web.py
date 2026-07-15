@@ -20,6 +20,13 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from job_store import append_log, create_job, get_job, update_job  # noqa: E402
 
+WEB_DIR = ROOT / "web"
+UNPACK_SCRIPT = SCRIPTS_DIR / "unpack_bundle.py"
+
+BUNDLE_EXTENSIONS = {".ab", ".unity3d", ".bytes"}
+BUNDLE_MAGIC = b"UnityFS"
+DEFAULT_PORT = 7821
+
 
 def repo_root() -> Path:
     env = os.environ.get("HANDAILY_ROOT", "").strip()
@@ -30,18 +37,109 @@ def repo_root() -> Path:
     return ROOT
 
 
-WEB_DIR = ROOT / "web"
-SCRIPTS_DIR = ROOT / "scripts"
-UNPACK_SCRIPT = SCRIPTS_DIR / "unpack_bundle.py"
+def default_live2d() -> Path:
+    env = os.environ.get("HANDAILY_LIVE2D_PATH", "").strip()
+    if env:
+        return Path(env)
+    root = repo_root()
+    for rel in ("data/live2d", "live2d"):
+        p = root / rel
+        if p.is_dir():
+            return p
+    return root / "data/live2d"
 
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
 
-from job_store import append_log, create_job, get_job, update_job  # noqa: E402
+def default_model_unpacked() -> Path:
+    return repo_root() / "data/model/unpacked"
 
-BUNDLE_EXTENSIONS = {".ab", ".unity3d", ".bytes"}
-BUNDLE_MAGIC = b"UnityFS"
-DEFAULT_PORT = 7821
+
+def resolve_output(input_path: Path, explicit: str | None) -> Path:
+    if explicit:
+        return Path(explicit)
+    norm = str(input_path).replace("\\", "/").lower()
+    if "data/model" in norm or "/model/" in norm:
+        return default_model_unpacked()
+    return default_live2d()
+
+
+def is_unity_bundle(path: Path) -> bool:
+    if path.suffix.lower() in BUNDLE_EXTENSIONS:
+        return True
+    try:
+        with path.open("rb") as f:
+            return f.read(len(BUNDLE_MAGIC)) == BUNDLE_MAGIC
+    except OSError:
+        return False
+
+
+def infer_slug(path: Path) -> str:
+    name = path.stem if path.suffix else path.name
+    return name.lower()
+
+
+def discover_bundles(input_path: Path) -> list[dict[str, str]]:
+    out: list[dict[str, str]] = []
+    if input_path.is_file():
+        if is_unity_bundle(input_path):
+            out.append({"path": str(input_path), "slug": infer_slug(input_path)})
+        return out
+    if not input_path.is_dir():
+        return out
+    for dirpath, _, filenames in os.walk(input_path):
+        for fn in filenames:
+            fp = Path(dirpath) / fn
+            if is_unity_bundle(fp):
+                out.append({"path": str(fp), "slug": infer_slug(fp)})
+    out.sort(key=lambda x: x["path"].lower())
+    return out
+
+
+def unitypy_installed() -> bool:
+    try:
+        import UnityPy  # noqa: F401
+
+        return True
+    except ImportError:
+        return False
+
+
+def run_unpack_one(input_file: Path, output_root: Path, slug: str) -> dict[str, Any]:
+    import subprocess
+
+    cmd = [
+        sys.executable,
+        str(UNPACK_SCRIPT),
+        "--input",
+        str(input_file),
+        "--output",
+        str(output_root),
+        "--slug",
+        slug,
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+    json_line = next((ln for ln in (stdout + "\n" + stderr).splitlines() if ln.strip().startswith("{")), "")
+    if not json_line:
+        raise RuntimeError(f"解包无输出: {input_file}\n{stdout}\n{stderr}")
+    data = json.loads(json_line)
+    if not data.get("ok"):
+        raise RuntimeError(data.get("error") or f"解包失败: {input_file}")
+    return data
+
+
+def suggested_input() -> str | None:
+    root = repo_root()
+    for rel in (
+        "data/model/azurlane/custom",
+        "data/model/azurlane/spinepainting",
+        "data/model",
+        "data/transfer/inbox/azurlane/custom",
+    ):
+        p = root / rel
+        if p.is_dir() and discover_bundles(p):
+            return str(p)
+    return None
 
 
 def _folder_has_ext(folder: Path, ext: str) -> bool:
@@ -254,7 +352,7 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
         update_job(
             job_id,
             status="done",
-            phase="",
+            phase="unpack" if dry_run else ("" if not generate_config else "config"),
             current_item="",
             ok_count=ok_count,
             fail_count=fail_count,
@@ -284,16 +382,11 @@ def run_config_job(job_id: str, body: dict[str, Any]) -> None:
         dry_run = bool(body.get("dry_run"))
         force = bool(body.get("force"))
         src_raw = (body.get("src") or "").strip()
-        src_dir = (
-            Path(src_raw)
-            if src_raw
-            else (repo_root() / "data/model/azurlane/custom")
-        )
+        src_dir = Path(src_raw) if src_raw else (repo_root() / "data/model/azurlane/custom")
 
         build_folder_configs, discover_spine_folders, process_slug = _import_config_builders()
         spine_folders = discover_spine_folders(input_path)
         cubism_folders = _discover_cubism_folders(input_path)
-        # Prefer Spine when a folder has both (unusual); drop cubism dupes
         spine_set = {f.resolve() for f in spine_folders}
         cubism_folders = [f for f in cubism_folders if f.resolve() not in spine_set]
 
@@ -362,7 +455,7 @@ def run_config_job(job_id: str, body: dict[str, Any]) -> None:
         update_job(
             job_id,
             status="done",
-            phase="",
+            phase="config",
             current_item="",
             ok_count=ok_count,
             fail_count=fail_count,
@@ -373,111 +466,6 @@ def run_config_job(job_id: str, body: dict[str, Any]) -> None:
     except Exception as exc:  # noqa: BLE001
         update_job(job_id, status="error", error=str(exc))
         append_log(job_id, f"error: {exc}")
-
-
-def default_live2d() -> Path:
-    env = os.environ.get("HANDAILY_LIVE2D_PATH", "").strip()
-    if env:
-        return Path(env)
-    root = repo_root()
-    for rel in ("data/live2d", "live2d"):
-        p = root / rel
-        if p.is_dir():
-            return p
-    return root / "data/live2d"
-
-
-def default_model_unpacked() -> Path:
-    return repo_root() / "data/model/unpacked"
-
-
-def resolve_output(input_path: Path, explicit: str | None) -> Path:
-    if explicit:
-        return Path(explicit)
-    norm = str(input_path).replace("\\", "/").lower()
-    if "data/model" in norm or "/model/" in norm:
-        return default_model_unpacked()
-    return default_live2d()
-
-
-def is_unity_bundle(path: Path) -> bool:
-    if path.suffix.lower() in BUNDLE_EXTENSIONS:
-        return True
-    try:
-        with path.open("rb") as f:
-            return f.read(len(BUNDLE_MAGIC)) == BUNDLE_MAGIC
-    except OSError:
-        return False
-
-
-def infer_slug(path: Path) -> str:
-    name = path.stem if path.suffix else path.name
-    return name.lower()
-
-
-def discover_bundles(input_path: Path) -> list[dict[str, str]]:
-    out: list[dict[str, str]] = []
-    if input_path.is_file():
-        if is_unity_bundle(input_path):
-            out.append({"path": str(input_path), "slug": infer_slug(input_path)})
-        return out
-    if not input_path.is_dir():
-        return out
-    for dirpath, _, filenames in os.walk(input_path):
-        for fn in filenames:
-            fp = Path(dirpath) / fn
-            if is_unity_bundle(fp):
-                out.append({"path": str(fp), "slug": infer_slug(fp)})
-    out.sort(key=lambda x: x["path"].lower())
-    return out
-
-
-def unitypy_installed() -> bool:
-    try:
-        import UnityPy  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
-
-
-def run_unpack_one(input_file: Path, output_root: Path, slug: str) -> dict[str, Any]:
-    import subprocess
-
-    cmd = [
-        sys.executable,
-        str(UNPACK_SCRIPT),
-        "--input",
-        str(input_file),
-        "--output",
-        str(output_root),
-        "--slug",
-        slug,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    stdout = proc.stdout.strip()
-    stderr = proc.stderr.strip()
-    json_line = next((ln for ln in (stdout + "\n" + stderr).splitlines() if ln.strip().startswith("{")), "")
-    if not json_line:
-        raise RuntimeError(f"解包无输出: {input_file}\n{stdout}\n{stderr}")
-    data = json.loads(json_line)
-    if not data.get("ok"):
-        raise RuntimeError(data.get("error") or f"解包失败: {input_file}")
-    return data
-
-
-def suggested_input() -> str | None:
-    root = repo_root()
-    for rel in (
-        "data/model/azurlane/custom",
-        "data/model/azurlane/spinepainting",
-        "data/model",
-        "data/transfer/inbox/azurlane/custom",
-    ):
-        p = root / rel
-        if p.is_dir() and discover_bundles(p):
-            return str(p)
-    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -535,7 +523,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path.startswith("/"):
             rel = path.lstrip("/")
             # Roster static assets reserved for a later task (Phase 2).
-            if rel in ("style.css", "app.js"):
+            if rel in ("style.css", "app.js") or rel.startswith("roster"):
                 file_path = WEB_DIR / rel
             else:
                 self.send_error(404)
@@ -567,6 +555,16 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
 
+        if path == "/api/jobs/unpack":
+            jid = start_unpack_job(body)
+            self._send_json(200, {"ok": True, "job_id": jid})
+            return
+
+        if path == "/api/jobs/config":
+            jid = start_config_job(body)
+            self._send_json(200, {"ok": True, "job_id": jid})
+            return
+
         if path == "/api/scan":
             input_raw = (body.get("input") or "").strip()
             if not input_raw:
@@ -578,16 +576,6 @@ class Handler(BaseHTTPRequestHandler):
                 return
             bundles = discover_bundles(input_path)
             self._send_json(200, {"ok": True, "bundles": bundles})
-            return
-
-        if path == "/api/jobs/unpack":
-            jid = start_unpack_job(body)
-            self._send_json(200, {"ok": True, "job_id": jid})
-            return
-
-        if path == "/api/jobs/config":
-            jid = start_config_job(body)
-            self._send_json(200, {"ok": True, "job_id": jid})
             return
 
         if path == "/api/unpack":
@@ -681,8 +669,8 @@ class Handler(BaseHTTPRequestHandler):
             if not folders:
                 self._send_json(400, {"ok": False, "error": "未找到 Spine 模型目录（需含 .skel）"})
                 return
-            log: list[str] = []
-            results: list[dict[str, Any]] = []
+            log = []
+            results = []
             for folder in folders:
                 log.append(f"配置 {folder.name} …")
                 try:
