@@ -84,10 +84,40 @@ function renderProgress(job) {
 
 function appendLogTail(job, state) {
   const lines = job.log_tail || [];
-  if (lines.length < state.seen) state.seen = 0;
+  const first = lines.length ? lines[0] : "";
+  // Ring buffer full: length stays at cap while head slides — reset sync.
+  if (
+    lines.length &&
+    lines.length === state.seen &&
+    state.lastFirst !== undefined &&
+    first !== state.lastFirst
+  ) {
+    state.seen = 0;
+    clearLog();
+  } else if (lines.length < state.seen) {
+    state.seen = 0;
+    clearLog();
+  }
   for (; state.seen < lines.length; state.seen++) {
     appendLog(lines[state.seen]);
   }
+  state.lastFirst = first;
+}
+
+/** Only remap unpack/bundle rows into scan checkboxes — skip config-phase results. */
+function bundlesFromJobResults(results) {
+  return (results || [])
+    .filter(
+      (r) =>
+        r &&
+        r.phase !== "config" &&
+        r.input &&
+        (r.slug || r.folder),
+    )
+    .map((r) => ({
+      slug: r.slug || r.folder || "",
+      path: r.input,
+    }));
 }
 
 async function pollJob(jobId, onTick) {
@@ -148,7 +178,7 @@ async function onUnpack() {
   setJobBusy(true);
   $("progress-wrap").hidden = true;
   $("progress-fill").style.width = "0%";
-  const logState = { seen: 0 };
+  const logState = { seen: 0, lastFirst: undefined };
   try {
     const body = {
       input,
@@ -172,13 +202,9 @@ async function onUnpack() {
         job.fail_count ? "err" : "ok",
       );
     }
-    if (job.results?.length) {
-      renderScan({
-        bundles: job.results.map((r) => ({
-          slug: r.slug || r.folder || "",
-          path: r.input || r.output_dir || r.folder || "",
-        })),
-      });
+    const bundles = bundlesFromJobResults(job.results);
+    if (bundles.length) {
+      renderScan({ bundles });
     }
   } catch (e) {
     appendLog(e.message, "err");
@@ -198,7 +224,7 @@ async function onConfig() {
   setJobBusy(true);
   $("progress-wrap").hidden = true;
   $("progress-fill").style.width = "0%";
-  const logState = { seen: 0 };
+  const logState = { seen: 0, lastFirst: undefined };
   try {
     const { job_id } = await api("/api/jobs/config", {
       input,
