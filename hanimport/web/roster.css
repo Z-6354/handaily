@@ -194,6 +194,19 @@
   animation: avatar-toast-in 0.22s ease;
 }
 
+.lines-toast {
+  bottom: 148px;
+  z-index: 201;
+}
+
+#lines-toast-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: var(--accent, #0071e3);
+  transition: width 0.2s ease;
+}
+
 .avatar-toast-head {
   display: flex;
   align-items: flex-start;

@@ -9,6 +9,10 @@
   let avatarPollTimer = null;
   let avatarToastHidden = false;
   let avatarAutoStarted = false;
+  let linesJobId = null;
+  let linesPollTimer = null;
+  let linesToastHidden = false;
+  let linesAutoStarted = false;
   let total = 0;
   let selectedCharId = null;
   let selectedSkinId = null;
@@ -94,8 +98,13 @@
     selectedLineId = null;
     creatingChar = false;
     avatarAutoStarted = false;
+    linesAutoStarted = false;
     avatarToastHidden = false;
-    if (db !== "local") showAvatarToast(false);
+    linesToastHidden = false;
+    if (db !== "local") {
+      showAvatarToast(false);
+      showLinesToast(false);
+    }
     clearDetail();
     refreshAll();
   }
@@ -189,6 +198,10 @@
     if (db === "local" && !avatarAutoStarted) {
       avatarAutoStarted = true;
       maybeStartAvatarFetch(true);
+    }
+    if (db === "local" && !linesAutoStarted) {
+      linesAutoStarted = true;
+      maybeStartWikiLinesFetch(true);
     }
   }
 
@@ -302,6 +315,112 @@
     } catch (e) {
       if (e.message !== "cancelled") {
         appendLog("头像补齐启动失败: " + (e.message || e), "err");
+      }
+    }
+  }
+
+  function showLinesToast(show) {
+    const el = $("lines-toast");
+    if (!el) return;
+    if (linesToastHidden && show) return;
+    el.hidden = !show;
+  }
+
+  function renderLinesToast(job) {
+    if (!job) return;
+    const title = $("lines-toast-title");
+    const sub = $("lines-toast-sub");
+    const fill = $("lines-toast-fill");
+    const counts = $("lines-toast-counts");
+    const btn = $("lines-toast-pause");
+    const total = job.total || 0;
+    const current = job.current || 0;
+    const pct = total ? Math.round((100 * current) / total) : 0;
+    fill.style.width = pct + "%";
+    counts.textContent =
+      `${current}/${total} · 成功 ${job.ok_count || 0} · 跳过 ${job.skip_count || 0} · 失败 ${job.fail_count || 0}`;
+
+    if (job.status === "paused") {
+      title.textContent = "台词按皮补齐 · 已暂停";
+      btn.textContent = "继续";
+      sub.textContent = job.current_item ? `当前：${job.current_item}` : "队列已暂停";
+    } else if (job.status === "done") {
+      title.textContent = "台词按皮补齐 · 完成";
+      btn.textContent = "暂停";
+      sub.textContent = "已写入 Wiki 库；请再「导入 Wiki」同步到自用库";
+    } else if (job.status === "error") {
+      title.textContent = "台词按皮补齐 · 失败";
+      sub.textContent = job.error || "未知错误";
+    } else {
+      title.textContent = "台词按皮补齐";
+      btn.textContent = "暂停";
+      sub.textContent = job.current_item
+        ? `正在抓取：${job.current_item}`
+        : "准备队列…";
+    }
+    showLinesToast(true);
+  }
+
+  async function pollLinesJob(jobId) {
+    linesJobId = jobId;
+    if (linesPollTimer) {
+      clearInterval(linesPollTimer);
+      linesPollTimer = null;
+    }
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const job = data.job || data;
+        renderLinesToast(job);
+        if (job.status === "done" || job.status === "error") {
+          clearInterval(linesPollTimer);
+          linesPollTimer = null;
+          if (job.status === "done") {
+            setTimeout(() => {
+              linesToastHidden = false;
+              showLinesToast(false);
+            }, 4200);
+          }
+        }
+      } catch (_e) {
+        /* ignore */
+      }
+    };
+    await tick();
+    linesPollTimer = setInterval(tick, 600);
+  }
+
+  async function maybeStartWikiLinesFetch(force) {
+    if (db !== "local") return;
+    try {
+      const jobsRes = await fetch("/api/jobs?limit=20");
+      if (jobsRes.ok) {
+        const payload = await jobsRes.json();
+        const active = (payload.jobs || []).find(
+          (j) =>
+            j.kind === "fetch-wiki-lines" &&
+            ["queued", "running", "paused"].includes(j.status)
+        );
+        if (active) {
+          linesToastHidden = false;
+          await pollLinesJob(active.id);
+          return;
+        }
+      }
+      if (!force) return;
+      const data = await rosterFetch("/api/roster/ops/fetch-wiki-lines", {
+        method: "POST",
+        body: { missing_only: true },
+      });
+      if (data.job_id) {
+        linesToastHidden = false;
+        await pollLinesJob(data.job_id);
+      }
+    } catch (e) {
+      if (e.message !== "cancelled") {
+        appendLog("台词按皮补齐启动失败: " + (e.message || e), "err");
       }
     }
   }
@@ -738,6 +857,10 @@
         avatarToastHidden = false;
         await pollAvatarJob(data.avatar_job_id);
       }
+      if (data.wiki_lines_job_id) {
+        linesToastHidden = false;
+        await pollLinesJob(data.wiki_lines_job_id);
+      }
       return data;
     } catch (e) {
       if (e.message === "cancelled") {
@@ -841,6 +964,27 @@
         if (data.job) renderAvatarToast(data.job);
       } catch (e) {
         appendLog("头像任务控制失败: " + (e.message || e), "err");
+      }
+    });
+
+    $("lines-toast-close")?.addEventListener("click", () => {
+      linesToastHidden = true;
+      showLinesToast(false);
+    });
+    $("lines-toast-pause")?.addEventListener("click", async () => {
+      if (!linesJobId) return;
+      const btn = $("lines-toast-pause");
+      const action = btn.textContent === "继续" ? "resume" : "pause";
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(linesJobId)}/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await res.json();
+        if (data.job) renderLinesToast(data.job);
+      } catch (e) {
+        appendLog("台词任务控制失败: " + (e.message || e), "err");
       }
     });
   }

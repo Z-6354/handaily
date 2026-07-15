@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Fetch BWIKI ship pages and fill lines_by_skin_json (skip if already present)."""
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import subprocess
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+from roster_db import repo_root
+
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 hanimport-wiki-lines/0.1"
+)
+_WIKI_API = "https://wiki.biligame.com/blhx/api.php"
+_REQUEST_DELAY = float(os.environ.get("BLHX_WIKI_DELAY_MS", "350")) / 1000.0
+
+
+def default_wiki_db() -> Path:
+    root = repo_root()
+    for rel in (
+        "mcp/blhx-wiki/data/blhx.sqlite",
+        "data/wiki/blhx.sqlite",
+    ):
+        p = root / rel
+        if p.is_file():
+            return p
+    return root / "mcp/blhx-wiki/data/blhx.sqlite"
+
+
+def ensure_lines_by_skin_column(wiki_db: Path) -> None:
+    conn = sqlite3.connect(str(wiki_db))
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(ships)")}
+        if "lines_by_skin_json" not in cols:
+            conn.execute(
+                "ALTER TABLE ships ADD COLUMN lines_by_skin_json TEXT NOT NULL DEFAULT '[]'"
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def _groups_nonempty(raw: str | None) -> bool:
+    try:
+        data = json.loads(raw or "[]")
+    except json.JSONDecodeError:
+        return False
+    return isinstance(data, list) and len(data) > 0
+
+
+def ship_has_lines_by_skin(
+    wiki_db: Path, *, wiki_title: str = "", name_zh: str = ""
+) -> bool:
+    if not wiki_db.is_file():
+        return False
+    keys = []
+    for k in (wiki_title, name_zh):
+        s = (k or "").strip()
+        if s and s not in keys:
+            keys.append(s)
+    if not keys:
+        return False
+    conn = sqlite3.connect(str(wiki_db))
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(ships)")}
+        if "lines_by_skin_json" not in cols:
+            return False
+        for key in keys:
+            row = conn.execute(
+                """
+                SELECT lines_by_skin_json FROM ships
+                WHERE wiki_title = ? OR display_name = ?
+                LIMIT 1
+                """,
+                (key, key),
+            ).fetchone()
+            if row and _groups_nonempty(row[0]):
+                return True
+    finally:
+        conn.close()
+    return False
+
+
+def list_missing_line_targets(
+    roster_conn: sqlite3.Connection, wiki_db: Path
+) -> list[dict[str, str]]:
+    ensure_lines_by_skin_column(wiki_db)
+    out: list[dict[str, str]] = []
+    for row in roster_conn.execute(
+        "SELECT id, name_zh, wiki_title FROM characters ORDER BY id"
+    ):
+        cid = str(row["id"])
+        name_zh = str(row["name_zh"] or "")
+        wiki_title = str(row["wiki_title"] or "")
+        if ship_has_lines_by_skin(wiki_db, wiki_title=wiki_title, name_zh=name_zh):
+            continue
+        page = wiki_title.strip() or name_zh.strip()
+        if not page:
+            continue
+        out.append({"id": cid, "name_zh": name_zh, "wiki_title": page})
+    return out
+
+
+def fetch_wiki_html(page_title: str, timeout: float = 45.0) -> str:
+    qs = urllib.parse.urlencode(
+        {
+            "action": "parse",
+            "page": page_title,
+            "prop": "text",
+            "format": "json",
+        }
+    )
+    url = f"{_WIKI_API}?{qs}"
+    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read().decode("utf-8", "replace")
+    data = json.loads(raw)
+    if data.get("error"):
+        raise RuntimeError(data["error"].get("info") or str(data["error"]))
+    html = (((data.get("parse") or {}).get("text") or {}).get("*")) or ""
+    if not html.strip():
+        raise RuntimeError(f"empty parse text for {page_title}")
+    return html
+
+
+def _find_tsx() -> list[str]:
+    root = repo_root() / "mcp" / "blhx-wiki"
+    if os.name == "nt":
+        cand = root / "node_modules" / ".bin" / "tsx.cmd"
+        if cand.is_file():
+            return [str(cand)]
+    cand = root / "node_modules" / ".bin" / "tsx"
+    if cand.is_file():
+        return [str(cand)]
+    return ["npx", "--yes", "tsx"]
+
+
+def parse_lines_via_node(html: str) -> dict[str, Any]:
+    script = (
+        repo_root()
+        / "mcp"
+        / "blhx-wiki"
+        / "scripts"
+        / "parse-ship-lines-cli.ts"
+    )
+    if not script.is_file():
+        raise FileNotFoundError(f"missing {script}")
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", suffix=".html", delete=False
+    ) as tmp:
+        tmp.write(html)
+        tmp_path = tmp.name
+    try:
+        cmd = [*_find_tsx(), str(script), tmp_path]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=str(script.parent.parent),
+            timeout=120,
+            shell=(os.name == "nt" and cmd[0].endswith(".cmd")),
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()[:500]
+            raise RuntimeError(f"parse-ship-lines failed: {err}")
+        return json.loads(proc.stdout)
+    finally:
+        try:
+            Path(tmp_path).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def save_ship_lines(
+    wiki_db: Path,
+    *,
+    wiki_title: str,
+    display_name: str,
+    groups: list,
+    lines: list,
+) -> None:
+    ensure_lines_by_skin_column(wiki_db)
+    conn = sqlite3.connect(str(wiki_db))
+    try:
+        groups_json = json.dumps(groups, ensure_ascii=False)
+        lines_json = json.dumps(lines, ensure_ascii=False)
+        row = conn.execute(
+            "SELECT wiki_title FROM ships WHERE wiki_title=? OR display_name=? LIMIT 1",
+            (wiki_title, display_name),
+        ).fetchone()
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        if row:
+            conn.execute(
+                """
+                UPDATE ships SET lines_by_skin_json=?, lines_json=?, fetched_at=?
+                WHERE wiki_title=?
+                """,
+                (groups_json, lines_json, now, row[0]),
+            )
+        else:
+            url = (
+                "https://wiki.biligame.com/blhx/"
+                + urllib.parse.quote(wiki_title)
+            )
+            conn.execute(
+                """
+                INSERT INTO ships(
+                  wiki_title, wiki_url, display_name, aliases_json,
+                  character_info_json, sections_json, lines_json, lines_by_skin_json,
+                  assets_json, persona_reference, html_hash, fetched_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    wiki_title,
+                    url,
+                    display_name or wiki_title,
+                    "[]",
+                    "[]",
+                    "[]",
+                    lines_json,
+                    groups_json,
+                    "[]",
+                    "",
+                    "",
+                    now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def fetch_one(ch: dict[str, str], *, wiki_db: Path | None = None) -> dict[str, Any]:
+    """Mirror avatar_fetch.fetch_one status shape: ok|skipped|error."""
+    wiki_db = wiki_db or default_wiki_db()
+    page = (ch.get("wiki_title") or ch.get("name_zh") or "").strip()
+    if not page:
+        return {"status": "skipped", "reason": "no wiki title"}
+    if ship_has_lines_by_skin(
+        wiki_db, wiki_title=page, name_zh=ch.get("name_zh") or ""
+    ):
+        return {"status": "skipped", "reason": "already has lines_by_skin"}
+    try:
+        time.sleep(_REQUEST_DELAY)
+        html = fetch_wiki_html(page)
+        parsed = parse_lines_via_node(html)
+        groups = parsed.get("groups") or []
+        lines = parsed.get("lines") or []
+        if not groups:
+            return {"status": "error", "error": "no line groups parsed"}
+        save_ship_lines(
+            wiki_db,
+            wiki_title=page,
+            display_name=ch.get("name_zh") or page,
+            groups=groups,
+            lines=lines,
+        )
+        return {
+            "status": "ok",
+            "groups": len(groups),
+            "lines": len(lines),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"status": "error", "error": str(exc)}
