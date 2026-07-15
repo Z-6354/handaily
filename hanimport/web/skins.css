@@ -1,0 +1,50 @@
+.skins-page {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 20px 48px;
+}
+
+.skins-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  align-items: flex-end;
+  margin: 16px 0 8px;
+}
+
+.skins-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.skins-filters input,
+.skins-filters select {
+  min-width: 160px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--hairline);
+  background: var(--bg);
+  color: var(--text);
+}
+
+.skins-meta {
+  margin: 8px 0 12px;
+}
+
+.skins-full-table {
+  margin-top: 0;
+}
+
+.skins-full-table tbody tr {
+  cursor: default;
+}
+
+.skins-pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}

@@ -5,6 +5,7 @@
     { key: "hub", href: "/", label: "概览" },
     { key: "unpack", href: "/unpack", label: "解包" },
     { key: "roster", href: "/roster", label: "角色库" },
+    { key: "skins", href: "/skins", label: "皮肤" },
   ];
 
   function navMarkup(active) {

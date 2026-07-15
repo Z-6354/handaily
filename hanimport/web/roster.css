@@ -443,6 +443,124 @@
   border-top: 1px solid var(--hairline);
 }
 
+.panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.text-link {
+  font-size: 0.85rem;
+  color: var(--text-secondary, #6e6e73);
+  text-decoration: none;
+}
+
+.text-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+.skin-table-wrap {
+  overflow-x: auto;
+  margin-top: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+}
+
+.skin-status-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+
+.skin-status-table th,
+.skin-status-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+  vertical-align: top;
+}
+
+.skin-status-table th {
+  font-weight: 600;
+  color: var(--text-secondary, #6e6e73);
+  background: var(--bg);
+}
+
+.skin-status-table tbody tr {
+  cursor: pointer;
+}
+
+.skin-status-table tbody tr:hover {
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.skin-status-table tbody tr.selected {
+  background: rgba(0, 113, 227, 0.08);
+}
+
+.skin-status-table .id {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--text-secondary, #6e6e73);
+}
+
+.def-tag {
+  margin-left: 6px;
+  font-size: 0.75rem;
+  color: var(--accent, #0071e3);
+}
+
+.skin-pick {
+  color: var(--text-secondary, #6e6e73);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.probe-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+}
+
+.probe-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: #86868b;
+}
+
+.probe-ready .probe-dot {
+  background: #34c759;
+}
+
+.probe-missing .probe-dot {
+  background: #ff9f0a;
+}
+
+.probe-unbound .probe-dot {
+  background: #c7c7cc;
+}
+
+.probe-label {
+  display: inline;
+  font-size: 0.82rem;
+}
+
+.probe-id {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-secondary, #6e6e73);
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .log-panel {
   border-radius: 14px;
   box-shadow: var(--shadow-card);

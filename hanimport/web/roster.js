@@ -426,21 +426,45 @@
     }
   }
 
+  function statusDot(kind, status, idHint) {
+    const label =
+      status === "ready" ? "就绪" : status === "missing" ? "缺文件" : "未绑定";
+    const tip = idHint ? `${label} · ${idHint}` : label;
+    return (
+      `<span class="probe-cell probe-${escapeHtml(status || "unbound")}" title="${escapeHtml(tip)}">` +
+      `<span class="probe-dot" aria-hidden="true"></span>` +
+      `<span class="probe-label">${escapeHtml(label)}</span>` +
+      (idHint
+        ? `<code class="probe-id">${escapeHtml(idHint)}</code>`
+        : "") +
+      `</span>`
+    );
+  }
+
   function renderSkins(skins) {
     const list = $("skin-list");
     list.innerHTML = "";
     $("skin-form").hidden = true;
+    const link = $("link-all-skins");
+    if (link && selectedCharId) {
+      link.href =
+        `/skins?db=${encodeURIComponent(db)}&character_id=${encodeURIComponent(selectedCharId)}`;
+    }
     for (const sk of skins) {
-      const li = document.createElement("li");
-      li.dataset.id = sk.id;
-      if (sk.id === selectedSkinId) li.classList.add("selected");
-      const def = sk.is_default ? " · 默认" : "";
-      li.innerHTML =
-        `<div class="id">${escapeHtml(sk.id)}${def}</div>` +
-        `<div>${escapeHtml(sk.name_zh || "")}` +
-        ` · ${enDisplay(sk.name_en, sk.id)}</div>`;
-      li.addEventListener("click", () => selectSkin(sk));
-      list.appendChild(li);
+      const tr = document.createElement("tr");
+      tr.dataset.id = sk.id;
+      if (sk.id === selectedSkinId) tr.classList.add("selected");
+      const def = sk.is_default ? '<span class="def-tag">默认</span>' : "";
+      tr.innerHTML =
+        `<td class="skin-name">` +
+        `<div class="id">${escapeHtml(sk.id)}</div>` +
+        `<div>${escapeHtml(sk.name_zh || "")}${def}</div>` +
+        `</td>` +
+        `<td>${statusDot("pet", sk.pet_status, sk.pet_model_id || "")}</td>` +
+        `<td>${statusDot("km", sk.kanmusu_status, sk.kanmusu_dir || "")}</td>` +
+        `<td class="skin-pick">编辑</td>`;
+      tr.addEventListener("click", () => selectSkin(sk));
+      list.appendChild(tr);
     }
   }
 
@@ -449,7 +473,7 @@
     selectedSkinId = sk.id;
     selectedLineId = null;
     creatingLine = false;
-    document.querySelectorAll("#skin-list li").forEach((el) => {
+    document.querySelectorAll("#skin-list tr").forEach((el) => {
       el.classList.toggle("selected", el.dataset.id === sk.id);
     });
     $("skin-form").hidden = false;
@@ -484,7 +508,7 @@
     $("s-default").checked = false;
     $("btn-new-line").disabled = true;
     clearLinePanel();
-    document.querySelectorAll("#skin-list li.selected").forEach((el) => el.classList.remove("selected"));
+    document.querySelectorAll("#skin-list tr.selected").forEach((el) => el.classList.remove("selected"));
   }
 
   function skinPayload() {
@@ -790,5 +814,11 @@
   if (window.HanShell) HanShell.mount({ active: "roster" });
 
   bind();
-  setDb("local");
+  const boot = new URLSearchParams(location.search);
+  const bootDb = boot.get("db") === "bundled" ? "bundled" : "local";
+  const bootChar = (boot.get("character") || "").trim();
+  setDb(bootDb);
+  if (bootChar) {
+    selectCharacter(bootChar).catch((e) => appendLog(String(e.message || e), "err"));
+  }
 })();

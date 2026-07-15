@@ -96,9 +96,24 @@
         <div class="skins-block" id="skins-block" hidden>
           <div class="panel-head">
             <h2>皮肤</h2>
-            <button type="button" id="btn-new-skin">新建皮肤</button>
+            <div class="panel-head-actions">
+              <a id="link-all-skins" class="text-link" href="/skins">在皮肤页查看</a>
+              <button type="button" id="btn-new-skin">新建皮肤</button>
+            </div>
           </div>
-          <ul id="skin-list" class="item-list compact"></ul>
+          <div class="skin-table-wrap">
+            <table class="skin-status-table" aria-label="皮肤双列状态">
+              <thead>
+                <tr>
+                  <th>皮肤</th>
+                  <th>桌宠</th>
+                  <th>舰娘</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="skin-list"></tbody>
+            </table>
+          </div>
           <form id="skin-form" class="form nested" hidden>
             <label>皮肤 id
               <input id="s-id" type="text" />
