@@ -19,9 +19,14 @@ async function api(path, body) {
     headers: body ? { "Content-Type": "application/json" } : undefined,
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await res.json();
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(res.statusText || `HTTP ${res.status}`);
+  }
   if (!res.ok || data.ok === false) {
-    throw new Error(data.error || res.statusText);
+    throw new Error(data.error || res.statusText || `HTTP ${res.status}`);
   }
   return data;
 }
@@ -40,7 +45,9 @@ function renderStatus(s) {
     `默认 Live2D 输出: ${s.default_live2d}`,
     `默认模型输出: ${s.default_model_unpacked}`,
   ];
-  $("status-body").innerHTML = lines.map((l) => `<div>${l}</div>`).join("");
+  $("status-body").innerHTML = lines
+    .map((l) => `<div>${escapeHtml(l)}</div>`)
+    .join("");
 }
 
 function escapeHtml(s) {
@@ -121,11 +128,22 @@ function bundlesFromJobResults(results) {
 }
 
 async function pollJob(jobId, onTick) {
+  const started = Date.now();
+  const maxMs = 6 * 60 * 60 * 1000; // 6h hard cap for local batches
   for (;;) {
-    const data = await api(`/api/jobs/${jobId}`);
+    if (Date.now() - started > maxMs) {
+      throw new Error("任务轮询超时（超过 6 小时）");
+    }
+    const data = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
     const job = data.job;
+    if (!job) throw new Error("job not found");
     onTick(job);
     if (job.status === "done" || job.status === "error") return job;
+    const updated = Number(job.updated_at) || 0;
+    // Worker crashed / hung without terminal status
+    if (updated && Date.now() / 1000 - updated > 600) {
+      throw new Error("任务超过 10 分钟无更新，可能已中断 — 可重新开始解包");
+    }
     await new Promise((r) => setTimeout(r, 400));
   }
 }
@@ -260,25 +278,33 @@ async function resumeJobFromUrl() {
   if (!jobId) return;
 
   const banner = $("job-banner");
-  let res;
+  let job;
   try {
-    res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+    const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+    if (!res.ok) {
+      if (banner) {
+        banner.textContent = "任务不存在或已清理";
+        banner.hidden = false;
+      }
+      return;
+    }
+    const data = await res.json();
+    job = data.job;
+    if (!job) {
+      if (banner) {
+        banner.textContent = "任务不存在或已清理";
+        banner.hidden = false;
+      }
+      return;
+    }
   } catch (_e) {
     if (banner) {
-      banner.textContent = "任务不存在或已清理";
-      banner.hidden = false;
-    }
-    return;
-  }
-  if (!res.ok) {
-    if (banner) {
-      banner.textContent = "任务不存在或已清理";
+      banner.textContent = "无法连接服务器，请确认开发服已启动";
       banner.hidden = false;
     }
     return;
   }
 
-  const { job } = await res.json();
   setJobBusy(true);
   $("progress-wrap").hidden = false;
   clearLog();
@@ -288,8 +314,33 @@ async function resumeJobFromUrl() {
     renderProgress(j);
     appendLogTail(j, logState);
   };
+  onTick(job);
+
   try {
-    await pollJob(jobId, onTick);
+    if (job.status === "done" || job.status === "error") {
+      if (job.status === "error") {
+        appendLog(job.error || "任务失败", "err");
+      } else {
+        appendLog(
+          `完成 ok=${job.ok_count || 0} fail=${job.fail_count || 0}`,
+          job.fail_count ? "err" : "ok",
+        );
+      }
+      const bundles = bundlesFromJobResults(job.results);
+      if (bundles.length) renderScan({ bundles });
+      return;
+    }
+    const finished = await pollJob(jobId, onTick);
+    if (finished.status === "error") {
+      appendLog(finished.error || "任务失败", "err");
+    } else {
+      appendLog(
+        `完成 ok=${finished.ok_count || 0} fail=${finished.fail_count || 0}`,
+        finished.fail_count ? "err" : "ok",
+      );
+    }
+    const bundles = bundlesFromJobResults(finished.results);
+    if (bundles.length) renderScan({ bundles });
   } catch (e) {
     appendLog(e.message, "err");
   } finally {

@@ -32,26 +32,34 @@
     });
   }
 
+  function kindLabel(kind) {
+    if (kind === "unpack") return "解包";
+    if (kind === "config") return "配置";
+    return kind || "";
+  }
+
   function renderEnv(st) {
     var el = document.getElementById("env-summary");
     if (!el) return;
     var lines = [
-      "Python " + st.python,
+      "Python " + (st.python || ""),
       st.unitypy ? "UnityPy 已安装" : "UnityPy 未安装 — 请运行「安装依赖.bat」",
-      "仓库 " + st.repo_root,
+      "仓库 " + (st.repo_root || ""),
     ];
     el.innerHTML = lines
       .map(function (line) {
         return "<div>" + escapeHtml(line) + "</div>";
       })
       .join("");
-    if (!st.unitypy) el.classList.add("warn-text");
+    el.classList.toggle("warn-text", !st.unitypy);
   }
 
   function renderJobs(data) {
     var el = document.getElementById("recent-jobs");
     if (!el) return;
-    var jobs = (data && data.jobs) || [];
+    var jobs = ((data && data.jobs) || []).filter(function (job) {
+      return job && (job.kind === "unpack" || job.kind === "config");
+    });
     if (!jobs.length) {
       el.innerHTML =
         '<p class="empty-state">尚无解包任务。<a href="/unpack">前往解包</a></p>';
@@ -75,7 +83,7 @@
           escapeHtml(job.id) +
           "</span>" +
           '<span class="job-kind">' +
-          escapeHtml(job.kind || "") +
+          escapeHtml(kindLabel(job.kind)) +
           "</span>" +
           '<span class="job-status ' +
           statusClass(job.status) +
@@ -101,16 +109,23 @@
     try {
       var stRes = await fetch("/api/status");
       if (!stRes.ok) throw new Error("status " + stRes.status);
-      renderEnv(await stRes.json());
+      var st = await stRes.json();
+      if (st.ok === false) throw new Error(st.error || "status failed");
+      renderEnv(st);
     } catch (_err) {
       var env = document.getElementById("env-summary");
-      if (env) env.textContent = "无法读取环境状态";
+      if (env) {
+        env.textContent = "无法读取环境状态";
+        env.classList.add("warn-text");
+      }
     }
 
     try {
       var jobsRes = await fetch("/api/jobs?limit=10");
       if (!jobsRes.ok) throw new Error("jobs " + jobsRes.status);
-      renderJobs(await jobsRes.json());
+      var jobsPayload = await jobsRes.json();
+      if (jobsPayload.ok === false) throw new Error(jobsPayload.error || "jobs failed");
+      renderJobs(jobsPayload);
     } catch (_err) {
       var recent = document.getElementById("recent-jobs");
       if (recent) recent.textContent = "无法加载最近任务";

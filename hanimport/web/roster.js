@@ -18,6 +18,7 @@
   const logEl = $("log");
 
   function appendLog(msg, cls) {
+    if (!logEl) return;
     const line = document.createElement("div");
     if (cls) line.className = cls;
     line.textContent = typeof msg === "string" ? msg : JSON.stringify(msg, null, 2);

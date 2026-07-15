@@ -598,12 +598,12 @@ class Handler(BaseHTTPRequestHandler):
         if self._dispatch_roster("GET"):
             return
 
-        path, _query = self._parse_path_query()
+        path, query = self._parse_path_query()
         if path == "/api/jobs":
-            raw = _query.get("limit", "20")
+            raw = query.get("limit", "20")
             try:
                 lim = int(raw)
-            except ValueError:
+            except (TypeError, ValueError):
                 lim = 20
             self._send_json(200, {"ok": True, "jobs": list_jobs(lim)})
             return

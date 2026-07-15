@@ -1,7 +1,6 @@
 /* Shared app chrome — requires design-system/tokens.css loaded first */
 
 body {
-  padding-top: var(--nav-height);
   margin: 0;
   font-family: var(--font-ui);
   background: var(--bg);
