@@ -1,7 +1,7 @@
 # hanimport 苹果风枢纽重做 — 设计
 
 **日期**: 2026-07-15  
-**状态**: 待用户审阅（brainstorm 已逐节批准）  
+**状态**: 已实现  
 **来源**: 用户选择 — 大幅重做（C）+ 中心枢纽（1）+ 浅色（A）+ 参考 [apple.com/design](https://www.apple.com/design/)（1）+ 实现方案 A（多页壳层 + 抽 token）
 
 **相关**: 角色库功能语义仍以 `2026-07-15-hanimport-roster-browser-design.md` 为准；解包异步任务以 `2026-07-15-hanimport-unpack-jobs-design.md` 为准。**本文件覆盖二者之上的信息架构与视觉壳**；其中路由表以本文件为准（`/` 改为枢纽）。
