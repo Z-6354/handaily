@@ -294,9 +294,27 @@ def _wiki_skin_slots(row: sqlite3.Row, ship_cols: set[str]) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _delete_skins_not_in(
+    conn: sqlite3.Connection, cid: str, keep_ids: set[str]
+) -> int:
+    """删除该角色不在 keep 集合内的皮肤行（台词经 FK CASCADE）。"""
+    rows = conn.execute(
+        "SELECT id FROM skins WHERE character_id = ?", (cid,)
+    ).fetchall()
+    deleted = 0
+    for (sid,) in rows:
+        if sid in keep_ids:
+            continue
+        conn.execute("DELETE FROM skins WHERE id = ?", (sid,))
+        deleted += 1
+    return deleted
+
+
 def _upsert_skins_from_slots(
     conn: sqlite3.Connection, cid: str, slots: list[dict]
-) -> None:
+) -> set[str]:
+    """按 Wiki TabContainer 槽位 upsert 皮肤，并删除旧错误项。返回保留的 skin id。"""
+    keep: set[str] = set()
     for slot in slots:
         if not isinstance(slot, dict):
             continue
@@ -321,6 +339,7 @@ def _upsert_skins_from_slots(
             is_default = False
             name_zh = label or key
             skin_index = sort_order
+        keep.add(sid)
         meta_obj: dict = {
             "slot_key": key,
             "lines_import": {
@@ -348,6 +367,10 @@ def _upsert_skins_from_slots(
             },
             replace_lines=False,
         )
+    # 仅在解析出至少一个权威皮肤时整表替换，避免空 keep 误删全量
+    if keep:
+        _delete_skins_not_in(conn, cid, keep)
+    return keep
 
 
 def _apply_lines_import(
@@ -911,9 +934,12 @@ def run_import_wiki(
             lines_raw = []
         slots = _wiki_skin_slots(row, ship_cols)
         if slots:
+            # 权威皮肤清单：整角色替换（删除以往错误/残留皮肤），非纯增量
             _upsert_skins_from_slots(conn, cid, slots)
         else:
+            keep_legacy: set[str] = set()
             default_skin_id = skin_db_id(cid, "default")
+            keep_legacy.add(default_skin_id)
             upsert_skin(
                 conn,
                 {
@@ -940,6 +966,7 @@ def run_import_wiki(
                     if not title or title in ("默认",) or "改造" in title:
                         continue
                     sid = f"{cid}-skin{i + 1}"
+                    keep_legacy.add(sid)
                     upsert_skin(
                         conn,
                         {
@@ -956,6 +983,8 @@ def run_import_wiki(
                         },
                         replace_lines=False,
                     )
+            if keep_legacy:
+                _delete_skins_not_in(conn, cid, keep_legacy)
 
         groups = _wiki_line_groups(row, ship_cols)
         _apply_lines_import(conn, cid, groups, lines_raw, lines_stats)
