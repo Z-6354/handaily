@@ -4,7 +4,11 @@
   let db = "local";
   let metaPath = "";
   let offset = 0;
-  const limit = 50;
+  let limit = 48;
+  let avatarJobId = null;
+  let avatarPollTimer = null;
+  let avatarToastHidden = false;
+  let avatarAutoStarted = false;
   let total = 0;
   let selectedCharId = null;
   let selectedSkinId = null;
@@ -89,6 +93,9 @@
     selectedSkinId = null;
     selectedLineId = null;
     creatingChar = false;
+    avatarAutoStarted = false;
+    avatarToastHidden = false;
+    if (db !== "local") showAvatarToast(false);
     clearDetail();
     refreshAll();
   }
@@ -148,22 +155,155 @@
     total = data.total || 0;
     const list = $("char-list");
     list.innerHTML = "";
+    let missing = 0;
     for (const ch of data.characters || []) {
-      const li = document.createElement("li");
-      li.dataset.id = ch.id;
-      if (ch.id === selectedCharId) li.classList.add("selected");
-      li.innerHTML =
-        `<div class="id">${escapeHtml(ch.id)}</div>` +
-        `<div>${escapeHtml(ch.name_zh || "")}` +
-        ` · ${enDisplay(ch.name_en, ch.id)}</div>`;
-      li.addEventListener("click", () => selectCharacter(ch.id));
-      list.appendChild(li);
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "char-card";
+      card.dataset.id = ch.id;
+      card.setAttribute("role", "listitem");
+      if (ch.id === selectedCharId) card.classList.add("selected");
+      const nameZh = ch.name_zh || ch.id;
+      const initial = String(nameZh).trim().charAt(0) || "?";
+      if (ch.avatar_url) {
+        card.innerHTML =
+          `<img class="char-av" src="${escapeHtml(ch.avatar_url)}" alt="" loading="lazy" />` +
+          `<div class="char-card-name">${escapeHtml(nameZh)}</div>` +
+          `<div class="char-card-id">${escapeHtml(ch.id)}</div>`;
+      } else {
+        missing += 1;
+        card.innerHTML =
+          `<div class="char-av char-av-fallback" aria-hidden="true">${escapeHtml(initial)}</div>` +
+          `<div class="char-card-name">${escapeHtml(nameZh)}</div>` +
+          `<div class="char-card-id">${escapeHtml(ch.id)}</div>`;
+      }
+      card.addEventListener("click", () => selectCharacter(ch.id));
+      list.appendChild(card);
     }
     $("pager-label").textContent = total
       ? `${offset + 1}–${Math.min(offset + limit, total)} / ${total}`
       : "0";
     $("btn-prev").disabled = offset <= 0;
     $("btn-next").disabled = offset + limit >= total;
+
+    if (db === "local" && !avatarAutoStarted) {
+      avatarAutoStarted = true;
+      maybeStartAvatarFetch(true);
+    }
+  }
+
+  function showAvatarToast(show) {
+    const el = $("avatar-toast");
+    if (!el) return;
+    if (avatarToastHidden && show) return;
+    el.hidden = !show;
+  }
+
+  function renderAvatarToast(job) {
+    if (!job) return;
+    const title = $("avatar-toast-title");
+    const sub = $("avatar-toast-sub");
+    const fill = $("avatar-toast-fill");
+    const counts = $("avatar-toast-counts");
+    const btn = $("avatar-toast-pause");
+    const total = job.total || 0;
+    const current = job.current || 0;
+    const pct = total ? Math.round((100 * current) / total) : 0;
+    fill.style.width = pct + "%";
+    counts.textContent =
+      `${current}/${total} · 成功 ${job.ok_count || 0} · 跳过 ${job.skip_count || 0} · 失败 ${job.fail_count || 0}`;
+
+    if (job.status === "paused") {
+      title.textContent = "头像补齐 · 已暂停";
+      btn.textContent = "继续";
+      sub.textContent = job.current_item ? `当前：${job.current_item}` : "队列已暂停";
+    } else if (job.status === "done") {
+      title.textContent = "补齐完成";
+      btn.hidden = true;
+      sub.textContent = `成功 ${job.ok_count || 0} · 跳过 ${job.skip_count || 0} · 失败 ${job.fail_count || 0}`;
+    } else if (job.status === "error") {
+      title.textContent = "头像补齐失败";
+      btn.hidden = true;
+      sub.textContent = job.error || "未知错误";
+    } else {
+      title.textContent = "头像补齐";
+      btn.hidden = false;
+      btn.textContent = "暂停";
+      sub.textContent = job.current_item
+        ? `当前：${job.current_item}`
+        : "正在从 Wiki 下载到本地…";
+    }
+    showAvatarToast(true);
+  }
+
+  async function pollAvatarJob(jobId) {
+    avatarJobId = jobId;
+    if (avatarPollTimer) clearInterval(avatarPollTimer);
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        const job = data.job;
+        if (!job) return;
+        renderAvatarToast(job);
+        if (job.status === "done" || job.status === "error") {
+          clearInterval(avatarPollTimer);
+          avatarPollTimer = null;
+          await loadCharacters();
+          if (job.status === "done") {
+            setTimeout(() => {
+              avatarToastHidden = false;
+              showAvatarToast(false);
+            }, 3200);
+          }
+        } else if (
+          job.ok_count > 0 &&
+          job.current &&
+          job.current % 8 === 0
+        ) {
+          // refresh grid occasionally so new faces appear
+          await loadCharacters();
+        }
+      } catch (_e) {
+        /* ignore transient */
+      }
+    };
+    await tick();
+    avatarPollTimer = setInterval(tick, 500);
+  }
+
+  async function maybeStartAvatarFetch(force) {
+    if (db !== "local") return;
+    try {
+      const jobsRes = await fetch("/api/jobs?limit=20");
+      if (jobsRes.ok) {
+        const payload = await jobsRes.json();
+        const active = (payload.jobs || []).find(
+          (j) =>
+            j.kind === "fetch-avatars" &&
+            ["queued", "running", "paused"].includes(j.status)
+        );
+        if (active) {
+          avatarToastHidden = false;
+          await pollAvatarJob(active.id);
+          return;
+        }
+      }
+      if (!force) return;
+      const data = await rosterFetch("/api/roster/ops/fetch-avatars", {
+        method: "POST",
+        body: { missing_only: true },
+      });
+      if (data.job_id) {
+        avatarToastHidden = false;
+        await pollAvatarJob(data.job_id);
+      }
+    } catch (e) {
+      if (e.message !== "cancelled") {
+        appendLog("头像补齐启动失败: " + (e.message || e), "err");
+      }
+    }
   }
 
   async function selectCharacter(id) {
@@ -536,6 +676,10 @@
       appendLog(`${name} 完成 ` + summarize(data), "ok");
       await refreshAll();
       if (selectedCharId) await loadCharacterDetail(selectedCharId);
+      if (data.avatar_job_id) {
+        avatarToastHidden = false;
+        await pollAvatarJob(data.avatar_job_id);
+      }
       return data;
     } catch (e) {
       if (e.message === "cancelled") {
@@ -619,6 +763,27 @@
     $("btn-publish").addEventListener("click", onPublish);
     $("btn-fill-english").addEventListener("click", () => {
       runOp("补齐空英文名", "/api/roster/ops/fill-english", {});
+    });
+
+    $("avatar-toast-close")?.addEventListener("click", () => {
+      avatarToastHidden = true;
+      showAvatarToast(false);
+    });
+    $("avatar-toast-pause")?.addEventListener("click", async () => {
+      if (!avatarJobId) return;
+      const btn = $("avatar-toast-pause");
+      const action = btn.textContent === "继续" ? "resume" : "pause";
+      try {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(avatarJobId)}/${action}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        const data = await res.json();
+        if (data.job) renderAvatarToast(data.job);
+      } catch (e) {
+        appendLog("头像任务控制失败: " + (e.message || e), "err");
+      }
     });
   }
 

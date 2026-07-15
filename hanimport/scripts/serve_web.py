@@ -18,8 +18,17 @@ SCRIPTS_DIR = ROOT / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from job_store import append_log, create_job, get_job, list_jobs, update_job  # noqa: E402
+from job_store import (  # noqa: E402
+    append_log,
+    create_job,
+    get_job,
+    list_jobs,
+    request_pause,
+    request_resume,
+    update_job,
+)
 import roster_api  # noqa: E402
+from avatar_fetch import is_safe_character_id, resolve_avatar_file  # noqa: E402
 
 WEB_DIR = ROOT / "web"
 UNPACK_SCRIPT = SCRIPTS_DIR / "unpack_bundle.py"
@@ -625,8 +634,12 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/jobs/"):
-            jid = path[len("/api/jobs/") :].strip("/")
-            if not jid or "/" in jid:
+            rest = path[len("/api/jobs/") :].strip("/")
+            if "/" in rest:
+                self._send_json(404, {"ok": False, "error": "job not found"})
+                return
+            jid = rest
+            if not jid:
                 self._send_json(404, {"ok": False, "error": "job not found"})
                 return
             snap = get_job(jid)
@@ -636,7 +649,36 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "job": snap})
             return
 
+        if path.startswith("/avatars/"):
+            self._serve_avatar(path)
+            return
+
         self._serve_static(path)
+
+    def _serve_avatar(self, path: str) -> None:
+        cid = path[len("/avatars/") :].split("?", 1)[0].strip("/")
+        if not is_safe_character_id(cid) or "/" in cid or "\\" in cid or ".." in cid:
+            self.send_error(404)
+            return
+        file_path = resolve_avatar_file(cid)
+        if not file_path:
+            self.send_error(404)
+            return
+        content = file_path.read_bytes()
+        ctype = "application/octet-stream"
+        suf = file_path.suffix.lower()
+        if suf in (".jpg", ".jpeg"):
+            ctype = "image/jpeg"
+        elif suf == ".png":
+            ctype = "image/png"
+        elif suf == ".webp":
+            ctype = "image/webp"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.end_headers()
+        self.wfile.write(content)
 
     def do_POST(self) -> None:
         if self._dispatch_roster("POST"):
@@ -658,6 +700,21 @@ class Handler(BaseHTTPRequestHandler):
             jid = start_config_job(body)
             self._send_json(200, {"ok": True, "job_id": jid})
             return
+
+        m_pause = path.endswith("/pause") or path.endswith("/resume")
+        if path.startswith("/api/jobs/") and m_pause:
+            parts = path.strip("/").split("/")
+            # api jobs {id} pause|resume
+            if len(parts) == 4 and parts[0] == "api" and parts[1] == "jobs":
+                jid = parts[2]
+                action = parts[3]
+                ok = request_pause(jid) if action == "pause" else request_resume(jid)
+                if not ok:
+                    self._send_json(404, {"ok": False, "error": "job not found or not pausable"})
+                    return
+                snap = get_job(jid)
+                self._send_json(200, {"ok": True, "job": snap})
+                return
 
         if path == "/api/scan":
             input_raw = (body.get("input") or "").strip()

@@ -43,7 +43,7 @@
           <button type="button" id="btn-new-char" class="primary">新建</button>
         </div>
         <input id="char-search" type="text" placeholder="搜索 id / 中文 / 英文" />
-        <ul id="char-list" class="item-list"></ul>
+        <div id="char-list" class="char-grid" role="list"></div>
         <div class="pager">
           <button type="button" id="btn-prev" disabled>上一页</button>
           <span id="pager-label" class="muted"></span>
@@ -59,7 +59,7 @@
             <button type="button" id="btn-del-char" disabled>删除</button>
           </div>
         </div>
-        <div id="char-empty" class="muted placeholder">选择左侧角色，或点「新建」</div>
+        <div id="char-empty" class="muted placeholder">点左侧头像卡片查看详情，或点「新建」</div>
         <form id="char-form" class="form" hidden>
           <label>id（创建后不可改）
             <input id="f-id" type="text" autocomplete="off" />
@@ -166,6 +166,22 @@
       <pre id="log"></pre>
     </section>
   </div>
+
+  <aside id="avatar-toast" class="avatar-toast" hidden aria-live="polite">
+    <div class="avatar-toast-head">
+      <div>
+        <div id="avatar-toast-title" class="avatar-toast-title">头像补齐</div>
+        <div id="avatar-toast-sub" class="avatar-toast-sub muted"></div>
+      </div>
+      <button type="button" id="avatar-toast-close" class="avatar-toast-x" aria-label="隐藏">✕</button>
+    </div>
+    <div class="avatar-toast-bar"><div id="avatar-toast-fill"></div></div>
+    <div class="avatar-toast-meta">
+      <span id="avatar-toast-counts" class="muted"></span>
+      <button type="button" id="avatar-toast-pause" class="avatar-toast-btn">暂停</button>
+    </div>
+  </aside>
+
   <script src="/shell.js"></script>
   <script src="/roster.js"></script>
 </body>

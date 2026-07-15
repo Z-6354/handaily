@@ -1,7 +1,7 @@
 # hanimport 角色库 Wiki 式头像预览 — 设计
 
 **日期**: 2026-07-15  
-**状态**: 待用户审阅（brainstorm 已批准）  
+**状态**: 已实现（执行中可测）  
 **来源**: 用户选择 — 本地落盘 C · 网格+详情混合 3 · 打开页自动补齐 C · 实现方案 A · **通知式进度（非模态）+ 暂停 · 与主流程解耦**；并强调浮层 UI 品质
 
 **相关**: 角色库 CRUD 仍以 `2026-07-15-hanimport-roster-browser-design.md` 为准；外壳视觉以 `2026-07-15-hanimport-apple-hub-redesign-design.md` 为准。

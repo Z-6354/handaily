@@ -7,6 +7,7 @@ from typing import Any
 
 _lock = threading.Lock()
 _JOBS: dict[str, dict[str, Any]] = {}
+_PAUSE: set[str] = set()
 _LOG_MAX = 200
 
 
@@ -32,13 +33,58 @@ def create_job(kind: str) -> str:
             "current_item": "",
             "ok_count": 0,
             "fail_count": 0,
+            "skip_count": 0,
             "log_tail": [],
             "error": None,
             "results": [],
             "created_at": now,
             "updated_at": now,
         }
+        _PAUSE.discard(jid)
     return jid
+
+
+def request_pause(job_id: str) -> bool:
+    with _lock:
+        j = _JOBS.get(job_id)
+        if not j:
+            return False
+        if j["status"] not in ("queued", "running", "paused"):
+            return False
+        _PAUSE.add(job_id)
+        j["status"] = "paused"
+        j["updated_at"] = time.time()
+        return True
+
+
+def request_resume(job_id: str) -> bool:
+    with _lock:
+        j = _JOBS.get(job_id)
+        if not j:
+            return False
+        _PAUSE.discard(job_id)
+        if j["status"] == "paused":
+            j["status"] = "running"
+            j["updated_at"] = time.time()
+        return True
+
+
+def is_pause_requested(job_id: str) -> bool:
+    with _lock:
+        return job_id in _PAUSE
+
+
+def find_active_job(kind: str) -> dict[str, Any] | None:
+    with _lock:
+        items = [
+            j
+            for j in _JOBS.values()
+            if j.get("kind") == kind and j.get("status") in ("queued", "running", "paused")
+        ]
+        if not items:
+            return None
+        items.sort(key=lambda j: j["updated_at"], reverse=True)
+        return _snapshot(items[0])
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:

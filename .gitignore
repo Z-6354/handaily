@@ -58,6 +58,8 @@ hanpet/src-tauri/gen/
 /data/roster/*.sqlite
 /data/roster/*.sqlite-*
 /data/roster/audio/
+/data/roster/avatars/*
+!/data/roster/avatars/.gitkeep
 
 # hanimport local bundle fixtures (large binaries)
 hanimport/fixtures/**

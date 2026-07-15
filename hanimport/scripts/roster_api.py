@@ -18,9 +18,12 @@ from roster_db import (
     upsert_character,
     upsert_skin,
 )
+from avatar_fetch import avatar_public_url
 
 WRITE_METHODS = frozenset({"POST", "PUT", "DELETE", "PATCH"})
-LOCAL_ONLY_OPS = frozenset({"import-wiki", "sync-appdata", "publish-bundled"})
+LOCAL_ONLY_OPS = frozenset(
+    {"import-wiki", "sync-appdata", "publish-bundled", "fetch-avatars"}
+)
 
 
 def resolve_path(db: str) -> Path:
@@ -115,10 +118,15 @@ def _list_characters(db: str, query: dict) -> tuple[int, dict]:
                 (limit, offset),
             ).fetchall()
             total = conn.execute("SELECT count(*) FROM characters").fetchone()[0]
+        characters = []
+        for r in rows:
+            d = _row_to_dict(r)
+            d["avatar_url"] = avatar_public_url(str(d.get("id") or ""))
+            characters.append(d)
         return 200, {
             "ok": True,
             "db": db,
-            "characters": [_row_to_dict(r) for r in rows],
+            "characters": characters,
             "total": total,
             "offset": offset,
             "limit": limit,
@@ -423,18 +431,24 @@ def _ops_local(
     op: str, body: dict
 ) -> tuple[int, dict]:
     if op == "import-wiki":
+        only = body.get("ids") or body.get("character_id") or body.get("only_ids")
         result = run_import_wiki(
             db=Path(body["db_path"]) if body.get("db_path") else None,
             wiki_db=Path(body["wiki_db"]) if body.get("wiki_db") else None,
             unpacked=Path(body["unpacked"]) if body.get("unpacked") else None,
             en_map=Path(body["en_map"]) if body.get("en_map") else None,
+            only_ids=only,
+            scope=body.get("scope") or "all",
         )
     elif op == "sync-appdata":
+        # body.replace 默认 True：导入到桌宠时只用自用库角色，清掉 AppData 里几百个历史 wiki 条目
+        replace = True if "replace" not in body else bool(body.get("replace"))
         result = run_sync_appdata(
             db=Path(body["db_path"]) if body.get("db_path") else None,
             data_dir=Path(body["data_dir"]) if body.get("data_dir") else None,
             ids=body.get("ids") or "",
             force_lines=bool(body.get("force_lines")),
+            replace=replace,
         )
     elif op == "publish-bundled":
         # publish always needs an explicit confirm (writes bundled preview)
@@ -444,9 +458,30 @@ def _ops_local(
             db=Path(body["db_path"]) if body.get("db_path") else None,
             ids=body.get("ids") or "",
         )
+    elif op == "fetch-avatars":
+        from avatar_jobs import start_fetch_avatars_job
+
+        jid = start_fetch_avatars_job(body)
+        return 200, {"ok": True, "job_id": jid}
     else:
         return 404, {"ok": False, "error": f"unknown op: {op}"}
     code = 200 if result.get("ok") else 400
+    # After wiki import, enqueue avatar fetch for local DB
+    if op == "import-wiki" and result.get("ok"):
+        try:
+            from avatar_jobs import start_fetch_avatars_job
+
+            jid = start_fetch_avatars_job(
+                {
+                    "missing_only": True,
+                    "ids": body.get("ids") or "",
+                    "db_path": body.get("db_path"),
+                    "wiki_db": body.get("wiki_db"),
+                }
+            )
+            result = {**result, "avatar_job_id": jid}
+        except Exception:  # noqa: BLE001
+            pass
     return code, result
 
 
