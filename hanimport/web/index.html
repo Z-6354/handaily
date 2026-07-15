@@ -4,58 +4,40 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>小寒导入器 — hanimport</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="/design-system/tokens.css" />
+  <link rel="stylesheet" href="/shell.css" />
+  <link rel="stylesheet" href="/hub.css" />
 </head>
 <body>
-  <div class="wrap">
-    <nav class="topnav"><a href="/">解包</a> · <a href="/roster">角色库</a></nav>
-    <header>
+  <div id="shell-root"></div>
+  <main class="hub-wrap">
+    <section class="hub-hero">
       <h1>小寒导入器</h1>
-      <p class="sub">碧蓝航线 AssetBundle → Spine / Live2D 模型解包</p>
-    </header>
+      <p class="hub-sub">本地解包与角色库工作台</p>
+    </section>
 
-    <section class="card" id="status-card">
+    <section class="entry-cards">
+      <a class="entry-card" href="/unpack">
+        <h2>解包模型</h2>
+        <p>AssetBundle → Spine / Live2D 模型解包与 JSON 配置</p>
+      </a>
+      <a class="entry-card" href="/roster">
+        <h2>管理角色库</h2>
+        <p>浏览与编辑角色、皮肤、台词；Wiki 导入与发布</p>
+      </a>
+    </section>
+
+    <section class="hub-section">
       <h2>环境</h2>
-      <div id="status-body" class="muted">检测中…</div>
+      <div id="env-summary" class="muted">检测中…</div>
     </section>
 
-    <section class="card">
-      <h2>解包</h2>
-      <label>
-        输入路径（bundle 文件或目录）
-        <input id="input-path" type="text" placeholder="例如 D:\HANDAILY\data\model\azurlane\custom" />
-      </label>
-      <label>
-        输出目录（留空自动选择）
-        <input id="output-path" type="text" placeholder="Live2D → data/model/unpacked；Spine → data/live2d" />
-      </label>
-      <label class="check">
-        <input id="dry-run" type="checkbox" />
-        仅预览（dry-run，不写文件）
-      </label>
-      <label class="check"><input id="opt-gen-config" type="checkbox" checked /> 写入后生成 JSON</label>
-      <label class="check"><input id="opt-continue" type="checkbox" /> 遇错继续</label>
-      <div class="progress-wrap" hidden id="progress-wrap">
-        <div class="progress-bar"><div id="progress-fill"></div></div>
-        <div id="progress-label" class="muted"></div>
-      </div>
-      <div class="actions">
-        <button id="btn-scan" type="button">扫描</button>
-        <button id="btn-unpack" type="button" class="primary">开始解包</button>
-        <button id="btn-config" type="button">生成 JSON 配置</button>
-      </div>
+    <section class="hub-section">
+      <h2>最近任务</h2>
+      <div id="recent-jobs" class="muted">加载中…</div>
     </section>
-
-    <section class="card">
-      <h2>扫描结果</h2>
-      <div id="scan-result" class="muted">尚未扫描</div>
-    </section>
-
-    <section class="card">
-      <h2>日志</h2>
-      <pre id="log"></pre>
-    </section>
-  </div>
-  <script src="app.js"></script>
+  </main>
+  <script src="/shell.js"></script>
+  <script src="/hub.js"></script>
 </body>
 </html>

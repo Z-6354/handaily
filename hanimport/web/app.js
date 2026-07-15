@@ -254,3 +254,47 @@ $("btn-scan").addEventListener("click", onScan);
 $("btn-unpack").addEventListener("click", onUnpack);
 $("btn-config").addEventListener("click", onConfig);
 refreshStatus();
+
+async function resumeJobFromUrl() {
+  const jobId = new URLSearchParams(location.search).get("job");
+  if (!jobId) return;
+
+  const banner = $("job-banner");
+  let res;
+  try {
+    res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
+  } catch (_e) {
+    if (banner) {
+      banner.textContent = "任务不存在或已清理";
+      banner.hidden = false;
+    }
+    return;
+  }
+  if (!res.ok) {
+    if (banner) {
+      banner.textContent = "任务不存在或已清理";
+      banner.hidden = false;
+    }
+    return;
+  }
+
+  const { job } = await res.json();
+  setJobBusy(true);
+  $("progress-wrap").hidden = false;
+  clearLog();
+  appendLog(`恢复任务：${jobId}`);
+  const logState = { seen: 0, lastFirst: undefined };
+  const onTick = (j) => {
+    renderProgress(j);
+    appendLogTail(j, logState);
+  };
+  try {
+    await pollJob(jobId, onTick);
+  } catch (e) {
+    appendLog(e.message, "err");
+  } finally {
+    setJobBusy(false);
+  }
+}
+
+resumeJobFromUrl();
