@@ -557,13 +557,25 @@ class Handler(BaseHTTPRequestHandler):
         return True
 
     def _serve_static(self, path: str) -> None:
-        if path in ("/", "/index.html"):
-            file_path = WEB_DIR / "index.html"
-        elif path in ("/roster", "/roster.html"):
-            file_path = WEB_DIR / "roster.html"
-        elif path in ("/style.css", "/app.js", "/roster.js", "/roster.css"):
-            file_path = WEB_DIR / path.lstrip("/")
-        else:
+        static_routes: dict[str, Path] = {
+            "/": WEB_DIR / "index.html",
+            "/index.html": WEB_DIR / "index.html",
+            "/roster": WEB_DIR / "roster.html",
+            "/roster.html": WEB_DIR / "roster.html",
+            "/unpack": WEB_DIR / "unpack.html",
+            "/unpack.html": WEB_DIR / "unpack.html",
+            "/style.css": WEB_DIR / "style.css",
+            "/app.js": WEB_DIR / "app.js",
+            "/roster.js": WEB_DIR / "roster.js",
+            "/roster.css": WEB_DIR / "roster.css",
+            "/shell.css": WEB_DIR / "shell.css",
+            "/shell.js": WEB_DIR / "shell.js",
+            "/hub.js": WEB_DIR / "hub.js",
+            "/hub.css": WEB_DIR / "hub.css",
+            "/design-system/tokens.css": WEB_DIR / "design-system" / "tokens.css",
+        }
+        file_path = static_routes.get(path)
+        if file_path is None:
             self.send_error(404)
             return
 
