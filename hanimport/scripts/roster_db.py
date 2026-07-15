@@ -487,21 +487,25 @@ def cmd_import_bundled_seed(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_import_wiki(args: argparse.Namespace) -> int:
-    db = Path(args.db) if args.db else default_local_db()
-    wiki_db = Path(args.wiki_db)
-    unpacked = Path(args.unpacked)
-    en_map = load_json(Path(args.en_map), {})
+def run_import_wiki(
+    db: Path | None = None,
+    wiki_db: Path | None = None,
+    unpacked: Path | None = None,
+    en_map: Path | None = None,
+) -> dict:
+    db = Path(db) if db else default_local_db()
+    wiki_db = Path(wiki_db) if wiki_db else (repo_root() / "mcp/blhx-wiki/data/blhx.sqlite")
+    unpacked = Path(unpacked) if unpacked else (repo_root() / "data/model/unpacked")
+    en_map_path = Path(en_map) if en_map else (repo_root() / "data/wiki/ship-en-names.json")
+    en_map_data = load_json(en_map_path, {})
     alias_map = {
         **LIVE2D_ALIASES,
         **load_json(repo_root() / "mcp/blhx-wiki/data/live2d-aliases.json", {}),
     }
     if not wiki_db.is_file():
-        emit({"ok": False, "error": f"wiki db missing: {wiki_db}"})
-        return 1
+        return {"ok": False, "error": f"wiki db missing: {wiki_db}"}
     if not unpacked.is_dir():
-        emit({"ok": False, "error": f"unpacked missing: {unpacked}"})
-        return 1
+        return {"ok": False, "error": f"unpacked missing: {unpacked}"}
 
     conn = connect(db)
     apply_schema(conn)
@@ -542,7 +546,7 @@ def cmd_import_wiki(args: argparse.Namespace) -> int:
             assets = json.loads(row["assets_json"] or "[]")
             cv = clean_cv(row["cv"] or "") if has_cv else ""
 
-        english = pick_english(aliases, en_map.get(base, ""))
+        english = pick_english(aliases, en_map_data.get(base, ""))
         skin_name_zh = pick_skin_title(assets, skin_index, skin_label(suffix))
         lines = lines_rows_from_wiki(lines_raw)
 
@@ -614,8 +618,18 @@ def cmd_import_wiki(args: argparse.Namespace) -> int:
     conn.commit()
     conn.close()
     wiki.close()
-    emit({"ok": True, "db": str(db), "upserted": upserted, "count": len(upserted)})
-    return 0
+    return {"ok": True, "db": str(db), "upserted": upserted, "count": len(upserted)}
+
+
+def cmd_import_wiki(args: argparse.Namespace) -> int:
+    result = run_import_wiki(
+        db=Path(args.db) if args.db else None,
+        wiki_db=Path(args.wiki_db),
+        unpacked=Path(args.unpacked),
+        en_map=Path(args.en_map),
+    )
+    emit(result)
+    return 0 if result.get("ok") else 1
 
 
 def character_to_manifest(conn: sqlite3.Connection, cid: str) -> dict | None:
@@ -673,35 +687,39 @@ def character_to_manifest(conn: sqlite3.Connection, cid: str) -> dict | None:
     }
 
 
-def cmd_sync_appdata(args: argparse.Namespace) -> int:
-    db = Path(args.db) if args.db else default_local_db()
-    data_dir = Path(args.data_dir) if args.data_dir else appdata_data_dir()
+def run_sync_appdata(
+    db: Path | None = None,
+    data_dir: Path | None = None,
+    ids: str = "",
+    force_lines: bool = False,
+) -> dict:
+    db = Path(db) if db else default_local_db()
+    data_dir = Path(data_dir) if data_dir else appdata_data_dir()
     if not db.is_file():
-        emit({"ok": False, "error": f"local db missing: {db}"})
-        return 1
+        return {"ok": False, "error": f"local db missing: {db}"}
     conn = connect(db)
     manifest_path = data_dir / "characters" / "manifest.json"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     existing = load_json(manifest_path, {"version": 1, "default_id": "", "characters": []})
     by_id = {c["id"]: c for c in existing.get("characters", []) if isinstance(c, dict)}
 
-    ids = [r["id"] for r in conn.execute("SELECT id FROM characters ORDER BY id")]
-    if args.ids:
-        want = {x.strip() for x in args.ids.split(",") if x.strip()}
-        ids = [i for i in ids if i in want]
+    char_ids = [r["id"] for r in conn.execute("SELECT id FROM characters ORDER BY id")]
+    if ids:
+        want = {x.strip() for x in ids.split(",") if x.strip()}
+        char_ids = [i for i in char_ids if i in want]
 
     synced = []
-    for cid in ids:
+    for cid in char_ids:
         char = character_to_manifest(conn, cid)
         if not char:
             continue
         prev = by_id.get(cid)
-        if prev and not args.force_lines:
+        if prev and not force_lines:
             # keep user-edited lines if present
             prev_skins = {s.get("id"): s for s in (prev.get("skins") or []) if isinstance(s, dict)}
             for s in char["skins"]:
                 old = prev_skins.get(s["id"])
-                if old and old.get("lines") and not args.force_lines:
+                if old and old.get("lines") and not force_lines:
                     s["lines"] = old["lines"]
         by_id[cid] = char
         synced.append(cid)
@@ -764,8 +782,18 @@ def cmd_sync_appdata(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     conn.close()
-    emit({"ok": True, "manifest": str(manifest_path), "synced": synced})
-    return 0
+    return {"ok": True, "manifest": str(manifest_path), "synced": synced}
+
+
+def cmd_sync_appdata(args: argparse.Namespace) -> int:
+    result = run_sync_appdata(
+        db=Path(args.db) if args.db else None,
+        data_dir=Path(args.data_dir) if args.data_dir else None,
+        ids=args.ids or "",
+        force_lines=bool(args.force_lines),
+    )
+    emit(result)
+    return 0 if result.get("ok") else 1
 
 
 def copy_subset_db(src: Path, dst: Path, character_ids: list[str]) -> dict:
@@ -806,21 +834,19 @@ def copy_subset_db(src: Path, dst: Path, character_ids: list[str]) -> dict:
     return counts
 
 
-def cmd_publish_bundled(args: argparse.Namespace) -> int:
-    db = Path(args.db) if args.db else default_local_db()
+def run_publish_bundled(db: Path | None = None, ids: str = "") -> dict:
+    db = Path(db) if db else default_local_db()
     if not db.is_file():
-        emit({"ok": False, "error": f"local db missing: {db} — run import first"})
-        return 1
+        return {"ok": False, "error": f"local db missing: {db} — run import first"}
     allow = load_json(allowlist_path(), {"character_ids": []})
-    ids = list(allow.get("character_ids") or [])
-    if args.ids:
-        ids = [x.strip() for x in args.ids.split(",") if x.strip()]
-    if not ids:
-        emit({"ok": False, "error": "empty allowlist — refuse publishing entire local DB"})
-        return 1
+    id_list = list(allow.get("character_ids") or [])
+    if ids:
+        id_list = [x.strip() for x in ids.split(",") if x.strip()]
+    if not id_list:
+        return {"ok": False, "error": "empty allowlist — refuse publishing entire local DB"}
 
     out_db = bundled_roster_dir() / "handaily-roster.sqlite"
-    counts = copy_subset_db(db, out_db, ids)
+    counts = copy_subset_db(db, out_db, id_list)
 
     # refresh characters/manifest.json for allowlisted ids only (merge keep others if any)
     conn = connect(db)
@@ -831,13 +857,13 @@ def cmd_publish_bundled(args: argparse.Namespace) -> int:
     by_id = {
         c["id"]: c for c in bundled_manifest.get("characters", []) if isinstance(c, dict)
     }
-    for cid in ids:
+    for cid in id_list:
         char = character_to_manifest(conn, cid)
         if char:
             by_id[cid] = char
     # Prefer allowlist order first
-    ordered = [by_id[i] for i in ids if i in by_id]
-    rest = [c for i, c in by_id.items() if i not in ids]
+    ordered = [by_id[i] for i in id_list if i in by_id]
+    rest = [c for i, c in by_id.items() if i not in id_list]
     bundled_manifest["characters"] = ordered + rest
     if ordered and not bundled_manifest.get("default_id"):
         bundled_manifest["default_id"] = ordered[0]["id"]
@@ -851,17 +877,23 @@ def cmd_publish_bundled(args: argparse.Namespace) -> int:
         encoding="utf-8",
     )
     conn.close()
-    emit(
-        {
-            "ok": True,
-            "bundled_db": str(out_db),
-            "allowlist": ids,
-            "counts": counts,
-            "manifest": str(bundled_manifest_path),
-            "note": "models under bundled/roster/pet-models are not copied by this command",
-        }
+    return {
+        "ok": True,
+        "bundled_db": str(out_db),
+        "allowlist": id_list,
+        "counts": counts,
+        "manifest": str(bundled_manifest_path),
+        "note": "models under bundled/roster/pet-models are not copied by this command",
+    }
+
+
+def cmd_publish_bundled(args: argparse.Namespace) -> int:
+    result = run_publish_bundled(
+        db=Path(args.db) if args.db else None,
+        ids=args.ids or "",
     )
-    return 0
+    emit(result)
+    return 0 if result.get("ok") else 1
 
 
 def cmd_export_pack(args: argparse.Namespace) -> int:
