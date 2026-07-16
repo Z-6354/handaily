@@ -19,7 +19,7 @@
 3. **`state.apply` hook 返回值**  
    pixi-spine 3.8 的 `apply` 签名返回 `boolean`，包装函数未 `return` 导致类型错误。
 
-## 修复（`src/pet/spinePet.ts`）
+## 修复（`hanpet/src/pet/spinePet.ts`）
 
 - 恢复 `assembledBones`、`assembledSlotAttachmentNames` 字段
 - 删除已无用的 `detectActionStartOffsets` / `actionStartOffsets`

@@ -23,6 +23,6 @@
 
 ## 相关文件
 
-- `src-tauri/permissions/app-commands.toml`
-- `src-tauri/capabilities/default.json`
-- `src-tauri/capabilities/pet.json`
+- `hanpet/src-tauri/permissions/app-commands.toml`
+- `hanpet/src-tauri/capabilities/default.json`
+- `hanpet/src-tauri/capabilities/pet.json`

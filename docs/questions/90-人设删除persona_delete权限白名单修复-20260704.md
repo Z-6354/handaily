@@ -9,7 +9,7 @@
 
 ## 根因
 
-Tauri 2 需在 `src-tauri/permissions/app-commands.toml` 白名单注册 IPC。`persona_delete` 已在 `lib.rs` 注册但未加入 permissions。
+Tauri 2 需在 `hanpet/src-tauri/permissions/app-commands.toml` 白名单注册 IPC。`persona_delete` 已在 `lib.rs` 注册但未加入 permissions。
 
 ## 修复
 

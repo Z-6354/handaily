@@ -1,6 +1,6 @@
 # 121 · src / src-tauri / release 构建目录说明
 
-> **路径更新（2026-07-12）**：hanpet 已迁入 `hanpet/`。下文中的 `src/`、`src-tauri/`、`dist/` 现指 `hanpet/src/`、`hanpet/src-tauri/`、`hanpet/dist/`；Cargo 产物在 `hanpet/src-tauri/target/`。见 [ARCHITECTURE.md](../../ARCHITECTURE.md)。
+> **路径更新（2026-07-16）**：正文路径已按 monorepo（`hanpet/` / `hanimport/` / `data/`）改写。 见 [ARCHITECTURE.md](../../ARCHITECTURE.md)。
 
 **日期**：2026-07-06  
 **标签**：项目结构、Tauri、Cargo、构建
@@ -13,8 +13,8 @@
 
 | 名称 | 性质 | 是否应提交 Git |
 |------|------|----------------|
-| `src/` | **前端源码**（React + Vite + TS） | 是 |
-| `src-tauri/` | **桌面端 Rust 后端**（Tauri） | 是 |
+| `hanpet/src/` | **前端源码**（React + Vite + TS） | 是 |
+| `hanpet/src-tauri/` | **桌面端 Rust 后端**（Tauri） | 是 |
 | `target/release/` | **Rust 编译产物**（Cargo 默认 release profile） | 否（已在 `.gitignore`） |
 | `target/release-fast/` | **历史产物**（122 之前的多 profile 遗留） | 否，可删除 |
 
@@ -28,35 +28,37 @@
 
 ```
 HANDAILY/
-├── src/              ← 前端：主窗口 UI、设置页、时间线等（Vite 打包 → dist/）
-├── src/pet/          ← 桌宠独立页面（pet.html 入口）
-├── src-tauri/        ← 后端：Rust 原生能力（采集、数据库、托盘、自启动等）
-│   ├── src/          ← Rust 源码（注意：是 src-tauri 内部的 src，不是根目录 src）
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── dist/             ← 前端构建输出（Vite，Tauri 打包时嵌入）
-└── package.json      ← npm 脚本串联前后端
+├── hanpet/
+│   ├── src/              ← 前端：主窗口 UI、设置页等（Vite 打包 → hanpet/dist/）
+│   ├── src/pet/          ← 桌宠独立页面（pet.html 入口）
+│   ├── src-tauri/        ← 后端：Rust 原生能力（采集、数据库、托盘、自启动等）
+│   │   ├── src/          ← Rust 源码（注意：是 src-tauri 内部的 src，不是 hanpet/src）
+│   │   ├── Cargo.toml
+│   │   └── tauri.conf.json
+│   └── dist/             ← 前端构建输出（Vite，Tauri 打包时嵌入）
+├── Cargo.toml            ← Rust workspace（members: hanimport、hanpet/src-tauri）
+└── package.json          ← npm workspaces 串联前后端
 ```
 
 - `tauri.conf.json` 中 `frontendDist: "../dist"` 指向前端构建结果。
-- `vite.config.ts` 将 `src/` 编译到 `dist/`；开发时 `tauri dev` 起 Vite + Rust。
-- 根目录 `src/` 与 `src-tauri/src/` **职责不同、互不重复**：前者是 Web UI，后者是系统级 Rust 逻辑。
+- `vite.config.ts` 将 `hanpet/src/` 编译到 `hanpet/dist/`；开发时 `npm run tauri:dev` 起 Vite + Rust。
+- `hanpet/src/` 与 `hanpet/src-tauri/src/` **职责不同、互不重复**：前者是 Web UI，后者是系统级 Rust 逻辑。
 
 ## 2. `release`：Cargo 发布配置（122 后唯一 profile）
 
-`src-tauri/Cargo.toml` 中 `[profile.release]` 参数（关闭 LTO、`codegen-units=256`）：
+`hanpet/src-tauri/Cargo.toml` 中 `[profile.release]` 参数（关闭 LTO、`codegen-units=256`）：
 
 | 项 | 值 |
 |----|-----|
 | 用途 | 所有发布构建（`npm run tauri:build` / `tauri:build:exe`） |
 | 特点 | 链接快、体积略大于 LTO 版 |
-| 产物路径 | `src-tauri/target/release/` |
+| 产物路径 | `hanpet/src-tauri/target/release/` |
 
 编译后产物路径示例：
 
 ```
-src-tauri/target/release/xiaohan-daily.exe
-src-tauri/target/release/bundle/nsis/小寒日报_0.1.0_x64-setup.exe
+hanpet/src-tauri/target/release/xiaohan-daily.exe
+hanpet/src-tauri/target/release/bundle/nsis/小寒日报_0.1.0_x64-setup.exe
 ```
 
 根目录若存在 `target/`（含 `debug` / `release` / `release-fast`），多为历史误在仓库根执行 `cargo build` 产生；**正确入口**应通过 `npm run tauri:build` 或 `cargo build -p xiaohan-daily`。`target/release-fast/` 为 122 之前遗留，可安全删除。
@@ -65,7 +67,7 @@ src-tauri/target/release/bundle/nsis/小寒日报_0.1.0_x64-setup.exe
 
 ### `debug/` 与 `debug/deps/` 不是重复
 
-Cargo 标准布局（仅一套 `src-tauri/target` 下）：
+Cargo 标准布局（仅一套 `hanpet/src-tauri/target` 下）：
 
 | 路径 | 内容 |
 |------|------|
@@ -74,12 +76,12 @@ Cargo 标准布局（仅一套 `src-tauri/target` 下）：
 
 二者职责不同，**不是两套重复构建**；勿手动删除 `deps/`。
 
-## 3. 与 `dist/` 的区别
+## 3. 与 `hanpet/dist/` 的区别
 
 | 目录 | 工具 | 内容 |
 |------|------|------|
-| `dist/` | Vite | 前端 HTML/JS/CSS |
-| `target/*` | Cargo | Rust 二进制、依赖缓存、NSIS 安装包 |
+| `hanpet/dist/` | Vite | 前端 HTML/JS/CSS |
+| `hanpet/src-tauri/target/*` | Cargo | Rust 二进制、依赖缓存、NSIS 安装包 |
 
 ## 相关文档
 

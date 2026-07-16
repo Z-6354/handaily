@@ -29,7 +29,7 @@
 
 ## 相关文件
 
-- `src-tauri/src/pet/mod.rs`
-- `src-tauri/src/ipc/commands.rs`
-- `src/pet/main.ts`
-- `src/pet/spinePet.ts`
+- `hanpet/src-tauri/src/pet/mod.rs`
+- `hanpet/src-tauri/src/ipc/commands.rs`
+- `hanpet/src/pet/main.ts`
+- `hanpet/src/pet/spinePet.ts`

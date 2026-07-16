@@ -8,6 +8,7 @@
 |------|------|
 | [../README.md](../README.md) | 项目总览 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | **当前架构**（含双轨 roster） |
+| [superpowers/specs/2026-07-16-monorepo-hygiene-entry-docs-design.md](superpowers/specs/2026-07-16-monorepo-hygiene-entry-docs-design.md) | 入口统一 + 文档路径对齐（工程卫生） |
 | [superpowers/specs/2026-07-14-unified-character-skins-design.md](superpowers/specs/2026-07-14-unified-character-skins-design.md) | 人物统一皮肤 |
 | [superpowers/specs/2026-07-14-dual-roster-database-design.md](superpowers/specs/2026-07-14-dual-roster-database-design.md) | 本地库 / 自带库 |
 | [../hanpet/README.md](../hanpet/README.md) | 小寒桌宠应用 |

@@ -23,6 +23,8 @@ npm install
 npm run tauri:dev
 ```
 
+桌宠 / 导入器 / 传输的脚本入口一览：[scripts/README.md](scripts/README.md)。导入器网页也可用 `npm run hanimport:serve` 或 `hanimport/启动网页版.bat`。
+
 ## 常用命令
 
 | 命令 | 说明 |
