@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>小寒导入器 — hanimport</title>
+  <link rel="stylesheet" href="/design-system/tokens.css" />
+  <link rel="stylesheet" href="/shell.css" />
+  <link rel="stylesheet" href="/components.css" />
+  <link rel="stylesheet" href="/pages/hub.css" />
+</head>
+<body>
+  <div id="shell-root"></div>
+  <main class="hub-wrap">
+    <section class="hub-hero">
+      <h1>小寒导入器</h1>
+      <p class="hub-sub">本地解包与角色库工作台</p>
+    </section>
+
+    <section class="entry-cards">
+      <a class="entry-card" href="/unpack">
+        <h2>解包模型</h2>
+        <p>AssetBundle → Spine / Live2D 模型解包与 JSON 配置</p>
+        <span class="entry-cta">进入解包</span>
+      </a>
+      <a class="entry-card" href="/roster">
+        <h2>管理角色库</h2>
+        <p>浏览与编辑角色、皮肤、台词；Wiki 补齐与发布</p>
+        <span class="entry-cta">进入角色库</span>
+      </a>
+    </section>
+
+    <section class="hub-section">
+      <h2>环境</h2>
+      <div id="env-summary" class="muted">检测中…</div>
+    </section>
+
+    <section class="hub-section">
+      <h2>最近任务</h2>
+      <div id="recent-jobs" class="muted">加载中…</div>
+    </section>
+  </main>
+  <script src="/shell.js"></script>
+  <script src="/hub.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pinyin } from "pinyin-pro";
 import type { BlhxDatabase } from "./db.js";
+import { repoRoot } from "./repoRoot.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ALIASES_PATH = path.resolve(__dirname, "../data/live2d-aliases.json");
@@ -86,7 +87,12 @@ export interface Live2dImportPlanItem {
 export function defaultLive2dRoot(): string {
   const env = process.env.HANDAILY_LIVE2D_PATH?.trim();
   if (env) return path.resolve(env);
-  return path.resolve(process.cwd(), "../../live2d");
+  const root = repoRoot();
+  for (const rel of ["data/live2d", "live2d"]) {
+    const candidate = path.join(root, rel);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return path.join(root, "data/live2d");
 }
 
 export function toPinyinSlug(text: string): string {

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hantransfer/mobile-bridge.json",
+  "title": "HantransferBridge",
+  "description": "WebView JavaScript bridge exposed as window.Hantransfer (APK) and JS callbacks (both modes).",
+  "type": "object",
+  "properties": {
+    "nativeMethods": {
+      "type": "object",
+      "description": "Android @JavascriptInterface methods on window.Hantransfer",
+      "properties": {
+        "startDiscovery": { "type": "null", "description": "Start mDNS scan" },
+        "getDevicesJson": { "type": "string", "description": "JSON array of devices" },
+        "setSelectedDevice": {
+          "type": "object",
+          "properties": {
+            "host": { "type": "string" },
+            "port": { "type": "integer" }
+          }
+        },
+        "getHistoryJson": { "type": "string" },
+        "appendHistory": { "type": "string", "description": "JSON history item" },
+        "pickAndSendFile": { "type": "null" },
+        "requestAzFolder": { "type": "null" },
+        "sendAzBatch": { "type": "string", "description": "category: live2d | spinepainting" }
+      }
+    },
+    "callbacks": {
+      "type": "object",
+      "description": "Invoked from native via evaluateJavascript — payloads are JSON values, not string-interpolated JS",
+      "properties": {
+        "onDevicesUpdated": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "name", "platform", "host", "port"],
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "platform": { "type": "string" },
+              "host": { "type": "string" },
+              "port": { "type": "integer" }
+            }
+          }
+        },
+        "onUploadProgress": {
+          "type": "object",
+          "required": ["name", "sent", "total", "done"],
+          "properties": {
+            "name": { "type": "string" },
+            "sent": { "type": "integer" },
+            "total": { "type": "integer" },
+            "done": { "type": "boolean" },
+            "error": { "type": ["string", "null"] }
+          }
+        },
+        "onAzStatus": {
+          "type": "object",
+          "properties": {
+            "message": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

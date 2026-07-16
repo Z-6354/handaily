@@ -1,0 +1,16 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capabilities",
+  "identifier": "default",
+  "description": "小寒日报默认权限——仅允许核心 command，无 shell/fs 网络",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-is-visible",
+    "shell:allow-open",
+    "allow-app-commands"
+  ]
+}

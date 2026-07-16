@@ -1,0 +1,30 @@
+[package]
+name = "hantransfer-desktop"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "HANDAILY LAN file bridge — Windows desktop service"
+publish = false
+
+[[bin]]
+name = "hantransfer-desktop"
+path = "src/main.rs"
+
+[dependencies]
+axum = { workspace = true }
+clap = { workspace = true }
+mdns-sd = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+qrcode = "0.14"
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tray-icon = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

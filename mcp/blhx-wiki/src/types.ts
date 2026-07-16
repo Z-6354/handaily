@@ -20,6 +20,34 @@ export interface ShipLine {
   lang: string;
   text: string;
   audioUrl: string | null;
+  /** Present when flattened from a by-skin group. */
+  skin?: string;
+}
+
+export type ShipLineSkinKind =
+  | "default"
+  | "skin"
+  | "retrofit"
+  | "oath"
+  | "other";
+
+/** One illustration-tab skin (TabContainer), before lines are bound. */
+export interface ShipSkinSlot {
+  key: string;
+  label: string;
+  kind: "default" | "skin" | "oath";
+  image_url: string | null;
+  image_alt: string | null;
+  sort_order: number;
+}
+
+/** One Wiki 台词 panel (通常 / 换装名 / 改造 / 誓约). */
+export interface ShipLineGroup {
+  skin: string;
+  skin_kind: ShipLineSkinKind;
+  lines: ShipLine[];
+  /** Matches ShipSkinSlot.key when bound. */
+  slot_key?: string;
 }
 
 export interface ShipAsset {
@@ -46,6 +74,10 @@ export interface ShipRecord {
   characterInfo: CharacterInfoField[];
   sections: ShipSection[];
   lines: ShipLine[];
+  /** Per-panel lines when scraped; empty if legacy-only. */
+  linesBySkin: ShipLineGroup[];
+  /** Illustration TabContainer skins (改造 excluded; empty tabs dropped). */
+  skins: ShipSkinSlot[];
   assets: ShipAsset[];
   personaReference: string;
   fetchedAt: string;

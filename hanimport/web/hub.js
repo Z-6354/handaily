@@ -1,0 +1,136 @@
+(function () {
+  "use strict";
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function statusLabel(status) {
+    if (status === "running" || status === "queued") return "进行中";
+    if (status === "done") return "完成";
+    if (status === "error") return "失败";
+    return status || "未知";
+  }
+
+  function statusClass(status) {
+    if (status === "done") return "ok";
+    if (status === "error") return "err";
+    return "running";
+  }
+
+  function formatTime(ts) {
+    if (!ts) return "";
+    return new Date(ts * 1000).toLocaleString("zh-CN", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function kindLabel(kind) {
+    if (kind === "unpack") return "解包";
+    if (kind === "config") return "配置";
+    return kind || "";
+  }
+
+  function renderEnv(st) {
+    var el = document.getElementById("env-summary");
+    if (!el) return;
+    var lines = [
+      "Python " + (st.python || ""),
+      st.unitypy ? "UnityPy 已安装" : "UnityPy 未安装 — 请运行「安装依赖.bat」",
+      "仓库 " + (st.repo_root || ""),
+    ];
+    el.innerHTML = lines
+      .map(function (line) {
+        return "<div>" + escapeHtml(line) + "</div>";
+      })
+      .join("");
+    el.classList.toggle("warn-text", !st.unitypy);
+  }
+
+  function renderJobs(data) {
+    var el = document.getElementById("recent-jobs");
+    if (!el) return;
+    var jobs = ((data && data.jobs) || []).filter(function (job) {
+      return job && (job.kind === "unpack" || job.kind === "config");
+    });
+    if (!jobs.length) {
+      el.innerHTML =
+        '<p class="empty-state">尚无解包任务。<a href="/unpack">前往解包</a></p>';
+      el.classList.remove("muted");
+      return;
+    }
+    el.classList.remove("muted");
+    var rows = jobs
+      .map(function (job) {
+        var pct =
+          job.total > 0 ? Math.round((100 * job.current) / job.total) : 0;
+        var progress =
+          job.total > 0
+            ? job.current + "/" + job.total + " (" + pct + "%)"
+            : "";
+        return (
+          '<a class="job-row" href="/unpack?job=' +
+          encodeURIComponent(job.id) +
+          '">' +
+          '<span class="job-id">' +
+          escapeHtml(job.id) +
+          "</span>" +
+          '<span class="job-kind">' +
+          escapeHtml(kindLabel(job.kind)) +
+          "</span>" +
+          '<span class="job-status ' +
+          statusClass(job.status) +
+          '">' +
+          escapeHtml(statusLabel(job.status)) +
+          "</span>" +
+          '<span class="job-progress">' +
+          escapeHtml(progress) +
+          "</span>" +
+          '<span class="job-time">' +
+          escapeHtml(formatTime(job.updated_at)) +
+          "</span>" +
+          "</a>"
+        );
+      })
+      .join("");
+    el.innerHTML = '<div class="job-list">' + rows + "</div>";
+  }
+
+  async function load() {
+    await HanShell.mount({ active: "hub" });
+
+    try {
+      var stRes = await fetch("/api/status");
+      if (!stRes.ok) throw new Error("status " + stRes.status);
+      var st = await stRes.json();
+      if (st.ok === false) throw new Error(st.error || "status failed");
+      renderEnv(st);
+    } catch (_err) {
+      var env = document.getElementById("env-summary");
+      if (env) {
+        env.textContent = "无法读取环境状态";
+        env.classList.add("warn-text");
+      }
+    }
+
+    try {
+      var jobsRes = await fetch("/api/jobs?limit=10");
+      if (!jobsRes.ok) throw new Error("jobs " + jobsRes.status);
+      var jobsPayload = await jobsRes.json();
+      if (jobsPayload.ok === false) throw new Error(jobsPayload.error || "jobs failed");
+      renderJobs(jobsPayload);
+    } catch (_err) {
+      var recent = document.getElementById("recent-jobs");
+      if (recent) recent.textContent = "无法加载最近任务";
+    }
+  }
+
+  load();
+})();

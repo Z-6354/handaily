@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Hantransfer" parent="android:Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:statusBarColor">#2563eb</item>
+        <item name="android:navigationBarColor">#f1f5f9</item>
+        <item name="android:windowBackground">#f1f5f9</item>
+    </style>
+</resources>

@@ -1,0 +1,79 @@
+[package]
+name = "xiaohan-daily"
+version = "0.2.0"
+description = "小寒桌宠 — Live2D 桌面宠物"
+authors = ["hanagent"]
+edition = "2021"
+rust-version = "1.82"
+default-run = "xiaohan-daily"
+
+[features]
+default = []
+cli-tools = []
+
+[lib]
+name = "xiaohan_daily_lib"
+# 仅桌面端：只产 rlib，避免 staticlib/cdylib 各多一次链接（尾段「卡住」的主因之一）
+crate-type = ["rlib"]
+
+[[bin]]
+name = "blhx_import"
+path = "src/bin/blhx_import.rs"
+required-features = ["cli-tools"]
+
+[[bin]]
+name = "live2d_import"
+path = "src/bin/live2d_import.rs"
+required-features = ["cli-tools"]
+
+[[bin]]
+name = "avatar_import"
+path = "src/bin/avatar_import.rs"
+required-features = ["cli-tools"]
+
+[[bin]]
+name = "roster_pack"
+path = "src/bin/roster_pack.rs"
+required-features = ["cli-tools"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+serde_json = "1"
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "protocol-asset"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.40", features = ["bundled"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
+windows = { version = "0.61", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_SystemInformation",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_Controls",
+    "Win32_Storage_FileSystem",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
+] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+rfd = "0.15"
+ctrlc = "3.4"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+# dev 编译速度见仓库根 .cargo/config.toml（debug=1、rust-lld、opt-level=0）
+# release profile 见仓库根 Cargo.toml [profile.release]
+# CLI 工具需要运行性能时用：cargo run --release -p xiaohan-daily --bin xxx

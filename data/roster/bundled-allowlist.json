@@ -1,0 +1,10 @@
+{
+  "description": "角色 id 白名单：仅这些会写入 hanpet/bundled 自带库（预览用）。本地个人库可更大。",
+  "character_ids": [
+    "cheshire",
+    "edu",
+    "wushiling",
+    "qiye",
+    "tashigan"
+  ]
+}

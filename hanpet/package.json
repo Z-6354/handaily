@@ -1,0 +1,49 @@
+{
+  "name": "hanpet",
+  "version": "0.2.0",
+  "private": true,
+  "description": "小寒桌宠 — Tauri 2 + Rust + React",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:fe": "vite build",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev --config src-tauri/tauri.preview.conf.json",
+    "tauri:build": "tauri build -- --bin xiaohan-daily",
+    "tauri:release": "tauri build -- --bin xiaohan-daily && node scripts/copy-release.mjs",
+    "tauri:build:exe": "tauri build --no-bundle -- --bin xiaohan-daily",
+    "tauri:pack": "tauri build --debug",
+    "tauri:build:debug": "tauri build --debug --no-bundle",
+    "check:rust": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 check -p xiaohan-daily --lib",
+    "check:rust:bin": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 check -p xiaohan-daily --lib --bin xiaohan-daily",
+    "check:rust:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 check -p xiaohan-daily",
+    "check:css": "python scripts/check-css-classes.py && python scripts/check-pet-css.py",
+    "test:pet-layout": "node scripts/pet-layout-check.mjs",
+    "test:pet-api": "node scripts/pet-test-api.mjs",
+    "test:rust": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 test -p xiaohan-daily --lib",
+    "test:rust:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 test -p xiaohan-daily",
+    "icons:generate": "python scripts/generate-pet-icons.py"
+  },
+  "dependencies": {
+    "@pixi-spine/all-3.8": "^4.0.6",
+    "@pixi-spine/runtime-3.8": "^4.0.6",
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/plugin-shell": "^2.0.0",
+    "pinyin-pro": "^3.28.1",
+    "pixi-live2d-display-lipsyncpatch": "^0.5.0-ls-8",
+    "pixi.js": "^7.4.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "typescript": "^5.8.0",
+    "vite": "^6.0.0"
+  }
+}

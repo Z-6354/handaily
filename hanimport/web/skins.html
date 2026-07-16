@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>皮肤 — 小寒导入器</title>
+  <link rel="stylesheet" href="/design-system/tokens.css" />
+  <link rel="stylesheet" href="/shell.css" />
+  <link rel="stylesheet" href="/components.css" />
+  <link rel="stylesheet" href="/pages/skins.css" />
+</head>
+<body>
+  <div id="shell-root"></div>
+  <div class="skins-page">
+    <header class="page-header">
+      <div class="page-header-main">
+        <h1 class="page-title">皮肤清单</h1>
+        <p class="page-sub">桌宠 Spine · 舰娘 Live2D 本地就绪状态（不播放模型）</p>
+      </div>
+      <div class="db-switch" role="group" aria-label="库切换">
+        <button type="button" id="db-local" class="db-btn active" data-db="local">自用库</button>
+        <button type="button" id="db-bundled" class="db-btn" data-db="bundled">自带库</button>
+      </div>
+    </header>
+
+    <div class="skins-filters">
+      <label>搜索
+        <input id="sk-q" type="search" placeholder="角色 / 皮肤 / 路径" />
+      </label>
+      <label>角色 id
+        <input id="sk-character" type="text" placeholder="可选" />
+      </label>
+      <label>筛选
+        <select id="sk-filter">
+          <option value="">全部</option>
+          <option value="missing">仅缺文件</option>
+          <option value="dual_ready">仅双就绪</option>
+          <option value="lines_issue">台词需关注</option>
+          <option value="unbound">含未绑定</option>
+          <option value="ready">含就绪</option>
+        </select>
+      </label>
+      <button type="button" id="sk-apply" class="primary">查询</button>
+    </div>
+
+    <p id="sk-meta" class="muted skins-meta">…</p>
+
+    <div class="skin-table-wrap skins-full-table">
+      <table class="skin-status-table" aria-label="全库皮肤">
+        <thead>
+          <tr>
+            <th>角色</th>
+            <th>皮肤</th>
+            <th>桌宠</th>
+            <th>舰娘</th>
+            <th>台词</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="sk-tbody"></tbody>
+      </table>
+    </div>
+
+    <div class="skins-pager">
+      <button type="button" id="sk-prev">上一页</button>
+      <span id="sk-page-label" class="muted"></span>
+      <button type="button" id="sk-next">下一页</button>
+    </div>
+  </div>
+  <script src="/shell.js"></script>
+  <script src="/skins.js"></script>
+</body>
+</html>

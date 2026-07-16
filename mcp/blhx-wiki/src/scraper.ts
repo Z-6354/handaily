@@ -176,7 +176,10 @@ export function parseShipPage(
   const aliases = extractPageAliases(html, displayName);
   const characterInfo = extractCharacterInfo(html);
   const sections = extractPersonaSections(html);
-  const lines = extractShipLines(html);
+  const skins = extractIllustrationSkins(html);
+  const rawLineGroups = extractShipLinesBySkin(html);
+  const linesBySkin = bindLinesToSkinSlots(skins, rawLineGroups);
+  const lines = flattenShipLineGroups(linesBySkin);
   const assets = extractAssets(html, displayName);
   const cv = extractCv(html);
   const personaReference = buildPersonaReference({
@@ -200,6 +203,8 @@ export function parseShipPage(
     characterInfo,
     sections,
     lines,
+    linesBySkin,
+    skins,
     assets,
     personaReference,
     fetchedAt: new Date().toISOString(),
@@ -301,13 +306,185 @@ function cleanSectionText(text: string): string {
     .join("\n");
 }
 
-export function extractShipLines(html: string): import("./types.js").ShipLine[] {
-  const section = extractWikiSection(html, "舰船台词") ?? html;
+function classifyTabLabel(label: string): {
+  kind: "default" | "skin" | "oath" | "retrofit" | "other";
+  keyHint: string | null;
+} {
+  const t = normalizeText(label);
+  if (!t) return { kind: "other", keyHint: null };
+  if (t === "通常" || t === "默认" || /^default$/i.test(t)) {
+    return { kind: "default", keyHint: "default" };
+  }
+  if (t.includes("改造")) return { kind: "retrofit", keyHint: null };
+  if (t.includes("誓约")) return { kind: "oath", keyHint: "oath" };
+  const m = t.match(/^换装\s*(\d+)$/);
+  if (m) return { kind: "skin", keyHint: `skin${m[1]}` };
+  if (t.startsWith("换装")) return { kind: "skin", keyHint: null };
+  return { kind: "other", keyHint: null };
+}
+
+/**
+ * Illustration skins from TabContainer (通常 / 换装N / 誓约).
+ * Drops 改造 and empty tab_con (no image).
+ */
+export function extractIllustrationSkins(
+  html: string
+): import("./types.js").ShipSkinSlot[] {
+  const slots: import("./types.js").ShipSkinSlot[] = [];
+  const containerRegex =
+    /<div\b[^>]*class="[^"]*TabContainer[^"]*"[^>]*>([\s\S]*?)<\/div>\s*(?=<div\b[^>]*class="[^"]*TabContainer|<\/|$)/gi;
+  // Fallback: search all TabContainers more loosely
+  let blocks: string[] = [];
+  for (const m of html.matchAll(
+    /<div\b[^>]*class="[^"]*\bTabContainer\b[^"]*"[^>]*>([\s\S]*?)<div\b[^>]*class="[^"]*\bContentbox2\b[^"]*"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi
+  )) {
+    blocks.push(m[0]);
+  }
+  if (!blocks.length) {
+    // simpler: split by TabContainer occurrences
+    const idxs = [...html.matchAll(/class="[^"]*\bTabContainer\b[^"]*"/gi)].map(
+      (m) => m.index ?? 0
+    );
+    for (let i = 0; i < idxs.length; i++) {
+      const start = idxs[i];
+      const end = i + 1 < idxs.length ? idxs[i + 1] : Math.min(html.length, start + 80_000);
+      blocks.push(html.slice(start, end));
+    }
+  }
+
+  let best: import("./types.js").ShipSkinSlot[] = [];
+  for (const block of blocks) {
+    const labels = [...block.matchAll(/<li\b[^>]*class="[^"]*\btab_li\b[^"]*"[^>]*>([\s\S]*?)<\/li>/gi)].map(
+      (m) => normalizeText(stripHtmlTags(m[1] ?? ""))
+    );
+    const cons = [...block.matchAll(/<div\b[^>]*class="[^"]*\btab_con\b[^"]*"[^>]*>([\s\S]*?)<\/div>/gi)].map(
+      (m) => m[1] ?? ""
+    );
+    if (!labels.length) continue;
+    const parsed: import("./types.js").ShipSkinSlot[] = [];
+    let skinSeq = 0;
+    const n = Math.max(labels.length, cons.length);
+    for (let i = 0; i < n; i++) {
+      const label = labels[i] || "";
+      const con = cons[i] || "";
+      const { kind, keyHint } = classifyTabLabel(label);
+      if (kind === "retrofit" || kind === "other") continue;
+      const img = con.match(/<img\b[^>]*>/i)?.[0] ?? "";
+      const image_url =
+        img.match(/\bsrc="(https:\/\/[^"]+)"/i)?.[1] ??
+        img.match(/\bsrc="(\/\/[^"]+)"/i)?.[1] ??
+        null;
+      const image_alt = img.match(/\balt="([^"]*)"/i)?.[1] ?? null;
+      const hasArt = Boolean(image_url);
+      if (!hasArt) continue; // empty tab_con — drop (incl. empty 誓约 / 改造已滤)
+      let key = keyHint;
+      if (kind === "skin") {
+        skinSeq += 1;
+        key = keyHint && /^skin\d+$/.test(keyHint) ? keyHint : `skin${skinSeq}`;
+      }
+      if (!key) continue;
+      parsed.push({
+        key,
+        label: label || key,
+        kind: kind === "default" ? "default" : kind === "oath" ? "oath" : "skin",
+        image_url: image_url?.startsWith("//") ? `https:${image_url}` : image_url,
+        image_alt,
+        sort_order: parsed.length,
+      });
+    }
+    // Prefer the container that has 通常/换装
+    const score =
+      (parsed.some((s) => s.kind === "default") ? 10 : 0) +
+      parsed.filter((s) => s.kind === "skin").length;
+    const bestScore =
+      (best.some((s) => s.kind === "default") ? 10 : 0) +
+      best.filter((s) => s.kind === "skin").length;
+    if (score > bestScore) best = parsed;
+  }
+  void containerRegex;
+  return best;
+}
+
+function classifySkinTitle(title: string): {
+  skin: string;
+  skin_kind: import("./types.js").ShipLineSkinKind;
+} {
+  const t = normalizeText(title);
+  if (!t || t === "通常" || t === "默认" || /^default$/i.test(t)) {
+    return { skin: "default", skin_kind: "default" };
+  }
+  if (t.includes("誓约")) {
+    return { skin: t, skin_kind: "oath" };
+  }
+  if (t.includes("改造") || /\.改$/.test(t) || /改$/.test(t)) {
+    return { skin: t, skin_kind: "retrofit" };
+  }
+  return { skin: t, skin_kind: "skin" };
+}
+
+/**
+ * Attach line groups to illustration slots; drop 改造 line panels.
+ */
+export function bindLinesToSkinSlots(
+  skins: import("./types.js").ShipSkinSlot[],
+  groups: import("./types.js").ShipLineGroup[]
+): import("./types.js").ShipLineGroup[] {
+  if (!skins.length) {
+    return groups.filter((g) => g.skin_kind !== "retrofit");
+  }
+  const usable = groups.filter((g) => g.skin_kind !== "retrofit");
+  const defaults = usable.filter((g) => g.skin_kind === "default");
+  const oaths = usable.filter((g) => g.skin_kind === "oath");
+  const others = usable.filter(
+    (g) => g.skin_kind !== "default" && g.skin_kind !== "oath"
+  );
+
+  const out: import("./types.js").ShipLineGroup[] = [];
+  let otherIdx = 0;
+  for (const slot of skins) {
+    let src: import("./types.js").ShipLineGroup | undefined;
+    if (slot.kind === "default") {
+      src = defaults.shift();
+    } else if (slot.kind === "oath") {
+      src = oaths.shift();
+    } else {
+      src = others[otherIdx++];
+    }
+    if (!src) {
+      out.push({
+        skin: slot.label,
+        skin_kind:
+          slot.kind === "default"
+            ? "default"
+            : slot.kind === "oath"
+              ? "oath"
+              : "skin",
+        lines: [],
+        slot_key: slot.key,
+      });
+      continue;
+    }
+    out.push({
+      ...src,
+      skin: slot.label,
+      skin_kind:
+        slot.kind === "default"
+          ? "default"
+          : slot.kind === "oath"
+            ? "oath"
+            : "skin",
+      slot_key: slot.key,
+    });
+  }
+  return out;
+}
+
+function parseLinesFromFragment(fragment: string): import("./types.js").ShipLine[] {
   const lines: import("./types.js").ShipLine[] = [];
   const rowRegex =
     /<tr[^>]*data-key="([^"]+)"[^>]*>[\s\S]*?<th[^>]*>([\s\S]*?)<\/th>[\s\S]*?<td[^>]*>([\s\S]*?)<\/td>[\s\S]*?<\/tr>/g;
 
-  for (const match of section.matchAll(rowRegex)) {
+  for (const match of fragment.matchAll(rowRegex)) {
     const key = match[1]?.trim();
     if (!key || SKIP_LINE_KEYS.has(key)) continue;
     const label = normalizeText(stripHtmlTags(match[2] ?? ""));
@@ -317,6 +494,7 @@ export function extractShipLines(html: string): import("./types.js").ShipLine[] 
         stripHtmlTags(cell.match(/class="ship_word_line"[^>]*>([\s\S]*?)<\/p>/)?.[1] ?? "")
       ) || normalizeText(stripHtmlTags(cell));
     if (!text || text.length < 2) continue;
+    if (key === "desc" || label === "皮肤描述") continue;
     const lang =
       cell.match(/data-lang="([^"]+)"/)?.[1] ??
       cell.match(/class="ship_word_line"[^>]*data-lang="([^"]+)"/)?.[1] ??
@@ -328,9 +506,9 @@ export function extractShipLines(html: string): import("./types.js").ShipLine[] 
   }
 
   if (lines.length === 0) {
-    for (const block of iterShipWordBlocks(section)) {
+    for (const block of iterShipWordBlocks(fragment)) {
       const key = block.match(/data-key="([^"]+)"/)?.[1];
-      if (!key || SKIP_LINE_KEYS.has(key)) continue;
+      if (!key || SKIP_LINE_KEYS.has(key) || key === "desc") continue;
       const text = normalizeText(
         stripHtmlTags(block.match(/class="ship_word_line"[^>]*>([\s\S]*?)<\/p>/)?.[1] ?? "")
       );
@@ -349,6 +527,93 @@ export function extractShipLines(html: string): import("./types.js").ShipLine[] 
   }
 
   return dedupeLines(lines);
+}
+
+function collectPaneTitles(section: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const spanRegex = /<span\b([^>]*)>([\s\S]*?)<\/span>/gi;
+  for (const match of section.matchAll(spanRegex)) {
+    const attrs = match[1] ?? "";
+    if (!/panel-title/i.test(attrs)) continue;
+    const target = attrs.match(/data-target="#([^"]+)"/)?.[1];
+    if (!target) continue;
+    const title = normalizeText(stripHtmlTags(match[2] ?? ""));
+    if (title) map.set(target, title);
+  }
+  return map;
+}
+
+/**
+ * Split BWIKI 舰船台词 into default + per-skin tab panels.
+ */
+export function extractShipLinesBySkin(
+  html: string
+): import("./types.js").ShipLineGroup[] {
+  const section = extractWikiSection(html, "舰船台词");
+  if (!section) {
+    const flat = parseLinesFromFragment(html);
+    return flat.length
+      ? [{ skin: "default", skin_kind: "default", lines: flat }]
+      : [];
+  }
+
+  const paneTitles = collectPaneTitles(section);
+  const merged = new Map<string, import("./types.js").ShipLineGroup>();
+
+  const tableRegex =
+    /<table\b[^>]*class="[^"]*table-ShipWordsTable[^"]*"[^>]*>([\s\S]*?)<\/table>/gi;
+  let matchedTables = 0;
+  for (const match of section.matchAll(tableRegex)) {
+    matchedTables++;
+    const tableBody = match[1] ?? "";
+    const before = section.slice(0, match.index ?? 0);
+    let paneId: string | null = null;
+    for (const m of before.matchAll(/<div\b([^>]*\btab-pane\b[^>]*)>/gi)) {
+      const id = m[1]?.match(/\bid="([^"]+)"/)?.[1];
+      if (id) paneId = id;
+    }
+    const rawTitle = paneId ? paneTitles.get(paneId) ?? "" : "default";
+    const { skin, skin_kind } = classifySkinTitle(rawTitle || "default");
+    const lines = parseLinesFromFragment(tableBody);
+    if (!lines.length) continue;
+    const prev = merged.get(skin);
+    if (prev) {
+      prev.lines = dedupeLines([...prev.lines, ...lines]);
+    } else {
+      merged.set(skin, { skin, skin_kind, lines });
+    }
+  }
+
+  if (!matchedTables) {
+    const flat = parseLinesFromFragment(section);
+    return flat.length
+      ? [{ skin: "default", skin_kind: "default", lines: flat }]
+      : [];
+  }
+
+  const groups = [...merged.values()];
+  groups.sort((a, b) => {
+    if (a.skin === "default") return -1;
+    if (b.skin === "default") return 1;
+    return a.skin.localeCompare(b.skin, "zh");
+  });
+  return groups;
+}
+
+export function flattenShipLineGroups(
+  groups: import("./types.js").ShipLineGroup[]
+): import("./types.js").ShipLine[] {
+  const lines: import("./types.js").ShipLine[] = [];
+  for (const g of groups) {
+    for (const line of g.lines) {
+      lines.push({ ...line, skin: g.skin });
+    }
+  }
+  return dedupeLines(lines);
+}
+
+export function extractShipLines(html: string): import("./types.js").ShipLine[] {
+  return flattenShipLineGroups(extractShipLinesBySkin(html));
 }
 
 function iterShipWordBlocks(section: string): string[] {
@@ -370,7 +635,7 @@ function iterShipWordBlocks(section: string): string[] {
 function dedupeLines(lines: import("./types.js").ShipLine[]): import("./types.js").ShipLine[] {
   const seen = new Set<string>();
   return lines.filter((l) => {
-    const k = `${l.key}|${l.lang}|${l.text}`;
+    const k = `${l.skin ?? ""}|${l.key}|${l.lang}|${l.text}`;
     if (seen.has(k)) return false;
     seen.add(k);
     return true;

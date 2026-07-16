@@ -1,8 +1,18 @@
-# 统一 Cargo 产物目录（无论从仓库根或 src-tauri 执行 cargo / tauri）
-# 避免 HANDAILY/target 与 src-tauri/target 两套 debug/deps 重复占用磁盘
+# 统一 Cargo 产物目录
 [build]
-target-dir = "src-tauri/target"
+target-dir = "hanpet/src-tauri/target"
 incremental = true
 
-[profile.release]
+[profile.dev]
+opt-level = 0
+debug = 1
 incremental = true
+codegen-units = 256
+split-debuginfo = "unpacked"
+
+[profile.test]
+inherits = "dev"
+debug = 1
+
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"

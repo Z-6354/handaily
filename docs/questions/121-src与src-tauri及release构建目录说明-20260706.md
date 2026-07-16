@@ -1,5 +1,7 @@
 # 121 · src / src-tauri / release 构建目录说明
 
+> **路径更新（2026-07-12）**：hanpet 已迁入 `hanpet/`。下文中的 `src/`、`src-tauri/`、`dist/` 现指 `hanpet/src/`、`hanpet/src-tauri/`、`hanpet/dist/`；Cargo 产物在 `hanpet/src-tauri/target/`。见 [ARCHITECTURE.md](../../ARCHITECTURE.md)。
+
 **日期**：2026-07-06  
 **标签**：项目结构、Tauri、Cargo、构建
 
@@ -57,9 +59,9 @@ src-tauri/target/release/xiaohan-daily.exe
 src-tauri/target/release/bundle/nsis/小寒日报_0.1.0_x64-setup.exe
 ```
 
-根目录若存在 `target/`（含 `debug` / `release` / `release-fast`），多为历史误在仓库根执行 `cargo build` 产生；**正确入口**应通过 `npm run tauri:build` 或 `--manifest-path src-tauri/Cargo.toml`。`target/release-fast/` 为 122 之前遗留，可安全删除。
+根目录若存在 `target/`（含 `debug` / `release` / `release-fast`），多为历史误在仓库根执行 `cargo build` 产生；**正确入口**应通过 `npm run tauri:build` 或 `cargo build -p xiaohan-daily`。`target/release-fast/` 为 122 之前遗留，可安全删除。
 
-**137 之后**：`.cargo/config.toml` 已设置 `build.target-dir = "src-tauri/target"`，无论从仓库根或 `src-tauri/` 执行 cargo，产物统一写入 `src-tauri/target/`。误生成的根目录 `target/` 可运行 `.\scripts\clean-stale-target.ps1` 清理。
+**137 / monorepo 之后**：`.cargo/config.toml` 已设置 `build.target-dir = "hanpet/src-tauri/target"`；Rust workspace 见根目录 `Cargo.toml`（members: `hanimport`、`hanpet/src-tauri`）。误生成的根目录 `target/` 可运行 `.\scripts\clean-stale-target.ps1` 清理。
 
 ### `debug/` 与 `debug/deps/` 不是重复
 

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "小寒桌宠",
+  "version": "0.2.0",
+  "identifier": "com.hanagent.xiaohan-daily",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "node scripts/tauri-before-build.mjs"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/xiaohan-daily/**/*"]
+      }
+    },
+    "windows": []
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/icon.png",
+      "icons/128x128@2x.png",
+      "icons/128x128.png",
+      "icons/32x32.png"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"]
+      },
+      "allowDowngrades": false
+    },
+    "copyright": "Copyright © 2026 hanagent",
+    "category": "Utility",
+    "shortDescription": "桌面 Live2D 桌宠与活动追踪",
+    "longDescription": "小寒桌宠：桌面 Live2D 角色、本地活动追踪与日报，数据不出本机。"
+  }
+}

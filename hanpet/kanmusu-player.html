@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>小寒桌宠</title>
+    <script src="/vendor/live2dcubismcore.min.js"></script>
+  </head>
+  <body>
+    <div id="kanmusu-player-root">
+      <div id="kanmusu-stage" class="pet-stage"></div>
+      <canvas id="kanmusu-hit-overlay" class="kanmusu-hit-overlay" hidden></canvas>
+      <div id="kanmusu-edit-bounds" class="pet-edit-bounds" aria-hidden="true">
+        <div class="pet-edit-bounds-handle" data-edge="n"></div>
+        <div class="pet-edit-bounds-handle" data-edge="s"></div>
+        <div class="pet-edit-bounds-handle" data-edge="e"></div>
+        <div class="pet-edit-bounds-handle" data-edge="w"></div>
+        <div class="pet-edit-bounds-handle" data-edge="ne"></div>
+        <div class="pet-edit-bounds-handle" data-edge="nw"></div>
+        <div class="pet-edit-bounds-handle" data-edge="se"></div>
+        <div class="pet-edit-bounds-handle" data-edge="sw"></div>
+      </div>
+      <div id="kanmusu-drag-preview" class="pet-drag-preview" aria-hidden="true">
+        <span class="pet-drag-preview-hint">拖动中 · 松开保存</span>
+      </div>
+      <div id="kanmusu-boot-hint" class="pet-boot-hint">舰娘加载中…</div>
+      <div id="kanmusu-bubble" class="pet-bubble"></div>
+    </div>
+    <script type="module" src="/src/kanmusu-player/main.ts"></script>
+  </body>
+</html>
