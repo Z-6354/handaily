@@ -1,4 +1,4 @@
-﻿# 小寒日报 - 发布打包（见 src-tauri/Cargo.toml [profile.release]）
+﻿# 小寒桌宠 (hanpet) - 发布打包
 # 用法:
 #   .\scripts\build.ps1              # NSIS 安装包 -> release/
 #   .\scripts\build.ps1 -ExeOnly     # 仅便携 exe（不写入 release/）
@@ -14,11 +14,11 @@ param(
 . "$PSScriptRoot\_common.ps1"
 Initialize-ScriptEncoding
 
-$Root = Get-ProjectRoot
+$Root = Get-HanpetRoot
 Set-Location $Root
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-Write-Host "小寒日报 - 开始打包..." -ForegroundColor Cyan
+Write-Host "小寒桌宠 - 开始打包..." -ForegroundColor Cyan
 
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
     Write-Error "未找到 npm，请先安装 Node.js"
@@ -72,7 +72,7 @@ if ($code -ne 0) {
 
 $sw.Stop()
 Write-Host ("打包完成，耗时 {0:N1} 分钟" -f ($sw.Elapsed.TotalMinutes)) -ForegroundColor Green
-Write-Host "exe:  src-tauri\target\release\xiaohan-daily.exe" -ForegroundColor DarkGray
+Write-Host "exe:  hanpet\src-tauri\target\release\xiaohan-daily.exe" -ForegroundColor DarkGray
 if (-not $ExeOnly) {
     Write-Host "安装包: release/" -ForegroundColor DarkGray
 }

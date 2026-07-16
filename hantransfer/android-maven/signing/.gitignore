@@ -1,0 +1,4 @@
+# Keep the committed debug keystore for stable overwrite installs.
+# Only ignore local backups / alternate keys.
+*.bak
+*-local.keystore

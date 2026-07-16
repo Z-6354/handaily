@@ -1,4 +1,4 @@
-# 日常 Rust 开发：并行编译 + 可选 sccache（check/test/run 统一入口）
+﻿# Rust dev helper: parallel jobs + optional sccache (check/test/run)
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$CargoArgs
@@ -7,10 +7,10 @@ param(
 $ErrorActionPreference = "Stop"
 . "$PSScriptRoot\_common.ps1"
 Initialize-RustBuildEnv
-Set-Location (Get-ProjectRoot)
+Set-Location (Get-RepoRoot)
 
 if ($CargoArgs.Count -eq 0) {
-    Write-Error "用法: cargo-dev.ps1 check --manifest-path src-tauri/Cargo.toml --lib"
+    Write-Error "Usage: cargo-dev.ps1 check -p xiaohan-daily --lib"
     exit 1
 }
 

@@ -7,12 +7,20 @@ function Initialize-ScriptEncoding {
     $script:OutputEncoding = [System.Text.Encoding]::UTF8
 }
 
-function Get-ProjectRoot {
+function Get-RepoRoot {
     Split-Path -Parent $PSScriptRoot
 }
 
+function Get-HanpetRoot {
+    Join-Path (Get-RepoRoot) "hanpet"
+}
+
+function Get-ProjectRoot {
+    Get-HanpetRoot
+}
+
 function Get-CargoTargetDir {
-    Join-Path (Get-ProjectRoot) "src-tauri\target"
+    Join-Path (Get-HanpetRoot) "src-tauri\target"
 }
 
 function Initialize-RustBuildEnv {

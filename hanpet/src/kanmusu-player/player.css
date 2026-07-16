@@ -1,0 +1,81 @@
+@import "../pet/pet.css";
+
+/* 舰娘 = 桌宠同壳：格子气泡 / 编辑范围来自 pet.css */
+
+#kanmusu-player-root.menu-open-capture::after {
+  /* Windows 全透明像素易穿透：极淡填充 + 捕获左键关菜单 */
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.01);
+  pointer-events: auto;
+}
+
+#kanmusu-stage.pet-stage {
+  position: absolute;
+  inset: 0;
+  background: transparent;
+  z-index: 1;
+}
+
+/* 独立预览窗：不透明底，才能看清 Cubism */
+html.kanmusu-preview-shell,
+body.kanmusu-preview-shell {
+  background: #1a1f2a;
+}
+
+body.kanmusu-preview-shell #kanmusu-player-root,
+body.kanmusu-preview-shell #kanmusu-stage.pet-stage {
+  background:
+    radial-gradient(ellipse at 50% 28%, rgba(90, 120, 160, 0.22), transparent 55%),
+    #1a1f2a;
+}
+
+#kanmusu-stage canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+  background: transparent !important;
+  touch-action: none;
+}
+
+#kanmusu-stage canvas.kanmusu-interactive {
+  cursor: grab;
+}
+
+#kanmusu-stage canvas.kanmusu-interactive.is-grabbing {
+  cursor: grabbing;
+}
+
+.kanmusu-hit-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+  background: transparent;
+}
+
+#kanmusu-edit-bounds.pet-edit-bounds {
+  z-index: 3;
+}
+
+#kanmusu-player-root.edit-bounds-resizing #kanmusu-stage.pet-stage {
+  opacity: 0.88;
+}
+
+#kanmusu-bubble.pet-bubble {
+  z-index: 10;
+  pointer-events: none;
+}
+
+#kanmusu-player-root.pet-window-dragging #kanmusu-stage.pet-stage {
+  opacity: 0.72;
+  filter: drop-shadow(0 8px 18px rgba(15, 23, 42, 0.28));
+}
+
+#kanmusu-drag-preview.pet-drag-preview {
+  z-index: 15;
+}

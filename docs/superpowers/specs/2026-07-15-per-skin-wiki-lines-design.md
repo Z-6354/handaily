@@ -56,14 +56,14 @@ API / 列表额外暴露计算字段 `lines_status`（优先 meta；否则依 `s
 | 字段 | 含义 |
 |------|------|
 | `skins_lines_ok` | 按皮写入成功 |
-| `skins_lines_empty` | 库皮无台词 |
+| `skins_lines_empty` | Wiki 无该皮独立台词（常见，**非失败**） |
 | `wiki_skins_unmatched` | Wiki 有套无对应库皮 |
 | `roster_skins_unmatched` | 库皮未匹配到 Wiki 套 |
-| `lines_report` | 短明细列表（可截断） |
+| `lines_report` | 短明细列表（日志需人类可读，勿裸 JSON） |
 
 角色库日志醒目打印摘要。
 
-**UI**：皮肤表「台词」列 — 就绪 / 缺台词 / 未匹配 / 旧复制；`/skins` 同款；筛选「台词有问题」。
+**UI**：皮肤表「台词」列 — 就绪 / 无台词 / 未匹配 / 旧复制；`/skins` 同款；筛选「台词需关注」（含无台词/未匹配/旧复制）。
 
 ## 验收
 

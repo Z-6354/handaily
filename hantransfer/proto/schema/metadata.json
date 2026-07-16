@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hantransfer/metadata.json",
+  "title": "FileTransferMetadata",
+  "type": "object",
+  "required": ["filename", "size", "hash", "type", "source"],
+  "properties": {
+    "filename": {
+      "type": "string",
+      "description": "原始文件名"
+    },
+    "size": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "字节数"
+    },
+    "hash": {
+      "type": "string",
+      "description": "SHA256 校验和；浏览器模式可传 sha256:server 由 PC 端计算"
+    },
+    "type": {
+      "type": "string",
+      "enum": ["file", "azurlane_asset"],
+      "description": "收件路由类型"
+    },
+    "source": {
+      "type": "string",
+      "description": "发送方设备名"
+    },
+    "category": {
+      "type": "string",
+      "description": "子分类：general / live2d / spinepainting / custom"
+    },
+    "relative_path": {
+      "type": "string",
+      "description": "azurlane_asset 时在 AssetBundles 下的相对路径"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "type": { "const": "azurlane_asset" } }
+      },
+      "then": {
+        "required": ["category"]
+      }
+    }
+  ]
+}

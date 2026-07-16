@@ -6,17 +6,16 @@
   <title>皮肤 — 小寒导入器</title>
   <link rel="stylesheet" href="/design-system/tokens.css" />
   <link rel="stylesheet" href="/shell.css" />
-  <link rel="stylesheet" href="/style.css" />
-  <link rel="stylesheet" href="/roster.css" />
-  <link rel="stylesheet" href="/skins.css" />
+  <link rel="stylesheet" href="/components.css" />
+  <link rel="stylesheet" href="/pages/skins.css" />
 </head>
 <body>
   <div id="shell-root"></div>
   <div class="skins-page">
-    <header class="roster-header">
-      <div>
-        <h1>皮肤清单</h1>
-        <p class="sub">桌宠 Spine · 舰娘 Live2D 本地就绪状态（不播放模型）</p>
+    <header class="page-header">
+      <div class="page-header-main">
+        <h1 class="page-title">皮肤清单</h1>
+        <p class="page-sub">桌宠 Spine · 舰娘 Live2D 本地就绪状态（不播放模型）</p>
       </div>
       <div class="db-switch" role="group" aria-label="库切换">
         <button type="button" id="db-local" class="db-btn active" data-db="local">自用库</button>
@@ -36,7 +35,7 @@
           <option value="">全部</option>
           <option value="missing">仅缺文件</option>
           <option value="dual_ready">仅双就绪</option>
-          <option value="lines_issue">台词有问题</option>
+          <option value="lines_issue">台词需关注</option>
           <option value="unbound">含未绑定</option>
           <option value="ready">含就绪</option>
         </select>

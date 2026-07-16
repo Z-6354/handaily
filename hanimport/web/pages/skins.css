@@ -1,0 +1,78 @@
+/* Skins inventory page only */
+
+.skins-page {
+  max-width: 1140px;
+  margin: 0 auto;
+  padding: var(--space-page);
+}
+
+.skins-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 18px;
+  align-items: flex-end;
+  margin: 8px 0 14px;
+  padding: 18px 18px 16px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+.skins-filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.skins-filters input,
+.skins-filters select {
+  min-width: 168px;
+  text-transform: none;
+  font-weight: 400;
+  letter-spacing: -0.01em;
+}
+
+.skins-filters .primary {
+  align-self: flex-end;
+}
+
+.skins-meta {
+  margin: 4px 0 14px;
+  font-size: 0.875rem;
+}
+
+.skins-full-table {
+  margin-top: 0;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.skins-full-table .skin-status-table {
+  margin: 0;
+}
+
+.skins-full-table .skin-status-table th:first-child,
+.skins-full-table .skin-status-table td:first-child {
+  padding-left: 16px;
+}
+
+.skins-full-table tbody tr {
+  cursor: default;
+}
+
+.skins-pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 18px;
+}

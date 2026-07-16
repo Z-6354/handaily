@@ -1,5 +1,8 @@
 # hanimport Apple-style hub redesign Implementation Plan
 
+**进度**: 已完成（2026-07-15）
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rebuild hanimport web as a light Apple-inspired multi-page shell: hub at `/`, unpack at `/unpack`, roster restyled under shared chrome — without changing business API semantics except adding `GET /api/jobs`.

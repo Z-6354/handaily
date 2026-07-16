@@ -1,7 +1,7 @@
 # Wiki 流水线优化（增量 · 进度 · 清脏皮）— 设计
 
 **日期**: 2026-07-15  
-**状态**: 已批准（用户选全部 A+B+C · 开始实现）  
+**状态**: 已实现（含 Referer 抓取修复；流水线顺序改为先抓 TabContainer 再权威换皮）  
 **相关**: `2026-07-15-roster-auto-pipeline-design.md`
 
 ## 目标
@@ -15,14 +15,12 @@
 | 阶段 | 增量规则 |
 |------|----------|
 | 角色 | 仍快速 upsert（本地 SQLite 成本低） |
-| 皮肤 | 权威 keep 已与 `skins_json` 一致则跳过该角色 |
+| **Wiki 抓取** | 缺 `skins_json` 或 `lines_by_skin_json` 则抓；请求须带 Referer（否则 BWIKI HTTP 567） |
+| 皮肤 | **在抓取之后**按 `skins_json` 整角色替换；已对齐可跳过 |
 | 头像 | `missing_only`（已有） |
-| 台词抓取 | 缺 wiki 分组则抓（已有） |
-| 台词写入 | 仅对「刚抓取成功」或「本地仍有 empty/unmatched 皮」的角色 |
+| 台词写入 | 抓取与权威皮对齐之后；仅对需要者写入 |
 
-Phase 2 开始前：`purge_folder_like_skins` 删除 `id` 不以 `{cid}-` 为前缀的皮肤行。
-
-进度：`total`/`current` 绑阶段队列长度；`phase` + `current_item` 不变。
+抓取失败样本写入 job 日志（最多 5 条）。
 
 ## 非目标
 

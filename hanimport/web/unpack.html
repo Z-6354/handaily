@@ -6,15 +6,18 @@
   <title>解包 — 小寒导入器</title>
   <link rel="stylesheet" href="/design-system/tokens.css" />
   <link rel="stylesheet" href="/shell.css" />
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/components.css" />
+  <link rel="stylesheet" href="/pages/unpack.css" />
 </head>
 <body>
   <div id="shell-root"></div>
   <div id="job-banner" class="banner" hidden></div>
   <div class="wrap">
     <header class="page-header">
-      <h1>解包</h1>
-      <p class="sub">碧蓝航线 AssetBundle → Spine / Live2D 模型解包</p>
+      <div class="page-header-main">
+        <h1 class="page-title">解包</h1>
+        <p class="page-sub">碧蓝航线 AssetBundle → Spine / Live2D · 选文件夹或补选多个文件批量解包</p>
+      </div>
     </header>
 
     <section class="card" id="status-card">
@@ -25,12 +28,28 @@
     <section class="card">
       <h2>解包</h2>
       <label>
-        输入路径（bundle 文件或目录）
-        <input id="input-path" type="text" placeholder="例如 D:\HANDAILY\data\model\azurlane\custom" />
+        输入路径（文件夹或单个 bundle）
+        <div class="path-row">
+          <input id="input-path" type="text" placeholder="例如 D:\HANDAILY\data\model\azurlane\custom" />
+          <button type="button" id="btn-browse-input" class="secondary">浏览文件夹…</button>
+        </div>
       </label>
+      <div class="extra-files-block">
+        <div class="extra-files-head">
+          <span>附加文件</span>
+          <div class="actions-inline">
+            <button type="button" id="btn-browse-files" class="secondary">添加文件…</button>
+            <button type="button" id="btn-clear-extra" class="ghost" disabled>清空</button>
+          </div>
+        </div>
+        <ul id="extra-files" class="extra-files muted">尚未添加</ul>
+      </div>
       <label>
         输出目录（留空自动选择）
-        <input id="output-path" type="text" placeholder="Live2D → data/model/unpacked；Spine → data/live2d" />
+        <div class="path-row">
+          <input id="output-path" type="text" placeholder="Live2D → data/live2d；Cubism → data/model/unpacked" />
+          <button type="button" id="btn-browse-output" class="secondary">浏览…</button>
+        </div>
       </label>
       <label class="check">
         <input id="dry-run" type="checkbox" />

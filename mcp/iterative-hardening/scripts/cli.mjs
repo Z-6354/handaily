@@ -40,8 +40,8 @@ if (cmd === "init") {
     fixes:
       "main.ts: persistLayoutSnapshotSafe+abandonEditBoundsOnHidden；exit 去重保存+console.error；computeResizeBounds 锚点回算；offset mouseup 持久化；mcp.json 加 cwd",
     verification: [
-      { command: "cargo check --manifest-path src-tauri/Cargo.toml", exitCode: 0, summary: "pass2 verify" },
-      { command: "npx tsc --noEmit", exitCode: 0, summary: "pass2 verify" },
+      { command: "cargo check -p xiaohan-daily --lib", exitCode: 0, summary: "pass2 verify" },
+      { command: "npm run build -w hanpet", exitCode: 0, summary: "pass2 verify" },
     ],
     retest: "S6 代码路径改为 abandonEditBoundsOnHidden；S1/S2 锚点修复待 UI 验证；其余 UNTESTED",
     scenarioUpdates: {

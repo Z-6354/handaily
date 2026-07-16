@@ -219,11 +219,11 @@ server.tool(
   async ({ profile = "all", command, cwd }) => {
     const root = cwd ?? workspaceRoot;
     const commands: string[] = [];
-    if (profile === "rust") commands.push("cargo check --manifest-path src-tauri/Cargo.toml");
-    if (profile === "frontend") commands.push("npx tsc --noEmit");
+    if (profile === "rust") commands.push("cargo check -p xiaohan-daily --lib");
+    if (profile === "frontend") commands.push("npm run build -w hanpet");
     if (profile === "all") {
-      commands.push("cargo check --manifest-path src-tauri/Cargo.toml");
-      commands.push("npx tsc --noEmit");
+      commands.push("cargo check -p xiaohan-daily --lib");
+      commands.push("npm run build -w hanpet");
     }
     if (profile === "custom") {
       if (!command) throw new Error("command required when profile=custom");

@@ -174,7 +174,7 @@ server.tool(
 
 server.tool(
   "blhx_export_handaily",
-  "导出适合小寒日报人物/性格导入的结构化资料（persona 参考文本 + 台词 + 资源 URL）",
+  "导出适合 hanpet 人物/性格导入的结构化资料（persona 参考文本 + 台词 + 资源 URL）",
   {
     name: z.string().min(1).describe("舰娘名称"),
     include_guide: z.boolean().optional().describe("附加开发者导入说明 Markdown"),
@@ -210,7 +210,7 @@ server.tool(
     live2d_root: z
       .string()
       .optional()
-      .describe("Live2D 根目录，默认 HANDAILY_LIVE2D_PATH 或仓库 live2d/"),
+      .describe("Live2D 根目录，默认 HANDAILY_LIVE2D_PATH 或仓库 data/live2d/"),
     only_spine: z.boolean().optional().describe("仅返回含 .skel 的文件夹，默认 true"),
   },
   async ({ live2d_root, only_spine = true }) => {
@@ -277,7 +277,7 @@ server.tool(
   "生成 Live2D 模型导入计划：匹配舰娘 → 检查 HANDAILY 是否已导入人设/模型 → 输出待导入列表",
   {
     live2d_root: z.string().optional(),
-    handaily_data_dir: z.string().optional().describe("小寒日报 data 目录，默认 %AppData%/xiaohan-daily/data"),
+    handaily_data_dir: z.string().optional().describe("hanpet 运行时 data 目录，默认 %AppData%/xiaohan-daily/data"),
     min_score: z.number().min(0).max(100).optional().describe("导入最低分，默认 80"),
     only_with_persona: z
       .boolean()
@@ -323,7 +323,7 @@ server.tool(
       summary,
       plan: filtered,
       cliHint:
-        "将 plan 写入 JSON 后执行: cargo run --bin live2d_import -- --plan plan.json",
+        "将 plan 写入 JSON 后执行: npm run live2d:import -- --plan data/import/live2d-plan.json（或 hanimport models）",
     });
   }
 );

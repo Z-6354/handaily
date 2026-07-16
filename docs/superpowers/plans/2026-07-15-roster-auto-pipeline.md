@@ -1,6 +1,8 @@
 # Roster Wiki Auto Pipeline Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**进度**: 已完成（2026-07-15）
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Open local `/roster` auto-runs Wiki sync as characters → avatars+skins → lines; remove「导入 Wiki」button.
 
@@ -9,6 +11,7 @@
 **Tech Stack:** Python (hanimport scripts), job_store, vanilla roster.js/html/css, pytest.
 
 ## Global Constraints
+
 
 - Phase order hard: characters → avatars_skins → lines
 - No `upsert_skin(id=folder)` for new skins; bind models only
@@ -43,13 +46,13 @@
 - `import_wiki_lines_for_characters(conn, wiki, cids, ship_cols, lines_stats)`
 - `run_import_wiki(..., phases: set[str] | None = None)` default all phases for CLI
 
-- [ ] **Step 1:** Test `bind_unpacked_models` does not create `id=folder` skin when only `{cid}-default` exists; sets `kanmusu_dir` on matching skin by ordinal `_N`.
+- [x] **Step 1:** Test `bind_unpacked_models` does not create `id=folder` skin when only `{cid}-default` exists; sets `kanmusu_dir` on matching skin by ordinal `_N`.
 
-- [ ] **Step 2:** Implement helpers; change folder loop to bind-only; `run_import_wiki` calls phases in order.
+- [x] **Step 2:** Implement helpers; change folder loop to bind-only; `run_import_wiki` calls phases in order.
 
-- [ ] **Step 3:** `pytest hanimport/scripts/test_bind_models.py hanimport/scripts/test_skins_replace.py -q` PASS
+- [x] **Step 3:** `pytest hanimport/scripts/test_bind_models.py hanimport/scripts/test_skins_replace.py -q` PASS
 
-- [ ] **Step 4:** Commit `refactor(hanimport): split wiki import phases; bind models without dirty skins`
+- [x] **Step 4:** Commit `refactor(hanimport): split wiki import phases; bind models without dirty skins`
 
 ---
 
@@ -67,13 +70,13 @@
 - Remove post-`import-wiki` auto enqueue of avatar+lines jobs (pipeline owns that)
 - `find_active_job("roster-wiki-pipeline")` attach semantics in start
 
-- [ ] **Step 1:** Implement job runner respecting pause between characters/ships.
+- [x] **Step 1:** Implement job runner respecting pause between characters/ships.
 
-- [ ] **Step 2:** Wire API `wiki-pipeline`.
+- [x] **Step 2:** Wire API `wiki-pipeline`.
 
-- [ ] **Step 3:** Smoke pytest or minimal unit for start returns job_id and kind.
+- [x] **Step 3:** Smoke pytest or minimal unit for start returns job_id and kind.
 
-- [ ] **Step 4:** Commit `feat(hanimport): roster-wiki-pipeline job and API`
+- [x] **Step 4:** Commit `feat(hanimport): roster-wiki-pipeline job and API`
 
 ---
 
@@ -89,10 +92,10 @@
 - `maybeStartWikiPipeline()` on local list load; attach active job
 - Remove auto parallel avatar+lines starts
 
-- [ ] **Step 1:** HTML/JS/CSS changes.
+- [x] **Step 1:** HTML/JS/CSS changes.
 
-- [ ] **Step 2:** Manual smoke note in commit.
+- [x] **Step 2:** Manual smoke note in commit.
 
-- [ ] **Step 3:** Commit `feat(hanimport): auto wiki pipeline toast; drop import wiki button`
+- [x] **Step 3:** Commit `feat(hanimport): auto wiki pipeline toast; drop import wiki button`
 
-- [ ] **Step 4:** Mark spec 已实现; commit docs if needed
+- [x] **Step 4:** Mark spec 已实现; commit docs if needed

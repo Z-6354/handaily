@@ -12,9 +12,11 @@ from roster_db import (
     connect,
     default_local_db,
     fill_english_names,
+    is_folder_like_character_id,
     run_import_wiki,
     run_publish_bundled,
     run_sync_appdata,
+    strip_skin,
     upsert_character,
     upsert_skin,
 )
@@ -115,7 +117,23 @@ def _meta(db: str) -> tuple[int, dict]:
         conn.close()
 
 
-def _list_characters(db: str, query: dict) -> tuple[int, dict]:
+def _list_factions(db: str) -> tuple[int, dict]:
+    _path, conn = _open(db)
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT faction FROM characters
+            WHERE trim(COALESCE(faction, '')) != ''
+            ORDER BY faction COLLATE NOCASE
+            """
+        ).fetchall()
+        factions = [str(r[0]) for r in rows if r[0]]
+        return 200, {"ok": True, "db": db, "factions": factions}
+    finally:
+        conn.close()
+
+
+def _parse_list_query(query: dict) -> dict:
     q = (query.get("q") or "").strip()
     try:
         offset = max(0, int(query.get("offset") or 0))
@@ -125,44 +143,172 @@ def _list_characters(db: str, query: dict) -> tuple[int, dict]:
         limit = min(500, max(1, int(query.get("limit") or 100)))
     except (TypeError, ValueError):
         limit = 100
+    faction = (query.get("faction") or "").strip()
+    skin_count = (query.get("skin_count") or "all").strip().lower()
+    if skin_count not in ("all", "none", "some", "many"):
+        skin_count = "all"
+    kanmusu = (query.get("kanmusu") or "all").strip().lower()
+    if kanmusu not in ("all", "unbound", "missing", "ready"):
+        kanmusu = "all"
+    pet = (query.get("pet") or "all").strip().lower()
+    if pet not in ("all", "unbound", "missing", "ready"):
+        pet = "all"
+    sort = (query.get("sort") or "default").strip().lower()
+    if sort not in ("default", "updated", "import_mtime"):
+        sort = "default"
+    order = (query.get("order") or "desc").strip().lower()
+    if order not in ("asc", "desc"):
+        order = "desc"
+    return {
+        "q": q,
+        "offset": offset,
+        "limit": limit,
+        "faction": faction,
+        "skin_count": skin_count,
+        "kanmusu": kanmusu,
+        "pet": pet,
+        "sort": sort,
+        "order": order,
+    }
+
+
+def _list_characters(db: str, query: dict) -> tuple[int, dict]:
+    from character_assets import aggregate_character_assets
+
+    p = _parse_list_query(query)
+    need_assets = (
+        p["kanmusu"] != "all"
+        or p["pet"] != "all"
+        or p["sort"] == "import_mtime"
+    )
+
+    stub_order = """
+      CASE
+        WHEN trim(COALESCE(name_zh, '')) = '' THEN 1
+        WHEN name_zh = id THEN 1
+        ELSE 0
+      END ASC
+    """
 
     _path, conn = _open(db)
     try:
-        if q:
-            like = f"%{q}%"
+        where = ["1=1"]
+        args: list = []
+        if p["q"]:
+            like = f"%{p['q']}%"
+            where.append("(id LIKE ? OR name_zh LIKE ? OR name_en LIKE ?)")
+            args.extend([like, like, like])
+        if p["faction"]:
+            where.append("faction = ?")
+            args.append(p["faction"])
+        if p["skin_count"] == "none":
+            where.append(
+                "(SELECT count(*) FROM skins s WHERE s.character_id = characters.id) = 0"
+            )
+        elif p["skin_count"] == "some":
+            where.append(
+                "(SELECT count(*) FROM skins s WHERE s.character_id = characters.id) >= 1"
+            )
+        elif p["skin_count"] == "many":
+            where.append(
+                "(SELECT count(*) FROM skins s WHERE s.character_id = characters.id) >= 3"
+            )
+        where_sql = " AND ".join(where)
+
+        if not need_assets and p["sort"] in ("default", "updated"):
+            if p["sort"] == "updated":
+                order_sql = f"datetime(updated_at) {'ASC' if p['order'] == 'asc' else 'DESC'}, id ASC"
+            else:
+                order_sql = f"{stub_order}, name_zh COLLATE NOCASE ASC, id ASC"
             rows = conn.execute(
-                """
+                f"""
                 SELECT * FROM characters
-                WHERE id LIKE ? OR name_zh LIKE ? OR name_en LIKE ?
-                ORDER BY id LIMIT ? OFFSET ?
+                WHERE {where_sql}
+                ORDER BY {order_sql}
+                LIMIT ? OFFSET ?
                 """,
-                (like, like, like, limit, offset),
+                (*args, p["limit"], p["offset"]),
             ).fetchall()
             total = conn.execute(
-                """
-                SELECT count(*) FROM characters
-                WHERE id LIKE ? OR name_zh LIKE ? OR name_en LIKE ?
-                """,
-                (like, like, like),
+                f"SELECT count(*) FROM characters WHERE {where_sql}",
+                args,
             ).fetchone()[0]
-        else:
-            rows = conn.execute(
-                "SELECT * FROM characters ORDER BY id LIMIT ? OFFSET ?",
-                (limit, offset),
-            ).fetchall()
-            total = conn.execute("SELECT count(*) FROM characters").fetchone()[0]
-        characters = []
+            characters = []
+            for r in rows:
+                d = _row_to_dict(r)
+                cid = str(d.get("id") or "")
+                name_zh = str(d.get("name_zh") or "").strip()
+                d["avatar_url"] = avatar_public_url(cid)
+                d["unnamed_stub"] = (not name_zh) or (name_zh == cid)
+                characters.append(d)
+            return 200, {
+                "ok": True,
+                "db": db,
+                "characters": characters,
+                "total": total,
+                "offset": p["offset"],
+                "limit": p["limit"],
+            }
+
+        # Asset filters / import_mtime: load candidates then filter/sort/paginate in Python
+        rows = conn.execute(
+            f"SELECT * FROM characters WHERE {where_sql}",
+            args,
+        ).fetchall()
+        enriched: list[dict] = []
         for r in rows:
             d = _row_to_dict(r)
-            d["avatar_url"] = avatar_public_url(str(d.get("id") or ""))
-            characters.append(d)
+            cid = str(d.get("id") or "")
+            name_zh = str(d.get("name_zh") or "").strip()
+            agg = aggregate_character_assets(conn, cid)
+            d["skin_count"] = agg["skin_count"]
+            d["kanmusu_status"] = agg["kanmusu_status"]
+            d["pet_status"] = agg["pet_status"]
+            d["import_mtime"] = agg["import_mtime"]
+            d["avatar_url"] = avatar_public_url(cid)
+            d["unnamed_stub"] = (not name_zh) or (name_zh == cid)
+            if p["kanmusu"] != "all" and d["kanmusu_status"] != p["kanmusu"]:
+                continue
+            if p["pet"] != "all" and d["pet_status"] != p["pet"]:
+                continue
+            enriched.append(d)
+
+        reverse = p["order"] != "asc"
+        if p["sort"] == "import_mtime":
+            enriched.sort(
+                key=lambda c: (
+                    c.get("import_mtime") is None,
+                    (
+                        -(c["import_mtime"] or 0)
+                        if reverse
+                        else (c["import_mtime"] or 0)
+                    ),
+                    c.get("id") or "",
+                )
+            )
+        elif p["sort"] == "updated":
+            enriched.sort(
+                key=lambda c: (c.get("updated_at") or "", c.get("id") or ""),
+                reverse=reverse,
+            )
+        else:
+            enriched.sort(
+                key=lambda c: (
+                    1 if c.get("unnamed_stub") else 0,
+                    (c.get("name_zh") or "").lower(),
+                    c.get("id") or "",
+                )
+            )
+
+        total = len(enriched)
+        page = enriched[p["offset"] : p["offset"] + p["limit"]]
         return 200, {
             "ok": True,
             "db": db,
-            "characters": characters,
+            "characters": page,
             "total": total,
-            "offset": offset,
-            "limit": limit,
+            "offset": p["offset"],
+            "limit": p["limit"],
         }
     finally:
         conn.close()
@@ -296,6 +442,15 @@ def _create_character(db: str, body: dict) -> tuple[int, dict]:
     cid = (body.get("id") or "").strip()
     if not cid:
         return 400, {"ok": False, "error": "id required"}
+    if is_folder_like_character_id(cid):
+        base, suffix = strip_skin(cid)
+        return 400, {
+            "ok": False,
+            "error": (
+                f"id {cid!r} looks like a skin folder (suffix {suffix!r}); "
+                f"use character id {base!r} and create a skin instead"
+            ),
+        }
     name_zh = (body.get("name_zh") or body.get("name") or "").strip()
     if not name_zh:
         return 400, {"ok": False, "error": "name_zh required"}
@@ -636,6 +791,10 @@ def handle(
     m = re.fullmatch(r"/api/roster/meta", path)
     if m and method == "GET":
         return _meta(db)
+
+    m = re.fullmatch(r"/api/roster/factions", path)
+    if m and method == "GET":
+        return _list_factions(db)
 
     m = re.fullmatch(r"/api/roster/characters", path)
     if m:

@@ -97,11 +97,11 @@
 
 ## 验收
 
-- [ ] 自用库页无「导入 Wiki」按钮  
-- [ ] 打开自用库自动出现「Wiki 补齐」toast 并跑完三阶段  
-- [ ] 角色列表出现 Wiki 舰船；皮肤为 TabContainer 权威 id，无 `aijier_3` 类脏皮新建  
-- [ ] 台词在皮肤阶段之后写入；回执中 `roster_unmatched` 不为解包脏皮主导  
-- [ ] bundled 不自动联网  
+- [x] 自用库页无「导入 Wiki」按钮  
+- [x] 打开自用库自动出现「Wiki 补齐」toast 并跑完三阶段  
+- [x] 角色列表出现 Wiki 舰船；皮肤为 TabContainer 权威 id，无 `aijier_3` 类脏皮新建  
+- [x] 台词在皮肤阶段之后写入；回执中 `roster_unmatched` 不为解包脏皮主导  
+- [x] bundled 不自动联网  
 
 ## 实现提示（非规范约束）
 

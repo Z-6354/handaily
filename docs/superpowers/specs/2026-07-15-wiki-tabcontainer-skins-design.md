@@ -1,7 +1,7 @@
 # Wiki TabContainer 定皮肤再绑台词 — 设计
 
 **日期**: 2026-07-15  
-**状态**: 已批准（思路 1 · 誓约规则 C）  
+**状态**: 已实现  
 **相关**: `2026-07-15-per-skin-wiki-lines-design.md` · `2026-07-15-wiki-lines-auto-fetch-design.md`
 
 ## 目标

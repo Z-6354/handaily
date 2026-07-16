@@ -1,6 +1,8 @@
 # hanimport Roster Avatar Grid Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**进度**: 已完成（2026-07-15）
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Local Wiki avatars under `data/roster/avatars/`, roster left pane as avatar grid + detail, background fetch job with pauseable toast UI.
 
@@ -11,6 +13,7 @@
 **Spec:** `docs/superpowers/specs/2026-07-15-hanimport-roster-avatar-grid-design.md`
 
 ## Global Constraints
+
 
 - Avatars: `data/roster/avatars/{id}.{ext}` only
 - No modal progress dialog — toast only with pause/resume
@@ -39,34 +42,34 @@
 
 **Files:** create `data/roster/avatars/.gitkeep`; modify `.gitignore`, `roster_db.py`, `roster_api.py`, `serve_web.py`; test `test_avatar_fetch.py`
 
-- [ ] Avatars dir helper `avatars_dir() -> Path`, `resolve_avatar_file(id) -> Path|None`, `avatar_public_url(id) -> str|None`
-- [ ] `GET /avatars/{id}` safe
-- [ ] Characters list items include `avatar_url`
-- [ ] pytest: resolve missing/present; path traversal 404
-- [ ] Commit
+- [x] Avatars dir helper `avatars_dir() -> Path`, `resolve_avatar_file(id) -> Path|None`, `avatar_public_url(id) -> str|None`
+- [x] `GET /avatars/{id}` safe
+- [x] Characters list items include `avatar_url`
+- [x] pytest: resolve missing/present; path traversal 404
+- [x] Commit
 
 ### Task 2: Download worker + pause/resume job
 
 **Files:** `avatar_fetch.py`, `job_store.py`, `roster_api.py`, `serve_web.py`, tests
 
-- [ ] `lookup_avatar_url(wiki_db, wiki_title, name_zh) -> str|None` from `catalog`
-- [ ] `download_avatar(url, dest_stem) -> Path`
-- [ ] `run_fetch_avatars_job(job_id, char_ids, ...)` loop with pause checks; status `paused` via phase or status field per spec (`phase` or use `status=paused`)
-- [ ] Spec uses status/phase: implement `status` in `{queued,running,paused,done,error}` for fetch jobs
-- [ ] `POST .../fetch-avatars`, `POST /api/jobs/{id}/pause|resume`
-- [ ] Commit
+- [x] `lookup_avatar_url(wiki_db, wiki_title, name_zh) -> str|None` from `catalog`
+- [x] `download_avatar(url, dest_stem) -> Path`
+- [x] `run_fetch_avatars_job(job_id, char_ids, ...)` loop with pause checks; status `paused` via phase or status field per spec (`phase` or use `status=paused`)
+- [x] Spec uses status/phase: implement `status` in `{queued,running,paused,done,error}` for fetch jobs
+- [x] `POST .../fetch-avatars`, `POST /api/jobs/{id}/pause|resume`
+- [x] Commit
 
 ### Task 3: Grid UI + toast
 
 **Files:** `roster.html`, `roster.css`, `roster.js`
 
-- [ ] Replace left list with card grid; keep selection → detail
-- [ ] Toast component; auto-start fetch when local + missing; poll job; pause/resume/hide
-- [ ] Default page size 48
-- [ ] Commit
+- [x] Replace left list with card grid; keep selection → detail
+- [x] Toast component; auto-start fetch when local + missing; poll job; pause/resume/hide
+- [x] Default page size 48
+- [x] Commit
 
 ### Task 4: Wire import-wiki enqueue + smoke
 
-- [ ] After import-wiki success, start/merge fetch for upserted ids (local)
-- [ ] pytest + manual checklist note
-- [ ] Commit; mark spec 已实现
+- [x] After import-wiki success, start/merge fetch for upserted ids (local)
+- [x] pytest + manual checklist note
+- [x] Commit; mark spec 已实现

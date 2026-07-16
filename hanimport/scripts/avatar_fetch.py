@@ -5,6 +5,7 @@ import re
 import sqlite3
 import urllib.error
 import urllib.request
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -13,6 +14,7 @@ from roster_db import repo_root, roster_dir
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,120}$")
 _USER_AGENT = "hanimport-avatar/0.1 (+local; handaily)"
+_LATIN_TOKEN = re.compile(r"^[A-Za-z]+$")
 
 
 def avatars_dir() -> Path:
@@ -23,6 +25,14 @@ def avatars_dir() -> Path:
 
 def is_safe_character_id(cid: str) -> bool:
     return bool(cid and _SAFE_ID.match(cid))
+
+
+def to_pinyin_slug(text: str) -> str:
+    """Chinese (or mixed) display name → live2d-style slug (no tones, latin only)."""
+    from pypinyin import lazy_pinyin
+
+    parts = lazy_pinyin(text or "")
+    return "".join(p for p in parts if _LATIN_TOKEN.match(p)).lower()
 
 
 def resolve_avatar_file(cid: str) -> Path | None:
@@ -48,11 +58,48 @@ def default_wiki_db() -> Path:
     return repo_root() / "mcp" / "blhx-wiki" / "data" / "blhx.sqlite"
 
 
+@lru_cache(maxsize=4)
+def _catalog_slug_index(wiki_db_str: str) -> dict[str, dict[str, str]]:
+    """slug → {wiki_title, display_name, avatar_url} from catalog (pinyin of CN names)."""
+    path = Path(wiki_db_str)
+    if not path.is_file():
+        return {}
+    out: dict[str, dict[str, str]] = {}
+    conn = sqlite3.connect(str(path))
+    try:
+        rows = conn.execute(
+            """
+            SELECT wiki_title, display_name, avatar_url FROM catalog
+            WHERE avatar_url IS NOT NULL AND length(avatar_url) > 0
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+    for wiki_title, display_name, avatar_url in rows:
+        title = (wiki_title or "").strip()
+        display = (display_name or "").strip() or title
+        url = (avatar_url or "").strip()
+        if not url:
+            continue
+        for label in (display, title):
+            if not label:
+                continue
+            slug = to_pinyin_slug(label)
+            if slug and slug not in out:
+                out[slug] = {
+                    "wiki_title": title or display,
+                    "display_name": display or title,
+                    "avatar_url": url,
+                }
+    return out
+
+
 def lookup_avatar_url(
     wiki_db: Path,
     *,
     wiki_title: str = "",
     name_zh: str = "",
+    character_id: str = "",
 ) -> str | None:
     if not wiki_db.is_file():
         return None
@@ -61,8 +108,6 @@ def lookup_avatar_url(
         s = (k or "").strip()
         if s and s not in keys:
             keys.append(s)
-    if not keys:
-        return None
     conn = sqlite3.connect(str(wiki_db))
     try:
         for key in keys:
@@ -79,6 +124,119 @@ def lookup_avatar_url(
                 return str(row[0]).strip()
     finally:
         conn.close()
+
+    # Unpacked stubs: name_zh == pinyin id; resolve via catalog pinyin slug
+    slug = (character_id or "").strip().lower()
+    if not slug:
+        for k in keys:
+            if k.isascii() and k.replace("_", "").isalnum():
+                slug = k.lower()
+                break
+    if slug:
+        hit = resolve_catalog_by_slug(wiki_db, slug)
+        if hit and hit.get("avatar_url"):
+            return hit["avatar_url"]
+    return None
+
+
+def _load_slug_aliases() -> dict[str, str]:
+    from roster_db import LIVE2D_ALIASES, load_json, repo_root
+
+    return {
+        **LIVE2D_ALIASES,
+        **load_json(repo_root() / "mcp" / "blhx-wiki" / "data" / "live2d-aliases.json", {}),
+    }
+
+
+def _slug_lookup_candidates(slug: str) -> list[str]:
+    """Exact slug plus soft variants (class suffix / ding↔ting)."""
+    s = (slug or "").strip().lower()
+    if not s:
+        return []
+    out: list[str] = []
+
+    def add(x: str) -> None:
+        if x and x not in out:
+            out.append(x)
+
+    add(s)
+    for suf in ("_cv", "_bb", "_dd", "_cl", "_ca", "_ss", "_bc", "_cvl", "_doa"):
+        if s.endswith(suf):
+            add(s[: -len(suf)])
+    if s.endswith("ding"):
+        add(s[:-4] + "ting")
+    elif s.endswith("ting"):
+        add(s[:-4] + "ding")
+    return out
+
+
+def _catalog_row_by_cn(wiki_db: Path, name: str) -> dict[str, str] | None:
+    name = (name or "").strip()
+    if not name or not wiki_db.is_file():
+        return None
+    conn = sqlite3.connect(str(wiki_db))
+    try:
+        row = conn.execute(
+            """
+            SELECT wiki_title, display_name, avatar_url FROM catalog
+            WHERE (wiki_title = ? OR display_name = ?)
+              AND avatar_url IS NOT NULL AND length(avatar_url) > 0
+            LIMIT 1
+            """,
+            (name, name),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    title = (row[0] or "").strip()
+    display = (row[1] or "").strip() or title
+    url = (row[2] or "").strip()
+    if not url:
+        return None
+    return {
+        "wiki_title": title or display,
+        "display_name": display or title,
+        "avatar_url": url,
+    }
+
+
+def resolve_catalog_by_slug(wiki_db: Path, slug: str) -> dict[str, str] | None:
+    """Map live2d folder / character id → catalog row via pinyin / aliases.
+
+    Game folders sometimes use nonstandard pinyin (aimierbeierding vs
+    埃米尔·贝尔汀 → aimierbeierting). Aliases + ding↔ting soft match cover that.
+    """
+    slug = (slug or "").strip().lower()
+    if not slug or not wiki_db.is_file():
+        return None
+
+    from roster_db import strip_skin
+
+    base, _suffix = strip_skin(slug)
+    index = _catalog_slug_index(str(wiki_db.resolve()))
+    aliases = _load_slug_aliases()
+    tried: set[str] = set()
+    for cand in _slug_lookup_candidates(slug) + _slug_lookup_candidates(base):
+        if cand in tried:
+            continue
+        tried.add(cand)
+        cn = (aliases.get(cand) or "").strip()
+        if cn:
+            hit = _catalog_row_by_cn(wiki_db, cn)
+            if hit:
+                return hit
+        hit = index.get(cand)
+        if hit:
+            return hit
+        # Ship codes: z23 → Z23, u2501 → U-2501 (alias preferred; also try uppercase)
+        if cand[:1].isalpha() and any(ch.isdigit() for ch in cand):
+            for form in (cand.upper(), cand.upper().replace("U", "U-", 1) if cand.startswith("u") and cand[1:].isdigit() else ""):
+                if not form:
+                    continue
+                hit = _catalog_row_by_cn(wiki_db, form)
+                if hit:
+                    return hit
     return None
 
 
@@ -166,6 +324,7 @@ def fetch_one(
         wiki_db,
         wiki_title=character.get("wiki_title") or "",
         name_zh=character.get("name_zh") or "",
+        character_id=cid,
     )
     if not url:
         return {"id": cid, "status": "skipped", "reason": "no_url"}

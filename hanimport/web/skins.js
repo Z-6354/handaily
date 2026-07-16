@@ -35,11 +35,11 @@
   function linesCell(status, wikiSkin, count) {
     const map = {
       ready: "就绪",
-      empty: "缺台词",
+      empty: "无台词",
       unmatched: "未匹配",
       stale_flat: "旧复制",
     };
-    const label = map[status] || status || "缺台词";
+    const label = map[status] || status || "无台词";
     const tip = [label, count != null ? `${count}条` : null, wikiSkin ? `Wiki:${wikiSkin}` : null]
       .filter(Boolean)
       .join(" · ");

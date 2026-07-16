@@ -1,4 +1,4 @@
-# Remove stale HANDAILY/target at repo root (canonical: src-tauri/target)
+# Remove stale HANDAILY/target at repo root (canonical: hanpet/src-tauri/target)
 . "$PSScriptRoot\_common.ps1"
 Initialize-ScriptEncoding
 $Root = Get-ProjectRoot

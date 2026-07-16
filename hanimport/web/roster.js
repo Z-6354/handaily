@@ -32,13 +32,53 @@
 
   function summarize(data) {
     if (!data || typeof data !== "object") return String(data);
-    const keys = ["ok", "filled", "error", "message", "counts", "allowlist", "bundled_db", "deleted", "skins_lines_ok", "skins_lines_empty", "wiki_skins_unmatched", "roster_skins_unmatched"];
-    const pick = {};
-    for (const k of keys) {
-      if (k in data) pick[k] = data[k];
+    if (data.error) return String(data.error);
+    if (data.message) return String(data.message);
+
+    const parts = [];
+    if ("filled" in data) parts.push(`补齐 ${data.filled}`);
+    if ("deleted" in data) parts.push(`删除 ${data.deleted}`);
+    if ("allowlist" in data) parts.push(`白名单 ${data.allowlist}`);
+    if (data.bundled_db) parts.push(`自带库 ${data.bundled_db}`);
+    if (data.counts && typeof data.counts === "object") {
+      const c = data.counts;
+      const bits = Object.keys(c)
+        .slice(0, 6)
+        .map((k) => `${k}=${c[k]}`);
+      if (bits.length) parts.push(bits.join(" · "));
     }
-    if (Object.keys(pick).length === 0) return JSON.stringify(data).slice(0, 400);
-    return JSON.stringify(pick);
+    if ("skins_lines_ok" in data || "skins_lines_empty" in data) {
+      parts.push(
+        `台词就绪 ${data.skins_lines_ok || 0}` +
+          ` · Wiki无该皮台词 ${data.skins_lines_empty || 0}` +
+          ` · Wiki套未对上 ${data.wiki_skins_unmatched || 0}` +
+          ` · 库皮未对上 ${data.roster_skins_unmatched || 0}`
+      );
+    }
+    if (parts.length) return parts.join("；");
+    if (data.ok === true) return "成功";
+    return JSON.stringify(data).slice(0, 240);
+  }
+
+  /** Human-readable lines_report row (avoid raw JSON in the log). */
+  function formatLinesReportItem(item) {
+    if (!item || typeof item !== "object") return String(item);
+    const cid = item.character_id || "?";
+    if (item.type === "roster_unmatched") {
+      const sid = item.skin_id || "?";
+      const name = item.name_zh ? `「${item.name_zh}」` : "";
+      return `库皮无对应 Wiki 套：${cid} / ${sid}${name}`;
+    }
+    if (item.type === "wiki_unmatched") {
+      const skin = item.skin || item.wiki_skin || "?";
+      const n = item.line_count != null ? `（${item.line_count} 条）` : "";
+      return `Wiki 套无对应库皮：${cid} / ${skin}${n}`;
+    }
+    if (item.type === "empty") {
+      return `皮无台词：${cid} / ${item.skin_id || item.skin || "?"}`;
+    }
+    const sid = item.skin_id || item.skin || "";
+    return sid ? `${cid} · ${sid}` : cid;
   }
 
   async function rosterFetch(path, opts = {}) {
@@ -105,8 +145,10 @@
     $("char-empty").hidden = false;
     $("char-form").hidden = true;
     $("skins-block").hidden = true;
+    $("skins-empty").hidden = false;
     $("btn-save-char").disabled = true;
     $("btn-del-char").disabled = true;
+    $("btn-new-skin").disabled = true;
     $("btn-new-line").disabled = true;
     $("lines-empty").hidden = false;
     $("line-list").innerHTML = "";
@@ -145,13 +187,47 @@
       .replace(/"/g, "&quot;");
   }
 
+  function filterParams() {
+    return {
+      faction: ($("flt-faction").value || "").trim(),
+      skin_count: $("flt-skin-count").value || "all",
+      kanmusu: $("flt-kanmusu").value || "all",
+      pet: $("flt-pet").value || "all",
+      sort: $("flt-sort").value || "default",
+      order: $("flt-order").value || "desc",
+    };
+  }
+
+  async function loadFactions() {
+    const sel = $("flt-faction");
+    const prev = sel.value;
+    const data = await rosterFetch("/api/roster/factions");
+    sel.innerHTML = '<option value="">全部</option>';
+    for (const f of data.factions || []) {
+      const opt = document.createElement("option");
+      opt.value = f;
+      opt.textContent = f;
+      sel.appendChild(opt);
+    }
+    if (prev && [...sel.options].some((o) => o.value === prev)) {
+      sel.value = prev;
+    }
+  }
+
   async function loadCharacters() {
     const q = ($("char-search").value || "").trim();
+    const f = filterParams();
     const params = new URLSearchParams({
       offset: String(offset),
       limit: String(limit),
+      skin_count: f.skin_count,
+      kanmusu: f.kanmusu,
+      pet: f.pet,
+      sort: f.sort,
+      order: f.order,
     });
     if (q) params.set("q", q);
+    if (f.faction) params.set("faction", f.faction);
     const data = await rosterFetch(`/api/roster/characters?${params}`);
     total = data.total || 0;
     const list = $("char-list");
@@ -164,6 +240,7 @@
       card.dataset.id = ch.id;
       card.setAttribute("role", "listitem");
       if (ch.id === selectedCharId) card.classList.add("selected");
+      if (ch.unnamed_stub) card.classList.add("char-card-stub");
       const nameZh = ch.name_zh || ch.id;
       const initial = String(nameZh).trim().charAt(0) || "?";
       if (ch.avatar_url) {
@@ -195,8 +272,8 @@
 
   const PHASE_TITLE = {
     characters: "Wiki 补齐 · 同步角色",
-    avatars_skins: "Wiki 补齐 · 头像与皮肤",
-    lines: "Wiki 补齐 · 导入台词",
+    avatars_skins: "Wiki 补齐 · 皮肤与头像",
+    lines: "Wiki 补齐 · 抓取/写入",
     done: "Wiki 补齐 · 完成",
   };
 
@@ -219,7 +296,9 @@
     const pct = total ? Math.round((100 * current) / total) : 0;
     fill.style.width = pct + "%";
     counts.textContent =
-      `${current}/${total} · 成功 ${job.ok_count || 0} · 跳过 ${job.skip_count || 0} · 失败 ${job.fail_count || 0}`;
+      total > 0
+        ? `${current}/${total}`
+        : `${job.ok_count || 0}·${job.skip_count || 0}·${job.fail_count || 0}`;
 
     const phaseLabel = PHASE_TITLE[job.phase] || "Wiki 补齐";
     if (job.status === "paused") {
@@ -230,24 +309,44 @@
     } else if (job.status === "done") {
       title.textContent = PHASE_TITLE.done;
       btn.hidden = true;
-      sub.textContent = `台词就绪 ${job.ok_count || 0} · 空 ${job.skip_count || 0} · 未匹配 ${job.fail_count || 0}`;
+      const v = ((job.results || [])[0] || {}).validation || {};
+      if (v.summary) {
+        sub.textContent = v.ok
+          ? `验收通过 · 台词就绪 ${v.lines_ready ?? job.ok_count ?? 0}`
+          : `验收未达标 · 未匹配 ${v.unmatched_skins ?? job.fail_count ?? 0}`;
+        sub.title = v.summary;
+      } else {
+        sub.textContent =
+          `台词就绪 ${job.ok_count || 0}` +
+          ` · 无台词 ${job.skip_count || 0}` +
+          ` · 未匹配 ${job.fail_count || 0}`;
+        sub.removeAttribute("title");
+      }
+      counts.textContent = v.ok === false ? "需检查" : "完成";
     } else if (job.status === "error") {
       title.textContent = "Wiki 补齐失败";
       btn.hidden = true;
-      sub.textContent = job.error || "未知错误";
+      const err = String(job.error || "未知错误");
+      sub.textContent = err.length > 80 ? err.slice(0, 80) + "…" : err;
+      sub.title = err;
     } else {
       title.textContent = phaseLabel;
       btn.hidden = false;
       btn.textContent = "暂停";
       const tip =
         job.phase === "avatars_skins"
-          ? "头像队列 / 皮肤增量"
+          ? "权威皮肤同步 / 头像"
           : job.phase === "lines"
-            ? "台词抓取与写入"
-            : "角色 → 头像/皮肤 → 台词";
-      sub.textContent = job.current_item
-        ? `${job.current_item}`
+            ? "抓取皮肤+台词 → 写入 roster"
+            : "角色 → 抓取 → 皮肤 → 台词";
+      const item = String(job.current_item || "");
+      sub.textContent = item
+        ? item.length > 42
+          ? item.slice(0, 40) + "…"
+          : item
         : tip;
+      if (item.length > 42) sub.title = item;
+      else sub.removeAttribute("title");
     }
     showPipelineToast(true);
   }
@@ -336,9 +435,11 @@
     const ch = data.character;
     $("char-empty").hidden = true;
     $("char-form").hidden = false;
+    $("skins-empty").hidden = true;
     $("skins-block").hidden = false;
     $("btn-save-char").disabled = false;
     $("btn-del-char").disabled = false;
+    $("btn-new-skin").disabled = false;
     $("f-id").value = ch.id;
     $("f-id").readOnly = true;
     $("f-name-zh").value = ch.name_zh || "";
@@ -361,8 +462,10 @@
     $("char-empty").hidden = true;
     $("char-form").hidden = false;
     $("skins-block").hidden = true;
+    $("skins-empty").hidden = false;
     $("btn-save-char").disabled = false;
     $("btn-del-char").disabled = true;
+    $("btn-new-skin").disabled = true;
     $("f-id").value = "";
     $("f-id").readOnly = false;
     $("f-name-zh").value = "";
@@ -458,11 +561,11 @@
   function linesStatusDot(status, wikiSkin, count) {
     const map = {
       ready: "就绪",
-      empty: "缺台词",
+      empty: "无台词",
       unmatched: "未匹配",
       stale_flat: "旧复制",
     };
-    const label = map[status] || status || "缺台词";
+    const label = map[status] || status || "无台词";
     const tipParts = [label];
     if (count != null) tipParts.push(`${count} 条`);
     if (wikiSkin) tipParts.push(`Wiki: ${wikiSkin}`);
@@ -733,17 +836,40 @@
     appendLog(`→ ${name} …`);
     try {
       const data = await rosterFetch(path, { method: "POST", body: body || {} });
-      appendLog(`${name} 完成 ` + summarize(data), "ok");
-      if (
-        name.includes("Wiki") &&
-        (data.wiki_skins_unmatched || data.roster_skins_unmatched || data.skins_lines_empty)
-      ) {
-        appendLog(
-          `台词需检查：Wiki未匹配 ${data.wiki_skins_unmatched || 0} · 库皮未匹配 ${data.roster_skins_unmatched || 0} · 空台词 ${data.skins_lines_empty || 0}`,
-          "err"
+      appendLog(`${name} 完成：` + summarize(data), "ok");
+      const unmatched =
+        (data.wiki_skins_unmatched || 0) + (data.roster_skins_unmatched || 0);
+      const empty = data.skins_lines_empty || 0;
+      if (name.includes("Wiki") && (unmatched || empty)) {
+        if (unmatched) {
+          appendLog(
+            `台词需检查：库皮未对上 ${data.roster_skins_unmatched || 0}` +
+              ` · Wiki套未对上 ${data.wiki_skins_unmatched || 0}` +
+              `（未对上不会写入错误皮）`,
+            "err"
+          );
+        }
+        if (empty && !unmatched) {
+          appendLog(
+            `说明：${empty} 套皮在 Wiki 无独立台词（正常，非失败）`,
+            "muted"
+          );
+        } else if (empty) {
+          appendLog(
+            `另有 ${empty} 套皮 Wiki 无独立台词（可忽略）`,
+            "muted"
+          );
+        }
+        const report = data.lines_report || [];
+        const focus = report.filter(
+          (x) => x && (x.type === "roster_unmatched" || x.type === "wiki_unmatched")
         );
-        for (const item of (data.lines_report || []).slice(0, 12)) {
-          appendLog("  · " + JSON.stringify(item), "muted");
+        const show = (focus.length ? focus : report).slice(0, 12);
+        for (const item of show) {
+          appendLog("  · " + formatLinesReportItem(item), "muted");
+        }
+        if (report.length > show.length) {
+          appendLog(`  · …其余 ${report.length - show.length} 条见筛选「台词需关注」`, "muted");
         }
       }
       await refreshAll();
@@ -776,10 +902,16 @@
   async function refreshAll() {
     try {
       await loadMeta();
+      await loadFactions();
       await loadCharacters();
     } catch (e) {
       appendLog("刷新失败: " + (e.message || e), "err");
     }
+  }
+
+  function onFilterChange() {
+    offset = 0;
+    loadCharacters().catch((e) => appendLog(String(e.message || e), "err"));
   }
 
   function bind() {
@@ -810,6 +942,16 @@
         loadCharacters().catch((e) => appendLog(String(e.message || e), "err"));
       }, 250);
     });
+    for (const id of [
+      "flt-faction",
+      "flt-skin-count",
+      "flt-kanmusu",
+      "flt-pet",
+      "flt-sort",
+      "flt-order",
+    ]) {
+      $(id).addEventListener("change", onFilterChange);
+    }
 
     fillEnOnBlur($("f-name-en"), () => ($("f-id").value || "").trim());
     fillEnOnBlur($("s-name-en"), () => ($("s-id").value || "").trim());

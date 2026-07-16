@@ -1,43 +1,39 @@
-# 小寒日报
+# HANDAILY
 
-本地活动追踪与日报 — Tauri 2 + Rust + React
+碧蓝航线工具链 + **小寒桌宠** — 项目级 monorepo。
+
+架构：[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+## 应用
+
+| 应用 | 路径 | 说明 |
+|------|------|------|
+| **hanpet** | [hanpet/](hanpet/) | 小寒桌宠（人物皮肤统一管理桌宠 Spine + 舰娘 Cubism） |
+| **hanimport** | [hanimport/](hanimport/) | 开发导入器（解包、roster、批量入库） |
+| **hantransfer** | [hantransfer/](hantransfer/) | 手机 ↔ PC 传输（可选） |
+
+## 工作数据
+
+[data/](data/) — `live2d/`、`model/`、`wiki/`、`roster/`（本地个人库，内容 gitignore）
 
 ## 快速启动
 
-**前置：** [Rust](https://rustup.rs/) 1.77+ · [Node.js](https://nodejs.org/) 22+ · Windows 10/11
-
 ```bash
 npm install
-scripts\start-dev.bat    # 或 npm run tauri:dev
+npm run tauri:dev
 ```
 
-## 打包
+## 常用命令
 
-```bash
-npm run tauri:build          # NSIS 安装包 + exe
-npm run tauri:build:exe      # 仅便携 exe
-scripts\build.ps1 -ExeOnly
-```
-
-产物：`src-tauri\target\release\xiaohan-daily.exe`
-
-日常验证：`npm run check:rust`（仅 lib，最快）· `npm run check:rust:bin`（含主程序链接前检查）· `npm run test:rust`
-
-> 编译慢时：勿并行开多个 `cargo`/`tauri dev`（会抢 build 目录锁）；可选安装 [sccache](https://github.com/mozilla/sccache) 加速重复编译；CLI 工具用 `--release` 运行（如 `roster:export`）。
-
-## 文档
-
-完整架构、模块说明与 120+ 条技术问答见 **[docs/README.md](docs/README.md)**。
-
-## 目录一览
-
-| 路径 | 职责 |
+| 命令 | 说明 |
 |------|------|
-| `src/` | React 前端（主窗口 + 桌宠） |
-| `src-tauri/` | Rust 后端（采集、SQLite、托盘、AI） |
-| `bundled/` | 内置资源唯一源（roster、prompts、桌宠模型、图标模板） |
-| `public/app-icon.png` | 主界面图标（icons 脚本生成） |
-| `scripts/` | 开发/构建/校验脚本 |
-| `docs/questions/` | 技术问答归档 |
+| `npm run tauri:dev` | 开发模式 |
+| `npm run check:all` | Rust + hanimport + 前端构建检查 |
+| `npm run roster:import` | Wiki/内置 → 本地个人 roster 库 |
+| `npm run roster:sync` | 本地库 → 本机 AppData（不给用户） |
+| `npm run roster:publish` | allowlist → 自带 bundled 预览库 |
+| `npm run roster:verify` | 校验本地私有 vs 自带子集 |
+| `npm run build:release` | 打包 NSIS → `release/` |
+| `npm run hanimport -- --help` | 小寒导入器 |
 
-桌宠 Spine 走 npm `@pixi-spine`；模型文件在 `bundled/roster/pet-models/`，经 Vite 插件映射为 `/assets/pet/`（dev）并写入 `dist/`（build）。
+设计规格：[docs/superpowers/specs/](docs/superpowers/specs/)（统一皮肤、双轨 roster、桌宠 Cubism）。

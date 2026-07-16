@@ -1,10 +1,8 @@
-# 统一 Cargo 产物目录（无论从仓库根或 src-tauri 执行 cargo / tauri）
-# 避免 HANDAILY/target 与 src-tauri/target 两套 debug/deps 重复占用磁盘
+# 统一 Cargo 产物目录
 [build]
-target-dir = "src-tauri/target"
+target-dir = "hanpet/src-tauri/target"
 incremental = true
 
-# dev/test 尾段慢的主因之一是巨型 PDB；debug=1 保留行号断点，链接明显更快
 [profile.dev]
 opt-level = 0
 debug = 1
@@ -16,14 +14,5 @@ split-debuginfo = "unpacked"
 inherits = "dev"
 debug = 1
 
-# Windows：用 LLD 替代 MSVC link.exe，全量/增量链接尾段通常快数倍
-# 一次性准备：rustup component add llvm-tools-preview
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld"
-
-[profile.release]
-incremental = true
-
-# 若已安装 sccache（cargo install sccache），build.ps1 会自动启用 RUSTC_WRAPPER
-# [build]
-# rustc-wrapper = "sccache"

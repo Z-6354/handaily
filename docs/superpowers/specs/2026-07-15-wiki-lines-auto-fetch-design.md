@@ -1,7 +1,7 @@
 # 按皮台词自动抓取（仿头像补齐）— 设计
 
 **日期**: 2026-07-15  
-**状态**: 已批准（用户选 A · 实现思路 1 · 参考头像）  
+**状态**: 已实现（并入 auto-pipeline）  
 **相关**: 头像 `2026-07-15-hanimport-roster-avatar-grid-design.md`；按皮台词 `2026-07-15-per-skin-wiki-lines-design.md`
 
 ## 目标

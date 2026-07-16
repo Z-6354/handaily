@@ -6,16 +6,16 @@
   <title>角色库 — 小寒导入器</title>
   <link rel="stylesheet" href="/design-system/tokens.css" />
   <link rel="stylesheet" href="/shell.css" />
-  <link rel="stylesheet" href="/style.css" />
-  <link rel="stylesheet" href="/roster.css" />
+  <link rel="stylesheet" href="/components.css" />
+  <link rel="stylesheet" href="/pages/roster.css" />
 </head>
 <body>
   <div id="shell-root"></div>
   <div class="roster-wrap">
-    <header class="roster-header">
-      <div>
-        <h1>角色库</h1>
-        <p class="sub">浏览与增删改角色 / 皮肤 / 台词 · 运维导入与发布</p>
+    <header class="page-header">
+      <div class="page-header-main">
+        <h1 class="page-title">角色库</h1>
+        <p class="page-sub">浏览与增删改角色 / 皮肤 / 台词 · 自用库自动 Wiki 补齐 · 同步与发布</p>
       </div>
       <div class="db-switch" role="group" aria-label="库切换">
         <button type="button" id="db-local" class="db-btn active" data-db="local">自用库</button>
@@ -42,6 +42,50 @@
           <button type="button" id="btn-new-char" class="primary">新建</button>
         </div>
         <input id="char-search" type="text" placeholder="搜索 id / 中文 / 英文" />
+        <div class="char-filters" id="char-filters">
+          <label>阵营
+            <select id="flt-faction">
+              <option value="">全部</option>
+            </select>
+          </label>
+          <label>皮肤
+            <select id="flt-skin-count">
+              <option value="all">全部</option>
+              <option value="none">无皮肤</option>
+              <option value="some">有皮肤</option>
+              <option value="many">多皮(≥3)</option>
+            </select>
+          </label>
+          <label>Cubism
+            <select id="flt-kanmusu">
+              <option value="all">全部</option>
+              <option value="unbound">未绑定</option>
+              <option value="missing">缺文件</option>
+              <option value="ready">已就绪</option>
+            </select>
+          </label>
+          <label>Spine
+            <select id="flt-pet">
+              <option value="all">全部</option>
+              <option value="unbound">未绑定</option>
+              <option value="missing">缺文件</option>
+              <option value="ready">已就绪</option>
+            </select>
+          </label>
+          <label>排序
+            <select id="flt-sort">
+              <option value="default">默认</option>
+              <option value="updated">修改时间</option>
+              <option value="import_mtime">最新导入</option>
+            </select>
+          </label>
+          <label>顺序
+            <select id="flt-order">
+              <option value="desc">降序</option>
+              <option value="asc">升序</option>
+            </select>
+          </label>
+        </div>
         <div id="char-list" class="char-grid" role="list"></div>
         <div class="pager">
           <button type="button" id="btn-prev" disabled>上一页</button>
@@ -50,56 +94,16 @@
         </div>
       </section>
 
-      <section class="panel col-detail">
+      <section class="panel col-skins">
         <div class="panel-head">
-          <h2>角色详情</h2>
-          <div class="actions-inline">
-            <button type="button" id="btn-save-char" class="primary" disabled>保存</button>
-            <button type="button" id="btn-del-char" disabled>删除</button>
+          <h2>皮肤</h2>
+          <div class="panel-head-actions">
+            <a id="link-all-skins" class="text-link" href="/skins">全库皮肤</a>
+            <button type="button" id="btn-new-skin" disabled>新建皮肤</button>
           </div>
         </div>
-        <div id="char-empty" class="muted placeholder">点左侧头像卡片查看详情，或点「新建」</div>
-        <form id="char-form" class="form" hidden>
-          <label>id（创建后不可改）
-            <input id="f-id" type="text" autocomplete="off" />
-          </label>
-          <label>中文名
-            <input id="f-name-zh" type="text" />
-          </label>
-          <label>英文名（空则 = id）
-            <input id="f-name-en" type="text" />
-          </label>
-          <label>Wiki 标题
-            <input id="f-wiki" type="text" />
-          </label>
-          <label>CV
-            <input id="f-cv" type="text" />
-          </label>
-          <label>阵营
-            <input id="f-faction" type="text" />
-          </label>
-          <label>舰种
-            <input id="f-ship-type" type="text" />
-          </label>
-          <label>稀有度
-            <input id="f-rarity" type="text" />
-          </label>
-          <label>persona_id
-            <input id="f-persona" type="text" />
-          </label>
-          <label>备注
-            <textarea id="f-desc" rows="3"></textarea>
-          </label>
-        </form>
-
+        <div id="skins-empty" class="muted placeholder">先选择角色</div>
         <div class="skins-block" id="skins-block" hidden>
-          <div class="panel-head">
-            <h2>皮肤</h2>
-            <div class="panel-head-actions">
-              <a id="link-all-skins" class="text-link" href="/skins">在皮肤页查看</a>
-              <button type="button" id="btn-new-skin">新建皮肤</button>
-            </div>
-          </div>
           <div class="skin-table-wrap">
             <table class="skin-status-table" aria-label="皮肤双列状态">
               <thead>
@@ -176,24 +180,69 @@
       </section>
     </div>
 
+    <section class="panel char-editor" id="char-editor">
+      <div class="panel-head">
+        <h2>角色资料</h2>
+        <div class="actions-inline">
+          <button type="button" id="btn-save-char" class="primary" disabled>保存</button>
+          <button type="button" id="btn-del-char" disabled>删除</button>
+        </div>
+      </div>
+      <div id="char-empty" class="muted placeholder">点上方头像卡片查看 / 编辑资料，或点「新建」</div>
+      <form id="char-form" class="form char-form-grid" hidden>
+        <label>id（创建后不可改）
+          <input id="f-id" type="text" autocomplete="off" />
+        </label>
+        <label>中文名
+          <input id="f-name-zh" type="text" />
+        </label>
+        <label>英文名（空则 = id）
+          <input id="f-name-en" type="text" />
+        </label>
+        <label>Wiki 标题
+          <input id="f-wiki" type="text" />
+        </label>
+        <label>CV
+          <input id="f-cv" type="text" />
+        </label>
+        <label>阵营
+          <input id="f-faction" type="text" />
+        </label>
+        <label>舰种
+          <input id="f-ship-type" type="text" />
+        </label>
+        <label>稀有度
+          <input id="f-rarity" type="text" />
+        </label>
+        <label>persona_id
+          <input id="f-persona" type="text" />
+        </label>
+        <label class="char-form-span">备注
+          <textarea id="f-desc" rows="2"></textarea>
+        </label>
+      </form>
+    </section>
+
     <section class="panel log-panel">
       <h2>日志</h2>
       <pre id="log"></pre>
     </section>
   </div>
 
-  <aside id="pipeline-toast" class="avatar-toast" hidden aria-live="polite">
-    <div class="avatar-toast-head">
-      <div>
-        <div id="pipeline-toast-title" class="avatar-toast-title">Wiki 补齐</div>
-        <div id="pipeline-toast-sub" class="avatar-toast-sub muted"></div>
+  <aside id="pipeline-toast" class="pipeline-toast" hidden aria-live="polite">
+    <div class="pipeline-toast-main">
+      <div class="pipeline-toast-copy">
+        <span id="pipeline-toast-title" class="pipeline-toast-title">Wiki 补齐</span>
+        <span id="pipeline-toast-sub" class="pipeline-toast-sub"></span>
       </div>
-      <button type="button" id="pipeline-toast-close" class="avatar-toast-x" aria-label="隐藏">✕</button>
+      <div class="pipeline-toast-track" aria-hidden="true">
+        <div id="pipeline-toast-fill"></div>
+      </div>
+      <span id="pipeline-toast-counts" class="pipeline-toast-counts"></span>
     </div>
-    <div class="avatar-toast-bar"><div id="pipeline-toast-fill"></div></div>
-    <div class="avatar-toast-meta">
-      <span id="pipeline-toast-counts" class="muted"></span>
-      <button type="button" id="pipeline-toast-pause" class="avatar-toast-btn">暂停</button>
+    <div class="pipeline-toast-actions">
+      <button type="button" id="pipeline-toast-pause" class="pipeline-toast-btn">暂停</button>
+      <button type="button" id="pipeline-toast-close" class="pipeline-toast-x" aria-label="隐藏">✕</button>
     </div>
   </aside>
 

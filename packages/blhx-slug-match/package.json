@@ -1,0 +1,11 @@
+{
+  "name": "@handaily/blhx-slug-match",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Live2D folder slug matching for hanimport and mcp/blhx-wiki (planned extraction from live2d.ts)",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "check": "echo \"not implemented — see packages/README.md\""
+  }
+}

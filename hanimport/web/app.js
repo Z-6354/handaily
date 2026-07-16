@@ -1,5 +1,8 @@
 const $ = (id) => document.getElementById(id);
 
+/** Extra absolute file paths appended via system dialog (not the main input). */
+let extraFiles = [];
+
 function appendLog(line, cls = "") {
   const el = $("log");
   const span = document.createElement("span");
@@ -35,6 +38,94 @@ function setJobBusy(busy) {
   $("btn-scan").disabled = busy;
   $("btn-unpack").disabled = busy;
   $("btn-config").disabled = busy;
+  const browseIds = [
+    "btn-browse-input",
+    "btn-browse-output",
+    "btn-browse-files",
+    "btn-clear-extra",
+  ];
+  for (const id of browseIds) {
+    const el = $(id);
+    if (!el) continue;
+    if (id === "btn-clear-extra") {
+      el.disabled = busy || !extraFiles.length;
+    } else {
+      el.disabled = busy;
+    }
+  }
+}
+
+function collectInputs() {
+  const main = ($("input-path").value || "").trim();
+  const inputs = [];
+  if (main) inputs.push(main);
+  for (const p of extraFiles) {
+    if (p && !inputs.some((x) => x.toLowerCase() === p.toLowerCase())) {
+      inputs.push(p);
+    }
+  }
+  return inputs;
+}
+
+function renderExtraFiles() {
+  const el = $("extra-files");
+  const clearBtn = $("btn-clear-extra");
+  if (!el) return;
+  if (!extraFiles.length) {
+    el.className = "extra-files muted";
+    el.textContent = "尚未添加";
+    if (clearBtn) clearBtn.disabled = true;
+    return;
+  }
+  el.className = "extra-files";
+  el.innerHTML = extraFiles
+    .map((p, i) => {
+      const path = escapeHtml(p);
+      return (
+        `<li><span class="extra-path" title="${path}">${path}</span>` +
+        `<button type="button" class="ghost extra-remove" data-extra-i="${i}">移除</button></li>`
+      );
+    })
+    .join("");
+  if (clearBtn) clearBtn.disabled = false;
+  el.querySelectorAll("[data-extra-i]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const i = Number(btn.dataset.extraI);
+      if (!Number.isFinite(i)) return;
+      extraFiles.splice(i, 1);
+      renderExtraFiles();
+    });
+  });
+}
+
+async function pickFolderInto(inputId, title) {
+  try {
+    const data = await api("/api/dialog/folder", { title });
+    if (data.cancelled) return;
+    if (data.path) $(inputId).value = data.path;
+  } catch (e) {
+    appendLog(e.message, "err");
+  }
+}
+
+async function pickExtraFiles() {
+  try {
+    const data = await api("/api/dialog/files", { title: "选择要解包的文件" });
+    if (data.cancelled) return;
+    const paths = data.paths || [];
+    let added = 0;
+    for (const p of paths) {
+      const s = String(p || "").trim();
+      if (!s) continue;
+      if (extraFiles.some((x) => x.toLowerCase() === s.toLowerCase())) continue;
+      extraFiles.push(s);
+      added += 1;
+    }
+    renderExtraFiles();
+    if (added) appendLog(`已添加 ${added} 个文件`, "ok");
+  } catch (e) {
+    appendLog(e.message, "err");
+  }
 }
 
 function renderStatus(s) {
@@ -63,21 +154,38 @@ function renderScan(data) {
     $("scan-result").innerHTML = '<span class="muted">未找到 AssetBundle</span>';
     return;
   }
+  const warnHtml =
+    data.warnings && data.warnings.length
+      ? `<div class="warn-list">${data.warnings
+          .map((w) => `<div class="muted">${escapeHtml(w)}</div>`)
+          .join("")}</div>`
+      : "";
   const items = data.bundles
     .map((b) => {
       const slug = escapeHtml(b.slug);
       const path = escapeHtml(b.path);
-      return `<li><label class="check"><input type="checkbox" data-slug="${slug}" checked /> <code>${slug}</code> — ${path}</label></li>`;
+      const pathAttr = escapeHtml(b.path);
+      return (
+        `<li><label class="check">` +
+        `<input type="checkbox" data-slug="${slug}" data-path="${pathAttr}" checked /> ` +
+        `<code>${slug}</code> — ${path}</label></li>`
+      );
     })
     .join("");
   $("scan-result").innerHTML =
-    `<div>共 ${data.bundles.length} 个 bundle：</div><ul class="scan-list">${items}</ul>`;
+    `<div>共 ${data.bundles.length} 个 bundle：</div>${warnHtml}<ul class="scan-list">${items}</ul>`;
 }
 
 function selectedSlugs() {
   const boxes = [...document.querySelectorAll("#scan-result input[data-slug]")];
   if (!boxes.length) return null;
   return boxes.filter((b) => b.checked).map((b) => b.dataset.slug);
+}
+
+function selectedPaths() {
+  const boxes = [...document.querySelectorAll("#scan-result input[data-path]")];
+  if (!boxes.length) return null;
+  return boxes.filter((b) => b.checked).map((b) => b.dataset.path);
 }
 
 function renderProgress(job) {
@@ -161,18 +269,22 @@ async function refreshStatus() {
 }
 
 async function onScan() {
-  const input = $("input-path").value.trim();
-  if (!input) {
-    appendLog("请先填写输入路径", "err");
+  const inputs = collectInputs();
+  if (!inputs.length) {
+    appendLog("请先选择输入文件夹，或添加文件", "err");
     return;
   }
   clearLog();
   appendLog("扫描中…");
   $("btn-scan").disabled = true;
   try {
-    const data = await api("/api/scan", { input });
+    const data = await api("/api/scan", {
+      input: inputs[0],
+      inputs,
+    });
     renderScan(data);
     appendLog(`扫描完成：${data.bundles.length} 个 bundle`, "ok");
+    for (const w of data.warnings || []) appendLog(w);
   } catch (e) {
     appendLog(e.message, "err");
   } finally {
@@ -181,13 +293,14 @@ async function onScan() {
 }
 
 async function onUnpack() {
-  const input = $("input-path").value.trim();
-  if (!input) {
-    appendLog("请先填写输入路径", "err");
+  const inputs = collectInputs();
+  if (!inputs.length) {
+    appendLog("请先选择输入文件夹，或添加文件", "err");
     return;
   }
+  const paths = selectedPaths();
   const slugs = selectedSlugs();
-  if (Array.isArray(slugs) && slugs.length === 0) {
+  if (Array.isArray(paths) && paths.length === 0) {
     appendLog("请至少勾选一个 bundle", "err");
     return;
   }
@@ -199,13 +312,15 @@ async function onUnpack() {
   const logState = { seen: 0, lastFirst: undefined };
   try {
     const body = {
-      input,
+      input: inputs[0],
+      inputs,
       output: $("output-path").value.trim() || null,
       dry_run: $("dry-run").checked,
       continue_on_error: $("opt-continue").checked,
       generate_config: $("opt-gen-config").checked,
     };
-    if (slugs) body.slugs = slugs;
+    if (paths && paths.length) body.paths = paths;
+    else if (slugs) body.slugs = slugs;
     const { job_id } = await api("/api/jobs/unpack", body);
     appendLog(`任务已启动：${job_id}`);
     const job = await pollJob(job_id, (j) => {
@@ -232,9 +347,10 @@ async function onUnpack() {
 }
 
 async function onConfig() {
-  const input = $("input-path").value.trim();
+  const out = ($("output-path").value || "").trim();
+  const input = out || ($("input-path").value || "").trim();
   if (!input) {
-    appendLog("请先填写输入路径", "err");
+    appendLog("请先填写输出目录（或输入路径）", "err");
     return;
   }
   clearLog();
@@ -271,6 +387,18 @@ async function onConfig() {
 $("btn-scan").addEventListener("click", onScan);
 $("btn-unpack").addEventListener("click", onUnpack);
 $("btn-config").addEventListener("click", onConfig);
+$("btn-browse-input")?.addEventListener("click", () =>
+  pickFolderInto("input-path", "选择输入文件夹"),
+);
+$("btn-browse-output")?.addEventListener("click", () =>
+  pickFolderInto("output-path", "选择输出目录"),
+);
+$("btn-browse-files")?.addEventListener("click", pickExtraFiles);
+$("btn-clear-extra")?.addEventListener("click", () => {
+  extraFiles = [];
+  renderExtraFiles();
+});
+renderExtraFiles();
 refreshStatus();
 
 async function resumeJobFromUrl() {

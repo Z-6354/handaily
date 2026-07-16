@@ -1,0 +1,26 @@
+# 忽略工作数据内容，保留目录结构与 README
+*
+!.gitignore
+!README.md
+!live2d/
+!wiki/
+!import/
+!game/
+!model/
+!roster/
+!live2d/.gitkeep
+!wiki/.gitkeep
+!import/.gitkeep
+!game/.gitkeep
+!model/.gitkeep
+!roster/.gitkeep
+!roster/README.md
+!roster/schema.sql
+!roster/bundled-allowlist.json
+!roster/seed/
+!roster/seed/.gitkeep
+roster/*.sqlite
+roster/*.sqlite-*
+roster/audio/
+roster/seed/*.zip
+roster/seed/*.pack.zip

@@ -20,7 +20,7 @@ from pathlib import Path
 from line_skin_match import apply_lines_by_skin, merge_meta_json
 
 SKIN_SUFFIX = re.compile(
-    r"_(?:\d+|h|g|painting|idol|younv|summer|school|winter|swimsuit|wedding|newyear|cn|jp|en|super)$",
+    r"_(?:\d+|h|g|hx|doa|painting|idol|younv|summer|school|winter|swimsuit|wedding|newyear|cn|jp|en|super)$",
     re.I,
 )
 LATIN_RE = re.compile(
@@ -222,10 +222,76 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def strip_skin(folder: str) -> tuple[str, str]:
-    m = SKIN_SUFFIX.search(folder)
-    if not m:
-        return folder, ""
-    return folder[: m.start()], m.group(0)[1:].lower()
+    """Split unpack folder into (character_base, skin_suffix).
+
+    Peels trailing tokens until the base ship id remains:
+      qiye_9 → (qiye, 9)
+      abeikelongbi_3_1 → (abeikelongbi, 3_1)
+      abeikelongbi_3_hx → (abeikelongbi, 3_hx)
+      z23_hx → (z23, hx)
+    """
+    name = folder
+    parts: list[str] = []
+    while True:
+        m = SKIN_SUFFIX.search(name)
+        if not m or m.start() == 0:
+            break
+        # Only peel from the end of the string
+        if m.end() != len(name):
+            break
+        parts.append(m.group(0)[1:].lower())
+        name = name[: m.start()]
+    parts.reverse()
+    return name, "_".join(parts)
+
+
+def is_folder_like_character_id(cid: str) -> bool:
+    """True when id looks like an unpack folder (base + skin suffix), not a character."""
+    _base, suffix = strip_skin((cid or "").strip())
+    return bool(suffix)
+
+
+def purge_folder_like_characters(
+    conn: sqlite3.Connection, alias_map: dict[str, str] | None = None
+) -> int:
+    """Delete character rows whose ids are skin folders; merge into base first.
+
+    Example: abeikelongbi_3 → merge/delete into abeikelongbi.
+    Returns number of folder-like character rows removed.
+    """
+    alias_map = alias_map or LIVE2D_ALIASES
+    donors = [
+        str(r[0])
+        for r in conn.execute("SELECT id FROM characters ORDER BY id")
+        if is_folder_like_character_id(str(r[0]))
+    ]
+    removed = 0
+    for donor in donors:
+        base, _suffix = strip_skin(donor)
+        base = alias_redirect_id(base, alias_map)
+        if not base or base == donor:
+            conn.execute("DELETE FROM skin_lines WHERE skin_id IN (SELECT id FROM skins WHERE character_id=?)", (donor,))
+            conn.execute("DELETE FROM skins WHERE character_id=?", (donor,))
+            conn.execute("DELETE FROM characters WHERE id=?", (donor,))
+            removed += 1
+            continue
+        if not conn.execute("SELECT 1 FROM characters WHERE id=?", (base,)).fetchone():
+            cn = (alias_map.get(base) or "").strip() or base
+            upsert_character(
+                conn,
+                {
+                    "id": base,
+                    "name_zh": cn,
+                    "name_en": "",
+                    "wiki_title": cn,
+                    "persona_id": base,
+                    "source": "unpacked",
+                },
+            )
+        _merge_character_into(conn, donor, base)
+        _repoint_avatar_file(donor, base)
+        removed += 1
+    return removed
 
 
 def skin_label(suffix: str) -> str:
@@ -578,7 +644,12 @@ def _apply_lines_import(
             )
             _note(
                 "lines_report",
-                {"type": "roster_unmatched", "character_id": cid, "skin_id": sid},
+                {
+                    "type": "roster_unmatched",
+                    "character_id": cid,
+                    "skin_id": sid,
+                    "name_zh": sk.get("name_zh") or "",
+                },
             )
         return
 
@@ -717,7 +788,13 @@ def fill_english_names(conn: sqlite3.Connection) -> dict:
 
 
 def upsert_character(conn: sqlite3.Connection, row: dict) -> None:
-    name_en = normalize_name_en(row.get("name_en") or "", row["id"])
+    cid = (row.get("id") or "").strip()
+    if is_folder_like_character_id(cid):
+        raise ValueError(
+            f"folder-like character id rejected (skin suffix): {cid!r}; "
+            "use base id (e.g. abeikelongbi) and attach skins separately"
+        )
+    name_en = normalize_name_en(row.get("name_en") or "", cid)
     conn.execute(
         """
         INSERT INTO characters(
@@ -934,7 +1011,10 @@ def _merge_character_into(
             conn.execute("DELETE FROM skins WHERE id=?", (old_id,))
         else:
             # rename via insert+line move+delete (PK change)
-            cols = [d[0] for d in conn.execute("PRAGMA table_info(skins)").fetchall()]
+            cols = [
+                str(d[1])
+                for d in conn.execute("PRAGMA table_info(skins)").fetchall()
+            ]
             row = {k: sk[k] for k in sk.keys()}
             row["id"] = new_id
             row["character_id"] = canon_cid
@@ -970,8 +1050,16 @@ def merge_roster_duplicates_by_name(
         if len(ids) < 2:
             continue
         pref = preferred_slug_for_cn(name, alias_map)
+        non_hash = [i for i in ids if not HASH_PERSONA_ID.match(i)]
         if pref and pref in ids:
             canon = pref
+        elif non_hash:
+            canon = max(
+                non_hash,
+                key=lambda i: conn.execute(
+                    "SELECT count(*) FROM skins WHERE character_id=?", (i,)
+                ).fetchone()[0],
+            )
         else:
             canon = max(
                 ids,
@@ -983,8 +1071,87 @@ def merge_roster_duplicates_by_name(
             if donor == canon:
                 continue
             _merge_character_into(conn, donor, canon)
+            _repoint_avatar_file(donor, canon)
             merged += 1
     return merged
+
+
+def enrich_unpacked_character_names(
+    conn: sqlite3.Connection, wiki_db: Path | None = None
+) -> int:
+    """Fill Chinese name/wiki_title for stubs where name_zh == id (pinyin folder).
+
+    Uses catalog pinyin slug index. Returns number of characters updated.
+    """
+    from avatar_fetch import default_wiki_db, resolve_catalog_by_slug
+
+    wiki_db = Path(wiki_db) if wiki_db else default_wiki_db()
+    if not wiki_db.is_file():
+        return 0
+    updated = 0
+    rows = conn.execute(
+        "SELECT id, name_zh, wiki_title FROM characters ORDER BY id"
+    ).fetchall()
+    for row in rows:
+        cid = str(row["id"])
+        name_zh = (row["name_zh"] or "").strip()
+        wiki_title = (row["wiki_title"] or "").strip()
+        # Only touch obvious stubs (name still equals slug / empty CN)
+        if name_zh and name_zh != cid and not name_zh.isascii():
+            continue
+        if wiki_title and wiki_title != cid and not wiki_title.isascii():
+            continue
+        base, _ = strip_skin(cid)
+        hit = resolve_catalog_by_slug(wiki_db, cid) or resolve_catalog_by_slug(
+            wiki_db, base
+        )
+        if not hit:
+            continue
+        display = (hit.get("display_name") or hit.get("wiki_title") or "").strip()
+        title = (hit.get("wiki_title") or display).strip()
+        if not display:
+            continue
+        conn.execute(
+            """
+            UPDATE characters SET
+              name_zh=?,
+              wiki_title=?,
+              source=CASE WHEN source='unpacked' THEN 'wiki' ELSE source END,
+              updated_at=datetime('now')
+            WHERE id=?
+            """,
+            (display, title, cid),
+        )
+        updated += 1
+    return updated
+
+
+def _repoint_avatar_file(donor_cid: str, canon_cid: str) -> None:
+    """If donor has an avatar file and canon does not, rename/copy to canon id."""
+    if donor_cid == canon_cid:
+        return
+    try:
+        from avatar_fetch import avatars_dir, resolve_avatar_file
+    except ImportError:
+        return
+    if resolve_avatar_file(canon_cid):
+        return
+    src = resolve_avatar_file(donor_cid)
+    if not src:
+        return
+    dest = avatars_dir() / f"{canon_cid}{src.suffix}"
+    try:
+        if not dest.exists():
+            src.replace(dest)
+        else:
+            src.unlink(missing_ok=True)
+    except OSError:
+        try:
+            import shutil
+
+            shutil.copy2(src, dest)
+        except OSError:
+            pass
 
 
 def _build_cn_to_slug(
@@ -1059,6 +1226,9 @@ def resolve_bind_skin_id(
         sid = skin_db_id(cid, "default")
         exists = conn.execute("SELECT 1 FROM skins WHERE id=?", (sid,)).fetchone()
         return sid if exists else None
+
+    # Pure digit → skinN / skin_index. Compound (3_1 / 3_hx) intentionally
+    # does not fall back to the parent skin — those get dedicated L2D rows.
     if suffix.isdigit():
         sid = f"{cid}-skin{suffix}"
         if conn.execute("SELECT 1 FROM skins WHERE id=?", (sid,)).fetchone():
@@ -1067,14 +1237,65 @@ def resolve_bind_skin_id(
             "SELECT id FROM skins WHERE character_id=? AND skin_index=? LIMIT 1",
             (cid, int(suffix)),
         ).fetchone()
-        return str(row[0]) if row else None
-    # non-digit variant: match kanmusu_dir already, or name contains suffix
+        if row:
+            return str(row[0])
+        return None
+
+    # non-digit / compound: match existing bind by folder-shaped kanmusu_dir or id
     row = conn.execute(
         "SELECT id FROM skins WHERE character_id=? AND "
         "(kanmusu_dir=? OR id=? OR name_zh LIKE ?) LIMIT 1",
         (cid, f"{cid}_{suffix}", f"{cid}-{suffix}", f"%{suffix}%"),
     ).fetchone()
     return str(row[0]) if row else None
+
+
+def ensure_skin_for_unpacked(
+    conn: sqlite3.Connection,
+    cid: str,
+    folder: str,
+    suffix: str,
+) -> str:
+    """Create a roster skin row for an unpacked folder when Wiki has no match."""
+    sid = f"{cid}-L2D-{suffix}" if suffix else f"{cid}-L2D-default"
+    # Keep id filesystem-safe / stable
+    sid = re.sub(r"[^a-zA-Z0-9._-]+", "-", sid)
+    exists = conn.execute("SELECT 1 FROM skins WHERE id=?", (sid,)).fetchone()
+    skin_index = None
+    primary = suffix.split("_", 1)[0] if suffix else ""
+    if primary.isdigit():
+        skin_index = int(primary)
+    name_zh = skin_label(suffix) if suffix else "默认"
+    if suffix and not suffix.isdigit() and "_" in suffix:
+        name_zh = f"皮肤{suffix}"
+    if exists:
+        conn.execute(
+            """
+            UPDATE skins SET
+              kanmusu_dir=?,
+              name_zh=COALESCE(NULLIF(name_zh,''), ?),
+              updated_at=datetime('now')
+            WHERE id=?
+            """,
+            (folder, name_zh, sid),
+        )
+        return sid
+    upsert_skin(
+        conn,
+        {
+            "id": sid,
+            "character_id": cid,
+            "name_zh": name_zh,
+            "name_en": "",
+            "is_default": 1 if not suffix else 0,
+            "skin_index": skin_index,
+            "kanmusu_dir": folder,
+            "source": "unpacked",
+            "lines": [],
+        },
+        replace_lines=False,
+    )
+    return sid
 
 
 def bind_unpacked_models(
@@ -1085,8 +1306,9 @@ def bind_unpacked_models(
     alias_map: dict[str, str] | None = None,
     cn_to_slug: dict[str, str] | None = None,
     only_set: set[str] | None = None,
+    create_missing: bool = True,
 ) -> int:
-    """Attach pet/kanmusu paths onto existing Wiki skins. Never creates id=folder skins."""
+    """Attach pet/kanmusu paths onto Wiki skins; optionally create skins for orphans."""
     if not unpacked.is_dir():
         return 0
     alias_map = alias_map or {}
@@ -1110,10 +1332,10 @@ def bind_unpacked_models(
                 "SELECT 1 FROM characters WHERE id=?", (redirected,)
             ).fetchone():
                 cid = redirected
-            elif redirected != base and conn.execute(
+            elif conn.execute(
                 "SELECT 1 FROM characters WHERE id=?", (base,)
             ).fetchone():
-                cid = alias_redirect_id(base, alias_map)
+                cid = base
             else:
                 continue
         else:
@@ -1122,7 +1344,31 @@ def bind_unpacked_models(
             continue
         sid = resolve_bind_skin_id(conn, cid, suffix)
         if not sid:
-            continue
+            # Also match a prior bind that already points at this exact folder
+            row = conn.execute(
+                "SELECT id FROM skins WHERE character_id=? AND kanmusu_dir=? LIMIT 1",
+                (cid, folder),
+            ).fetchone()
+            sid = str(row[0]) if row else None
+        if not sid:
+            if not create_missing:
+                continue
+            # Ensure character row exists for orphan folders
+            if not conn.execute(
+                "SELECT 1 FROM characters WHERE id=?", (cid,)
+            ).fetchone():
+                upsert_character(
+                    conn,
+                    {
+                        "id": cid,
+                        "name_zh": cn or base,
+                        "name_en": "",
+                        "wiki_title": cn or base,
+                        "persona_id": cid,
+                        "source": "unpacked",
+                    },
+                )
+            sid = ensure_skin_for_unpacked(conn, cid, folder, suffix)
         pet_model_id = ""
         if (pet_models / folder).is_dir():
             pet_model_id = folder
@@ -1185,8 +1431,9 @@ def run_import_wiki(
 
     conn = connect(db)
     apply_schema(conn)
-    # 先合并同名别名双开（aijiang/aijier），再继续导入
+    # 先合并同名别名双开（aijiang/aijier），再清 folder-like 假角色，再继续导入
     merge_roster_duplicates_by_name(conn, alias_map)
+    purge_folder_like_characters(conn, alias_map)
     wiki = sqlite3.connect(str(wiki_db))
     wiki.row_factory = sqlite3.Row
     ship_cols = {r[1] for r in wiki.execute("PRAGMA table_info(ships)")}

@@ -1,0 +1,382 @@
+openapi: 3.0.3
+info:
+  title: hantransfer API
+  version: 0.1.0
+  description: HANDAILY 局域网文件传输协议（Windows desktop ↔ Android）
+
+servers:
+  - url: http://{host}:{port}
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "7822"
+
+paths:
+  /:
+    get:
+      summary: 简单状态页（预留，v0.1 可返回占位 HTML）
+      tags: [status]
+      responses:
+        "200":
+          description: HTML 状态页
+
+  /api/v1/status:
+    get:
+      summary: 服务与设备状态
+      tags: [status]
+      responses:
+        "200":
+          description: 本机设备信息
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiOkStatus"
+
+  /api/v1/info:
+    get:
+      summary: 服务与设备状态（status 别名）
+      tags: [status]
+      responses:
+        "200":
+          description: 同 /api/v1/status
+
+  /api/v1/trust:
+    get:
+      summary: 已信任设备列表
+      tags: [trust]
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/TrustedDevice"
+
+  /api/v1/trust/{device_id}:
+    delete:
+      summary: 撤销设备信任（仅 localhost）
+      tags: [trust]
+      parameters:
+        - in: path
+          name: device_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 已撤销
+        "403":
+          description: 非本机请求
+        "404":
+          description: 设备不在信任列表
+
+  /api/v1/handshake:
+    post:
+      summary: 设备握手（首次连接需 PC 端确认信任）
+      tags: [trust]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HandshakeRequest"
+      responses:
+        "200":
+          description: 已信任，可传输
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HandshakeResponse"
+        "202":
+          description: 等待 PC 端用户确认
+        "403":
+          description: 用户拒绝
+
+  /api/v1/files:
+    post:
+      summary: 上传文件（metadata + file 双 part）
+      tags: [transfer]
+      parameters:
+        - in: header
+          name: X-Hantransfer-Device-ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: header
+          name: X-Hantransfer-Transfer-ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [metadata, file]
+              properties:
+                metadata:
+                  type: string
+                  format: binary
+                  description: JSON metadata（见 schema/metadata.json）
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "201":
+          description: 接收成功
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferResult"
+        "401":
+          description: 设备未信任
+        "400":
+          description: 校验失败
+
+  /api/v1/transfers/{id}:
+    get:
+      summary: 查询传输进度
+      tags: [transfer]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferProgress"
+
+  /api/v1/push:
+    post:
+      summary: 电脑推送文件到手机（仅 localhost）
+      tags: [transfer]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [target_device_id, file]
+              properties:
+                target_device_id:
+                  type: string
+                  format: uuid
+                file:
+                  type: string
+                  format: binary
+      responses:
+        "200":
+          description: 已加入手机待接收队列
+
+  /api/v1/push/outbox:
+    get:
+      summary: 电脑端查看待接收推送队列（仅 localhost）
+      tags: [transfer]
+      responses:
+        "200":
+          description: 队列列表
+
+  /api/v1/push/{id}:
+    delete:
+      summary: 取消未接收的推送（仅 localhost）
+      tags: [transfer]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 已取消
+
+  /api/v1/push/pending:
+    get:
+      summary: 手机拉取待接收推送列表
+      tags: [transfer]
+      parameters:
+        - in: header
+          name: X-Hantransfer-Device-ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 待接收列表
+
+  /api/v1/push/{id}/file:
+    get:
+      summary: 手机下载推送文件
+      tags: [transfer]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: header
+          name: X-Hantransfer-Device-ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 文件二进制流
+
+  /api/v1/push/{id}/ack:
+    post:
+      summary: 手机确认已接收
+      tags: [transfer]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: header
+          name: X-Hantransfer-Device-ID
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: 已确认
+
+components:
+  schemas:
+    ApiOkStatus:
+      type: object
+      required: [ok, data]
+      properties:
+        ok:
+          type: boolean
+          example: true
+        data:
+          $ref: "#/components/schemas/StatusResponse"
+
+    ApiError:
+      type: object
+      required: [ok, error]
+      properties:
+        ok:
+          type: boolean
+          example: false
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    TrustedDevice:
+      type: object
+      required: [device_id, name, platform, trusted_at]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        platform:
+          type: string
+        ip:
+          type: string
+        trusted_at:
+          type: string
+
+    StatusResponse:
+      type: object
+      required: [name, platform, version, device_id, features, port]
+      properties:
+        name:
+          type: string
+          example: HAN-PC
+        platform:
+          type: string
+          example: windows
+        version:
+          type: string
+          example: 0.1.0
+        device_id:
+          type: string
+          format: uuid
+        features:
+          type: array
+          items:
+            type: string
+          example: [send, receive, azurlane-import]
+        port:
+          type: integer
+          example: 7822
+        inbox_dir:
+          type: string
+
+    HandshakeRequest:
+      type: object
+      required: [device_id, name, platform, version]
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        platform:
+          type: string
+        version:
+          type: string
+
+    HandshakeResponse:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [trusted, pending, rejected]
+
+    TransferResult:
+      type: object
+      required: [transfer_id, path, hash]
+      properties:
+        transfer_id:
+          type: string
+          format: uuid
+        path:
+          type: string
+        hash:
+          type: string
+
+    TransferProgress:
+      type: object
+      required: [status, bytes_received, total]
+      properties:
+        status:
+          type: string
+          enum: [receiving, verifying, done, failed]
+        bytes_received:
+          type: integer
+        total:
+          type: integer

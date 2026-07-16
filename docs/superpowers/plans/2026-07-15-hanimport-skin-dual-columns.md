@@ -1,5 +1,8 @@
 # hanimport Skin Dual-Column Inventory Implementation Plan
 
+**进度**: 已完成（2026-07-15）
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans or implement task-by-task in-session.
 
 **Goal:** Show pet Spine / kanmusu Live2D readiness per skin in character detail and on `/skins`.
@@ -11,6 +14,7 @@
 **Spec:** `docs/superpowers/specs/2026-07-15-hanimport-skin-dual-columns-design.md`
 
 ## Global Constraints
+
 
 - No Spine/Cubism player in v1
 - Status: unbound | missing | ready only

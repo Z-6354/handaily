@@ -1,0 +1,19 @@
+[package]
+name = "hanimport"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "HANDAILY dev importer — unpack, plan, batch import"
+publish = false
+
+[[bin]]
+name = "hanimport"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

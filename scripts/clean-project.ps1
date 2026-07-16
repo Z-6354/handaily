@@ -12,7 +12,8 @@ param(
 . "$PSScriptRoot\_common.ps1"
 Initialize-ScriptEncoding
 
-$Root = Get-ProjectRoot
+$Root = Get-RepoRoot
+$Hanpet = Get-HanpetRoot
 $Target = Get-CargoTargetDir
 $freedMb = 0.0
 
@@ -53,8 +54,10 @@ if ($All -or $Debug) {
 
 if ($All) {
     Set-Location $Root
-    Write-Host "cargo clean..." -ForegroundColor Yellow
-    cargo clean --manifest-path src-tauri/Cargo.toml
+    Write-Host "cargo clean (hanpet + hanimport)..." -ForegroundColor Yellow
+    cargo clean -p xiaohan-daily
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo clean -p hanimport
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Host "cargo clean done." -ForegroundColor Green
 }
@@ -76,11 +79,13 @@ Get-ChildItem $Root -Filter "*.tmp" -Recurse -File -ErrorAction SilentlyContinue
 Get-ChildItem $Root -Filter "*.tsbuildinfo" -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object {
     Remove-FileIfExists -Path $_.FullName -Label "tsbuildinfo"
 }
-Remove-FileIfExists -Path (Join-Path $Root "vite.config.d.ts") -Label "vite d.ts"
-Remove-TreeIfExists -Path (Join-Path $Root "node_modules\.vite") -Label "vite cache"
+Remove-FileIfExists -Path (Join-Path $Hanpet "vite.config.d.ts") -Label "vite d.ts"
+Remove-TreeIfExists -Path (Join-Path $Hanpet "node_modules\.vite") -Label "vite cache"
+Remove-TreeIfExists -Path (Join-Path $Root "dist") -Label "stale root dist"
+Remove-TreeIfExists -Path (Join-Path $Hanpet "dist") -Label "hanpet dist"
 
-Remove-TreeIfExists -Path (Join-Path $Root "src-tauri\gen") -Label "tauri gen"
-Remove-TreeIfExists -Path (Join-Path $Root "src-tauri\WixTools") -Label "WixTools"
+Remove-TreeIfExists -Path (Join-Path $Hanpet "src-tauri\gen") -Label "tauri gen"
+Remove-TreeIfExists -Path (Join-Path $Hanpet "src-tauri\WixTools") -Label "WixTools"
 Remove-TreeIfExists -Path (Join-Path $Root ".iterative-hardening") -Label "hardening session"
 
 if ($Debug -and -not $All) {

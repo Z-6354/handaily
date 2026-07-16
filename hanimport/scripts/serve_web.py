@@ -37,6 +37,20 @@ BUNDLE_EXTENSIONS = {".ab", ".unity3d", ".bytes"}
 BUNDLE_MAGIC = b"UnityFS"
 DEFAULT_PORT = 7821
 
+REQUIRED_WEB_ASSETS = (
+    WEB_DIR / "index.html",
+    WEB_DIR / "unpack.html",
+    WEB_DIR / "roster.html",
+    WEB_DIR / "skins.html",
+    WEB_DIR / "shell.css",
+    WEB_DIR / "components.css",
+    WEB_DIR / "design-system" / "tokens.css",
+    WEB_DIR / "pages" / "hub.css",
+    WEB_DIR / "pages" / "unpack.css",
+    WEB_DIR / "pages" / "roster.css",
+    WEB_DIR / "pages" / "skins.css",
+)
+
 
 def repo_root() -> Path:
     env = os.environ.get("HANDAILY_ROOT", "").strip()
@@ -87,6 +101,22 @@ def infer_slug(path: Path) -> str:
     return name.lower()
 
 
+def partition_hx_bundles(
+    bundles: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split bundles into (keep, hx). Hx slugs end with _hx and are never unpacked."""
+    from unpack_complete import is_hx_slug
+
+    keep: list[dict[str, Any]] = []
+    hx: list[dict[str, Any]] = []
+    for b in bundles:
+        if is_hx_slug(str(b.get("slug") or "")):
+            hx.append(b)
+        else:
+            keep.append(b)
+    return keep, hx
+
+
 def discover_bundles(input_path: Path) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     if input_path.is_file():
@@ -101,6 +131,91 @@ def discover_bundles(input_path: Path) -> list[dict[str, str]]:
             if is_unity_bundle(fp):
                 out.append({"path": str(fp), "slug": infer_slug(fp)})
     out.sort(key=lambda x: x["path"].lower())
+    return out
+
+
+def collect_scan_inputs(body: dict[str, Any]) -> list[str]:
+    """Merge body.input + body.inputs, preserve order, drop empties / dupes."""
+    seen: set[str] = set()
+    out: list[str] = []
+    candidates: list[str] = []
+    single = (body.get("input") or "").strip()
+    if single:
+        candidates.append(single)
+    raw_list = body.get("inputs")
+    if isinstance(raw_list, list):
+        for item in raw_list:
+            s = str(item or "").strip()
+            if s:
+                candidates.append(s)
+    for s in candidates:
+        key = s.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def discover_bundles_many(inputs: list[str]) -> tuple[list[dict[str, str]], list[str]]:
+    """Discover under many roots; dedupe by resolved path; keep first slug on conflict."""
+    by_path: dict[str, dict[str, str]] = {}
+    path_order: list[str] = []
+    slug_owner: dict[str, str] = {}
+    warnings: list[str] = []
+
+    for raw in inputs:
+        root = Path(raw)
+        if not root.exists():
+            warnings.append(f"路径不存在：{raw}")
+            continue
+        source = str(root)
+        for b in discover_bundles(root):
+            try:
+                key = str(Path(b["path"]).resolve())
+            except OSError:
+                key = str(Path(b["path"]))
+            if key in by_path:
+                continue
+            slug = (b.get("slug") or "").lower()
+            if slug and slug in slug_owner:
+                warnings.append(
+                    f"slug 冲突：{slug} 出现多次，已保留先扫到的路径（{slug_owner[slug]}）"
+                )
+                continue
+            item = {
+                "path": b["path"],
+                "slug": b["slug"],
+                "source": source,
+            }
+            by_path[key] = item
+            path_order.append(key)
+            if slug:
+                slug_owner[slug] = b["path"]
+
+    bundles = [by_path[k] for k in path_order]
+    return bundles, warnings
+
+
+def bundles_from_explicit_paths(paths: list[str]) -> list[dict[str, str]]:
+    """Build bundle list from absolute file paths (checked as Unity bundles)."""
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in paths:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        p = Path(s)
+        try:
+            key = str(p.resolve())
+        except OSError:
+            key = str(p)
+        if key in seen:
+            continue
+        if not p.is_file() or not is_unity_bundle(p):
+            continue
+        seen.add(key)
+        out.append({"path": str(p), "slug": infer_slug(p), "source": str(p.parent)})
     return out
 
 
@@ -219,12 +334,7 @@ def start_config_job(body: dict[str, Any]) -> str:
 
 def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
     try:
-        input_raw = (body.get("input") or "").strip()
-        if not input_raw:
-            update_job(job_id, status="error", phase="", error="input required")
-            append_log(job_id, "error: input required")
-            return
-
+        scan_inputs = collect_scan_inputs(body)
         dry_run = bool(body.get("dry_run"))
         if not dry_run and not unitypy_installed():
             update_job(
@@ -236,90 +346,216 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
             append_log(job_id, "error: UnityPy not installed")
             return
 
-        input_path = Path(input_raw)
-        if not input_path.exists():
-            update_job(job_id, status="error", phase="", error=f"路径不存在: {input_path}")
-            append_log(job_id, f"error: path missing {input_path}")
-            return
+        explicit_paths = body.get("paths")
+        paths_list: list[str] | None = None
+        if isinstance(explicit_paths, list) and explicit_paths:
+            paths_list = [str(p).strip() for p in explicit_paths if str(p).strip()]
 
-        output_root = resolve_output(input_path, (body.get("output") or "").strip() or None)
+        if paths_list:
+            bundles = bundles_from_explicit_paths(paths_list)
+            primary = Path(scan_inputs[0]) if scan_inputs else Path(paths_list[0]).parent
+        else:
+            if not scan_inputs:
+                update_job(job_id, status="error", phase="", error="input required")
+                append_log(job_id, "error: input required")
+                return
+            missing = [p for p in scan_inputs if not Path(p).exists()]
+            if len(missing) == len(scan_inputs):
+                update_job(
+                    job_id,
+                    status="error",
+                    phase="",
+                    error=f"路径不存在: {missing[0]}",
+                )
+                append_log(job_id, f"error: path missing {missing[0]}")
+                return
+            bundles, warn = discover_bundles_many(scan_inputs)
+            for w in warn:
+                append_log(job_id, w)
+            slug_filter = body.get("slugs")
+            if isinstance(slug_filter, list) and slug_filter:
+                allowed = {str(s).strip().lower() for s in slug_filter if str(s).strip()}
+                bundles = [b for b in bundles if b["slug"].lower() in allowed]
+            primary = Path(scan_inputs[0])
+
+        if not primary.exists() and paths_list:
+            primary = Path(paths_list[0]).parent
+
+        output_root = resolve_output(primary, (body.get("output") or "").strip() or None)
         continue_on_error = bool(body.get("continue_on_error"))
         generate_config = bool(body.get("generate_config"))
-        slug_filter = body.get("slugs")
-        allowed: set[str] | None = None
-        if isinstance(slug_filter, list) and slug_filter:
-            allowed = {str(s).strip().lower() for s in slug_filter if str(s).strip()}
 
-        bundles = discover_bundles(input_path)
-        if allowed is not None:
-            bundles = [b for b in bundles if b["slug"].lower() in allowed]
         if not bundles:
             update_job(job_id, status="error", phase="", error="未找到 AssetBundle 文件")
             append_log(job_id, "error: no bundles found")
             return
 
+        bundles, hx_bundles = partition_hx_bundles(bundles)
+
         results: list[dict[str, Any]] = []
         ok_count = 0
         fail_count = 0
-        src_dir = input_path if input_path.is_dir() else input_path.parent
+        skip_count = 0
+        src_dir = primary if primary.is_dir() else primary.parent
+        jobs = int(body.get("jobs") or 0)
+        if jobs < 1:
+            jobs = min(8, max(2, (os.cpu_count() or 4)))
 
+        total = len(bundles) + len(hx_bundles)
         update_job(
             job_id,
             status="running",
             phase="unpack",
             current=0,
-            total=len(bundles),
+            total=total,
             current_item="",
             ok_count=0,
             fail_count=0,
+            skip_count=0,
             results=[],
             error=None,
         )
-        append_log(job_id, f"输入: {input_path}")
+        append_log(job_id, f"输入: {', '.join(scan_inputs) if scan_inputs else '(paths)'}")
         append_log(job_id, f"输出: {output_root}{' (dry-run)' if dry_run else ''}")
-        append_log(job_id, f"共 {len(bundles)} 个 bundle")
+        append_log(
+            job_id,
+            f"共 {total} 个 bundle（其中 hx 跳过 {len(hx_bundles)}）· 并发 {jobs}",
+        )
 
         if not dry_run:
             output_root.mkdir(parents=True, exist_ok=True)
+            from unpack_complete import purge_hx_output_dirs
 
-        for i, b in enumerate(bundles, 1):
+            for name in purge_hx_output_dirs(output_root):
+                append_log(job_id, f"清理(hx) {name}")
+
+        for b in hx_bundles:
             slug = b["slug"]
-            update_job(job_id, current=i, current_item=slug)
-            append_log(job_id, f"解包 {slug} …")
+            skip_count += 1
+            item = {
+                "slug": slug,
+                "input": b["path"],
+                "ok": True,
+                "skipped": True,
+                "skip_reason": "hx",
+            }
+            results.append(item)
+            append_log(job_id, f"跳过(hx) {slug}")
+
+        if hx_bundles:
+            update_job(
+                job_id,
+                current=skip_count,
+                skip_count=skip_count,
+                results=list(results),
+            )
+
+        if not bundles and hx_bundles:
+            append_log(
+                job_id,
+                f"解包阶段完成 ok={ok_count} skip={skip_count} fail={fail_count}",
+            )
+            update_job(
+                job_id,
+                status="done",
+                phase="",
+                current=skip_count,
+                current_item="",
+                ok_count=ok_count,
+                fail_count=fail_count,
+                skip_count=skip_count,
+                results=list(results),
+                error=None,
+            )
+            return
+
+        if not bundles:
+            update_job(job_id, status="error", phase="", error="未找到 AssetBundle 文件")
+            append_log(job_id, "error: no bundles found")
+            return
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        def _unpack_one_item(b: dict[str, Any]) -> dict[str, Any]:
+            slug = b["slug"]
             if dry_run:
-                append_log(job_id, f"  dry-run: {b['path']}")
-                item = {"slug": slug, "input": b["path"], "ok": True, "dry_run": True}
-                results.append(item)
-                ok_count += 1
-                update_job(job_id, ok_count=ok_count, fail_count=fail_count, results=list(results))
-                continue
-            try:
-                data = run_unpack_one(Path(b["path"]), output_root, slug)
-                append_log(job_id, f"  ok ({data.get('kind')}) -> {data.get('output_dir')}")
-                item = {"slug": slug, "input": b["path"], **data}
-                results.append(item)
-                ok_count += 1
-                update_job(job_id, ok_count=ok_count, fail_count=fail_count, results=list(results))
-            except Exception as exc:  # noqa: BLE001
-                fail_count += 1
-                append_log(job_id, f"  失败: {exc}")
-                results.append({"slug": slug, "input": b["path"], "ok": False, "error": str(exc)})
-                update_job(job_id, ok_count=ok_count, fail_count=fail_count, results=list(results))
-                if not continue_on_error:
-                    update_job(
-                        job_id,
-                        status="error",
-                        phase="",
-                        error=str(exc),
-                        current_item=slug,
-                    )
-                    return
+                from unpack_complete import is_unpack_complete
+
+                out_dir = output_root / slug
+                skipped = is_unpack_complete(out_dir, slug)
+                return {
+                    "slug": slug,
+                    "input": b["path"],
+                    "ok": True,
+                    "dry_run": True,
+                    "skipped": skipped,
+                }
+            data = run_unpack_one(Path(b["path"]), output_root, slug)
+            return {"slug": slug, "input": b["path"], **data}
+
+        with ThreadPoolExecutor(max_workers=jobs) as pool:
+            futures = {pool.submit(_unpack_one_item, b): b for b in bundles}
+            for fut in as_completed(futures):
+                b = futures[fut]
+                slug = b["slug"]
+                try:
+                    item = fut.result()
+                    results.append(item)
+                    if item.get("skipped"):
+                        skip_count += 1
+                        reason = item.get("skip_reason")
+                        if reason == "hx":
+                            append_log(job_id, f"跳过(hx) {slug}")
+                        else:
+                            append_log(job_id, f"跳过(已完成) {slug}")
+                    elif item.get("ok", True) and not item.get("error"):
+                        ok_count += 1
+                        append_log(
+                            job_id,
+                            f"ok ({item.get('kind')}) {slug} -> {item.get('output_dir')}",
+                        )
+                    else:
+                        fail_count += 1
+                        append_log(job_id, f"失败 {slug}: {item.get('error')}")
+                except Exception as exc:  # noqa: BLE001
+                    fail_count += 1
+                    append_log(job_id, f"失败 {slug}: {exc}")
+                    results.append({"slug": slug, "input": b["path"], "ok": False, "error": str(exc)})
+                    if not continue_on_error:
+                        update_job(
+                            job_id,
+                            status="error",
+                            phase="",
+                            error=str(exc),
+                            current_item=slug,
+                            ok_count=ok_count,
+                            fail_count=fail_count,
+                            skip_count=skip_count,
+                            results=list(results),
+                            current=ok_count + skip_count + fail_count,
+                        )
+                        return
+                done = ok_count + skip_count + fail_count
+                update_job(
+                    job_id,
+                    current=done,
+                    current_item=slug,
+                    ok_count=ok_count,
+                    fail_count=fail_count,
+                    skip_count=skip_count,
+                    results=list(results),
+                )
+
+        append_log(
+            job_id,
+            f"解包阶段完成 ok={ok_count} skip={skip_count} fail={fail_count}",
+        )
 
         if generate_config and not dry_run:
             config_targets = [
                 Path(r["output_dir"])
                 for r in results
-                if r.get("ok") and r.get("output_dir")
+                if r.get("ok") and r.get("output_dir") and not r.get("skipped")
             ]
             # Phase-local counters: snapshot unpack totals, then reset so config
             # ok/fail are independent (avoids ~2× ok_count on unpack_then_config).
@@ -391,10 +627,11 @@ def run_unpack_job(job_id: str, body: dict[str, Any]) -> None:
             current_item="",
             ok_count=ok_count,
             fail_count=fail_count,
+            skip_count=skip_count,
             results=list(results),
             error=None,
         )
-        append_log(job_id, f"完成 ok={ok_count} fail={fail_count}")
+        append_log(job_id, f"完成 ok={ok_count} skip={skip_count} fail={fail_count}")
     except Exception as exc:  # noqa: BLE001
         update_job(job_id, status="error", phase="", error=str(exc))
         append_log(job_id, f"error: {exc}")
@@ -575,16 +812,17 @@ class Handler(BaseHTTPRequestHandler):
             "/skins.html": WEB_DIR / "skins.html",
             "/unpack": WEB_DIR / "unpack.html",
             "/unpack.html": WEB_DIR / "unpack.html",
-            "/style.css": WEB_DIR / "style.css",
             "/app.js": WEB_DIR / "app.js",
             "/roster.js": WEB_DIR / "roster.js",
-            "/roster.css": WEB_DIR / "roster.css",
             "/skins.js": WEB_DIR / "skins.js",
-            "/skins.css": WEB_DIR / "skins.css",
             "/shell.css": WEB_DIR / "shell.css",
+            "/components.css": WEB_DIR / "components.css",
             "/shell.js": WEB_DIR / "shell.js",
             "/hub.js": WEB_DIR / "hub.js",
-            "/hub.css": WEB_DIR / "hub.css",
+            "/pages/hub.css": WEB_DIR / "pages" / "hub.css",
+            "/pages/unpack.css": WEB_DIR / "pages" / "unpack.css",
+            "/pages/roster.css": WEB_DIR / "pages" / "roster.css",
+            "/pages/skins.css": WEB_DIR / "pages" / "skins.css",
             "/design-system/tokens.css": WEB_DIR / "design-system" / "tokens.css",
         }
         file_path = static_routes.get(path)
@@ -604,6 +842,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(content)))
+        # Dev UI: avoid stale CSS/JS after route/layout churn
+        if file_path.suffix in {".css", ".js", ".html"}:
+            self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(content)
 
@@ -695,6 +936,34 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "invalid JSON"})
             return
 
+        if path == "/api/dialog/folder":
+            try:
+                from dialog_picker import pick_folder
+
+                title = (body.get("title") or "").strip() or "选择文件夹"
+                chosen = pick_folder(title)
+                if chosen is None:
+                    self._send_json(200, {"ok": True, "cancelled": True})
+                else:
+                    self._send_json(200, {"ok": True, "path": chosen, "cancelled": False})
+            except OSError as exc:
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
+        if path == "/api/dialog/files":
+            try:
+                from dialog_picker import pick_files
+
+                title = (body.get("title") or "").strip() or "选择文件"
+                paths = pick_files(title)
+                if not paths:
+                    self._send_json(200, {"ok": True, "cancelled": True, "paths": []})
+                else:
+                    self._send_json(200, {"ok": True, "paths": paths, "cancelled": False})
+            except OSError as exc:
+                self._send_json(500, {"ok": False, "error": str(exc)})
+            return
+
         if path == "/api/jobs/unpack":
             jid = start_unpack_job(body)
             self._send_json(200, {"ok": True, "job_id": jid})
@@ -721,16 +990,20 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         if path == "/api/scan":
-            input_raw = (body.get("input") or "").strip()
-            if not input_raw:
+            scan_inputs = collect_scan_inputs(body)
+            if not scan_inputs:
                 self._send_json(400, {"ok": False, "error": "input required"})
                 return
-            input_path = Path(input_raw)
-            if not input_path.exists():
-                self._send_json(400, {"ok": False, "error": f"路径不存在: {input_path}"})
+            existing = [p for p in scan_inputs if Path(p).exists()]
+            if not existing:
+                self._send_json(
+                    400, {"ok": False, "error": f"路径不存在: {scan_inputs[0]}"}
+                )
                 return
-            bundles = discover_bundles(input_path)
-            self._send_json(200, {"ok": True, "bundles": bundles})
+            bundles, warnings = discover_bundles_many(scan_inputs)
+            self._send_json(
+                200, {"ok": True, "bundles": bundles, "warnings": warnings}
+            )
             return
 
         if path == "/api/unpack":
@@ -864,11 +1137,21 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> int:
+    missing = [p for p in REQUIRED_WEB_ASSETS if not p.is_file()]
+    if missing:
+        print("[hanimport-web] missing web assets (restart after CSS layout change?):", file=sys.stderr)
+        for p in missing:
+            print(f"  - {p}", file=sys.stderr)
+        return 1
     port = DEFAULT_PORT
     if len(sys.argv) > 1:
         port = int(sys.argv[1])
     host = "127.0.0.1"
-    server = ThreadingHTTPServer((host, port), Handler)
+    try:
+        server = ThreadingHTTPServer((host, port), Handler)
+    except OSError as exc:
+        print(f"[hanimport-web] cannot bind {host}:{port}: {exc}", file=sys.stderr)
+        return 1
     url = f"http://{host}:{port}/"
     print(f"[hanimport-web] serving {url}")
     print(f"[hanimport-web] repo root: {repo_root()}")

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hantransfer/device-txt.json",
+  "title": "MdnsTxtRecord",
+  "description": "mDNS TXT 键值（_hantransfer._tcp.local）",
+  "type": "object",
+  "required": ["name", "platform", "version", "device_id", "features"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "用户可读设备名，如 HAN-PC"
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["windows", "android", "linux", "steamdeck"]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "device_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "features": {
+      "type": "string",
+      "description": "逗号分隔：send,receive,azurlane-import"
+    }
+  }
+}
