@@ -329,7 +329,6 @@ function renderMenuSublist(
 }
 
 function renderDualSkinLists(skins: CharacterSkinInfo[]) {
-  // Phase 1: peer lists share skinKindFilter; both switches force Spine (P2 → kanmusu Cubism).
   const spineItems = filterSkinsByKind(skins, "spine").map((s) => ({
     id: s.id,
     label: s.model_name && s.model_name !== s.model_id ? s.model_name : s.name,
@@ -341,10 +340,10 @@ function renderDualSkinLists(skins: CharacterSkinInfo[]) {
   const kanmusuItems = filterSkinsByKind(skins, "kanmusu").map((s) => ({
     id: s.id,
     label: s.name || s.model_name,
-    active: companionEngine === "spine" && s.active,
-    disabled: !s.model_ready,
+    active: companionEngine === "kanmusu" && s.active,
+    disabled: !s.kanmusu_ready,
     modelId: s.model_id,
-    preferEngine: "spine" as const,
+    preferEngine: "kanmusu" as const,
   }));
   renderMenuSublist(menuSkinsSpineEl, spineItems, "skin", "无可切换桌宠模型");
   renderMenuSublist(menuSkinsKanmusuEl, kanmusuItems, "skin", "无可切换舰娘皮肤");

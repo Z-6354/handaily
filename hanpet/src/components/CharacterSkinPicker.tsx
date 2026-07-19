@@ -6,8 +6,9 @@ import { SKIN_PAGE_SIZE } from "../hooks/useCharacterSkins";
 import type { SettingsFeedback } from "../lib/apiErrorMessage";
 import {
   filterSkinsByKind,
+  readCharacterSkinKind,
   readStoredSkinKind,
-  writeStoredSkinKind,
+  writeCharacterSkinKind,
   type SkinKind,
 } from "../lib/skinKindFilter";
 import { xiaohan, type CharacterSkinInfo } from "../lib/xiaohan";
@@ -57,8 +58,9 @@ function SkinCard({
   onSelect: () => void;
   onRequestDelete?: () => void;
 }) {
-  const spineReady = Boolean(skin.model_ready);
-  if (!spineReady) {
+  const ready =
+    kind === "kanmusu" ? Boolean(skin.kanmusu_ready) : Boolean(skin.model_ready);
+  if (!ready) {
     return (
       <div
         className="pet-model-card pet-model-card--incomplete"
@@ -67,7 +69,7 @@ function SkinCard({
       >
         <span className="pet-model-card-name">{skin.name}</span>
         <span className="pet-model-card-badge pet-model-card-badge--incomplete">
-          {kind === "kanmusu" ? "桌宠未就绪" : "小人未就绪"}
+          {kind === "kanmusu" ? "舰娘未就绪" : "小人未就绪"}
         </span>
       </div>
     );
@@ -100,7 +102,9 @@ function SkinCard({
               ? skin.model_name
               : "小人"}
           </span>
-        ) : null}
+        ) : (
+          <span className="pet-model-card-badge">舰娘</span>
+        )}
         {switching && <span className="pet-model-card-spinner" aria-hidden />}
       </button>
       {canDelete && onRequestDelete && (
@@ -170,7 +174,9 @@ export function CharacterSkinPicker({
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [page, setPage] = useState(1);
-  const [kind, setKind] = useState<SkinKind>(() => readStoredSkinKind());
+  const [kind, setKind] = useState<SkinKind>(() =>
+    readCharacterSkinKind(characterId) ?? readStoredSkinKind(),
+  );
   const [allSkins, setAllSkins] = useState<CharacterSkinInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -196,8 +202,36 @@ export function CharacterSkinPicker({
   }, [characterId, refreshKey, loadSkins]);
 
   useEffect(() => {
+    const perChar = readCharacterSkinKind(characterId);
+    if (perChar) {
+      setKind(perChar);
+      return;
+    }
+    let cancelled = false;
+    void xiaohan
+      .petGetCompanionEngine()
+      .then((eng) => {
+        if (cancelled) return;
+        const k: SkinKind = eng === "kanmusu" ? "kanmusu" : "spine";
+        setKind(k);
+        writeCharacterSkinKind(characterId, k);
+      })
+      .catch(() => {
+        if (!cancelled) setKind(readStoredSkinKind());
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [characterId]);
+
+  useEffect(() => {
     setPage(1);
   }, [kind]);
+
+  const selectKind = (next: SkinKind) => {
+    setKind(next);
+    writeCharacterSkinKind(characterId, next);
+  };
 
   const filtered = useMemo(() => filterSkinsByKind(allSkins, kind), [allSkins, kind]);
   const total = filtered.length;
@@ -233,17 +267,19 @@ export function CharacterSkinPicker({
     };
   }, [open]);
 
-  const selectKind = (next: SkinKind) => {
-    setKind(next);
-    writeStoredSkinKind(next);
-  };
-
   const pick = (id: string) => {
     const target = allSkins.find((s) => s.id === id);
-    if (!target?.model_ready) return;
-    if (switchingId || disabled) return;
-    if (characterActive && id === activeId) return;
-    onSelect(id, "spine");
+    if (!target || switchingId || disabled) return;
+    if (kind === "kanmusu") {
+      if (!target.kanmusu_ready) return;
+      writeCharacterSkinKind(characterId, "kanmusu");
+      onSelect(id, "kanmusu");
+    } else {
+      if (!target.model_ready) return;
+      if (characterActive && id === activeId) return;
+      writeCharacterSkinKind(characterId, "spine");
+      onSelect(id, "spine");
+    }
     setOpen(false);
   };
 

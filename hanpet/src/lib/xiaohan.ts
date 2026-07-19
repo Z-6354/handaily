@@ -522,6 +522,8 @@ export const xiaohan = {
     random_max_sec: number;
     lines: PetRemarkLine[];
   }) => invoke<PetAnimationMeta>("pet_save_animation_layout", { payload }),
+  petGetCompanionEngine: () =>
+    invoke<string>("pet_get_companion_engine"),
   petWikiImportLines: (modelId: string, url: string) =>
     invoke<PetRemarkLine[]>("pet_wiki_import_lines", { modelId, url }),
   rosterPackPickZip: () => invoke<string | null>("roster_pack_pick_zip"),
