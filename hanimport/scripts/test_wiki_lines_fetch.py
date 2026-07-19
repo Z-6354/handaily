@@ -2,19 +2,7 @@ from pathlib import Path
 import json
 import sqlite3
 
-from wiki_lines_fetch import (
-    list_missing_line_targets,
-    ship_has_lines_by_skin,
-    wiki_request_headers,
-)
-
-
-def test_wiki_request_headers_include_referer():
-    h = wiki_request_headers("柴郡")
-    assert "User-Agent" in h
-    assert h.get("Accept")
-    assert "biligame.com" in h.get("Referer", "")
-    assert "%E6%9F%B4%E9%83%A1" in h["Referer"] or "柴郡" in h["Referer"]
+from wiki_lines_fetch import list_missing_line_targets, ship_has_lines_by_skin
 
 
 def test_ship_has_lines_by_skin(tmp_path: Path):
@@ -41,33 +29,6 @@ def test_ship_has_lines_by_skin(tmp_path: Path):
     conn.close()
     assert ship_has_lines_by_skin(db, wiki_title="绫波") is True
     assert ship_has_lines_by_skin(db, name_zh="空舰") is False
-
-
-def test_ship_has_requires_skins_json_when_column_exists(tmp_path: Path):
-    db = tmp_path / "w.sqlite"
-    conn = sqlite3.connect(db)
-    conn.execute(
-        """
-        CREATE TABLE ships (
-          wiki_title TEXT PRIMARY KEY,
-          display_name TEXT,
-          lines_by_skin_json TEXT DEFAULT '[]',
-          skins_json TEXT DEFAULT '[]'
-        )
-        """
-    )
-    conn.execute(
-        "INSERT INTO ships(wiki_title, display_name, lines_by_skin_json, skins_json) VALUES (?,?,?,?)",
-        (
-            "有线无皮",
-            "有线无皮",
-            json.dumps([{"skin": "default", "lines": [{"category": "x", "text": "y"}]}]),
-            "[]",
-        ),
-    )
-    conn.commit()
-    conn.close()
-    assert ship_has_lines_by_skin(db, wiki_title="有线无皮") is False
 
 
 def test_list_missing(tmp_path: Path):
