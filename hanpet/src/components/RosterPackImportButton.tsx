@@ -54,9 +54,9 @@ export function RosterPackImportButton({ disabled, onImported, setFeedback }: Pr
         className="btn-secondary btn-sm"
         disabled={disabled || importing}
         onClick={() => void runImport()}
-        title="导入模型-xx阵营角色包、模型-其他角色包、模型-柴郡角色包等 zip"
+        title="旧版：导入模型-xx阵营角色包、模型-其他角色包、模型-柴郡角色包等 zip"
       >
-        {importing ? "导入中…" : "导入角色包"}
+        {importing ? "导入中…" : "导入角色包（旧版）"}
       </button>
       {importing && progress && (
         <p className="roster-pack-import-progress" role="status" aria-live="polite">

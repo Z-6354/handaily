@@ -139,15 +139,10 @@ export function PersonaDetailPanel({
                 <span className="persona-detail-side-chip">{skinTag}</span>
               </div>
             )}
-            {activeModelName && (
+            {(activeSkinName ||
+              (activeModelName && activeModelName !== activeModelId)) && (
               <p className="persona-detail-side-meta">
-                皮肤 · {activeModelName}
-                {activeModelId && (
-                  <>
-                    <br />
-                    <span className="persona-detail-model-id">模型 {activeModelId}</span>
-                  </>
-                )}
+                皮肤 · {activeSkinName || activeModelName}
               </p>
             )}
             <div className="persona-detail-badges">

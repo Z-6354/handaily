@@ -90,7 +90,9 @@ function SkinCard({
           ) : null}
         </span>
         <span className="pet-model-card-badge">
-          {skin.model_name || skin.model_id || "小人"}
+          {skin.model_name && skin.model_name !== skin.model_id
+            ? skin.model_name
+            : "小人"}
         </span>
         {hasKanmusu ? (
           <span className="pet-model-card-badge pet-model-card-badge--muted">舰娘</span>

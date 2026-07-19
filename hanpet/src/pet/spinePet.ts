@@ -1,7 +1,8 @@
 import { Application, BaseTexture } from "pixi.js";
-import { Spine } from "@pixi-spine/runtime-3.8";
-import { TextureAtlas } from "@pixi-spine/base";
-import { AtlasAttachmentLoader, SkeletonBinary36 } from "./skeletonBinary36";
+import { AtlasAttachmentLoader, SkeletonBinary, Spine } from "@pixi-spine/runtime-3.8";
+import { BinaryInput, TextureAtlas } from "@pixi-spine/base";
+import { SkeletonBinary36 } from "./skeletonBinary36";
+import type { SkeletonData } from "@pixi-spine/runtime-3.8";
 import { loadViewerExSpineConfig, type ViewerExSpineConfig } from "./viewerExConfig";
 import {
   applyViewerExBindings,
@@ -43,6 +44,45 @@ function shouldUseCrossOrigin(url: string): boolean {
   // Tauri asset 协议走同源，不设 crossOrigin 避免纹理加载失败
   if (/asset\.(localhost|tauri\.localhost)/i.test(url)) return false;
   return true;
+}
+
+/** 读取 Spine 二进制 skel 内嵌版本（hash 后第二段字符串）。 */
+export function peekSpineSkelVersion(skelBuf: Uint8Array): string {
+  try {
+    const input = new BinaryInput(skelBuf);
+    input.readString();
+    return input.readString() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * 内置模型多为 3.6.x（SkeletonBinary36）；皮肤包/data/pet 多为 3.8.x。
+ * 错用解析器会报 Offset is outside the bounds of the DataView。
+ */
+export function readSkeletonDataForSkel(
+  atlas: TextureAtlas,
+  skelBuf: Uint8Array,
+): SkeletonData {
+  const version = peekSpineSkelVersion(skelBuf);
+  const loader = new AtlasAttachmentLoader(atlas);
+  const prefer38 = version.startsWith("3.8");
+  const primary = prefer38
+    ? () => new SkeletonBinary(loader).readSkeletonData(skelBuf)
+    : () => new SkeletonBinary36(loader).readSkeletonData(skelBuf);
+  const fallback = prefer38
+    ? () => new SkeletonBinary36(loader).readSkeletonData(skelBuf)
+    : () => new SkeletonBinary(loader).readSkeletonData(skelBuf);
+  try {
+    return primary();
+  } catch (primaryErr) {
+    try {
+      return fallback();
+    } catch {
+      throw primaryErr;
+    }
+  }
 }
 
 function applyImageCrossOrigin(img: HTMLImageElement, url: string) {
@@ -289,8 +329,7 @@ export class SpinePet {
       this.assets.pngFile,
       readViaIpc,
     );
-    const binary = new SkeletonBinary36(new AtlasAttachmentLoader(atlas));
-    const skeletonData = binary.readSkeletonData(skelBuf);
+    const skeletonData = readSkeletonDataForSkel(atlas, skelBuf);
 
     this.app = new Application({
       view: this.canvas,

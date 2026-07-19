@@ -56,9 +56,9 @@ export function SlotPackImportButton({ disabled, onImported, setFeedback }: Prop
         className="btn-secondary btn-sm"
         disabled={disabled || importing}
         onClick={() => void runImport()}
-        title="导入服务器下载的皮肤分发包（多角色 .zip 或单个 .slot.zip）"
+        title="新版：导入服务器下载的皮肤分发包（多角色 .zip 或单个 .slot.zip）"
       >
-        {importing ? "导入中…" : "导入皮肤包"}
+        {importing ? "导入中…" : "导入皮肤包（新版）"}
       </button>
       {importing && progress && (
         <p className="roster-pack-import-progress" role="status" aria-live="polite">
