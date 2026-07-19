@@ -143,6 +143,8 @@ commands.allow = [
   "system_get_performance",
   "roster_pack_pick_zip",
   "roster_pack_import",
+  "slot_pack_pick_zip",
+  "slot_pack_import",
   "kanmusu_list",
   "kanmusu_get_detail",
   "kanmusu_update_character",

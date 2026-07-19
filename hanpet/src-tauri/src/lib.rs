@@ -1,6 +1,7 @@
 //! 小寒桌宠 — 库根模块
 
 pub mod roster_pack;
+pub mod slot_pack;
 pub mod character;
 pub mod data_layout;
 pub mod db;
@@ -380,6 +381,8 @@ pub fn run() {
             ipc::live2d_commands::system_get_performance,
             ipc::live2d_commands::roster_pack_pick_zip,
             ipc::live2d_commands::roster_pack_import,
+            ipc::live2d_commands::slot_pack_pick_zip,
+            ipc::live2d_commands::slot_pack_import,
             ipc::kanmusu_commands::kanmusu_list,
             ipc::kanmusu_commands::kanmusu_get_detail,
             ipc::kanmusu_commands::kanmusu_update_character,

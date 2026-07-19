@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::thread::JoinHandle;
 
 use rusqlite::Connection;
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::db::stats::TodayAggregator;
 use crate::live2d::{AnalysisCoordinator, PeriodScheduler, VaultState};
@@ -256,12 +256,11 @@ impl AppState {
     }
 }
 
-/// 解析 userData 下的 SQLite 路径：%AppData%/xiaohan-daily/data/xiaohan.sqlite
+/// 解析 SQLite 路径：与 `data_layout::handaily_data_dir` 一致（便携优先）。
 pub fn resolve_db_path(_app: &AppHandle) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    let appdata = std::env::var("APPDATA")
-        .map(std::path::PathBuf::from)
-        .or_else(|_| _app.path().app_data_dir())?;
-    let dir = appdata.join("xiaohan-daily").join("data");
+    let dir = crate::data_layout::handaily_data_dir().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, e)
+    })?;
     std::fs::create_dir_all(&dir)?;
-    Ok(dir.join("xiaohan.sqlite"))
+    Ok(crate::data_layout::db_path(&dir))
 }

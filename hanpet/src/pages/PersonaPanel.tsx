@@ -26,6 +26,7 @@ import {
 import { useSearchHistory } from "../hooks/useSearchHistory";
 import { Pagination } from "../components/Pagination";
 import { RosterPackImportButton } from "../components/RosterPackImportButton";
+import { SlotPackImportButton } from "../components/SlotPackImportButton";
 import { characterAccent, characterSkinTag } from "../lib/characterDisplay";
 
 function toPersonaDetail(c: CharacterDetail): PersonaDetail {
@@ -498,6 +499,11 @@ export function PersonaPanel({ active = true }: { active?: boolean }) {
               收藏
             </button>
             <RosterPackImportButton
+              disabled={loading || refreshing}
+              onImported={() => void refresh()}
+              setFeedback={setPersonaFeedback}
+            />
+            <SlotPackImportButton
               disabled={loading || refreshing}
               onImported={() => void refresh()}
               setFeedback={setPersonaFeedback}

@@ -31,11 +31,20 @@ pub const ROSTER_DIR_PET_META: &str = "pet-meta";
 
 // ── 数据根目录 ────────────────────────────────────────────────────
 
+/// Resolve user data root:
+/// 1. `HANDAILY_DATA_DIR` if set
+/// 2. portable `{exe_dir}/data`
+/// 3. fallback `%APPDATA%/xiaohan-daily/data`
 pub fn handaily_data_dir() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("HANDAILY_DATA_DIR") {
         let path = PathBuf::from(p.trim());
         if !path.as_os_str().is_empty() {
             return Ok(path);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            return Ok(parent.join("data"));
         }
     }
     let appdata = std::env::var("APPDATA").map_err(|_| "无法读取 APPDATA".to_string())?;
@@ -184,17 +193,20 @@ pub fn bundled_pet_meta_file(model_id: &str) -> PathBuf {
 
 // ── 仓库 data/ 工作区（hanimport 开发数据）────────────────────────
 
-pub const REPO_DATA_LIVE2D: &str = "data/live2d";
-pub const REPO_DATA_MODEL_UNPACKED: &str = "data/model/unpacked";
+pub const REPO_DATA_LIVE2D: &str = "data/pet";
+pub const REPO_DATA_MODEL_UNPACKED: &str = "data/skin";
 pub const REPO_DATA_IMPORT_PLAN: &str = "data/import/live2d-plan.json";
 pub const REPO_LEGACY_LIVE2D: &str = "live2d";
 
-/// 解析仓库内 Spine 模型工作目录：`HANDAILY_LIVE2D_PATH` → `data/live2d` → 旧 `live2d/`
+/// 解析仓库内桌宠模型工作目录：`HANDAILY_PET_PATH` / `HANDAILY_CHAR_PATH` → `data/pet`
+/// （游戏 AB 路径 ``char`` 解包后也落到此处；子目录为裸 slug，如 `22`）
 pub fn resolve_repo_live2d_root() -> PathBuf {
-    if let Ok(p) = std::env::var("HANDAILY_LIVE2D_PATH") {
-        let path = PathBuf::from(p.trim());
-        if path.is_dir() {
-            return path;
+    for key in ["HANDAILY_PET_PATH", "HANDAILY_CHAR_PATH"] {
+        if let Ok(p) = std::env::var(key) {
+            let path = PathBuf::from(p.trim());
+            if path.is_dir() {
+                return path;
+            }
         }
     }
     let mut bases = Vec::new();
@@ -206,7 +218,7 @@ pub fn resolve_repo_live2d_root() -> PathBuf {
     bases.push(project_root());
     bases.push(app_root());
     for base in bases {
-        for rel in [REPO_DATA_LIVE2D, REPO_LEGACY_LIVE2D] {
+        for rel in [REPO_DATA_LIVE2D, "data/pet", "data/char"] {
             let candidate = base.join(rel);
             if candidate.is_dir() {
                 return candidate;
@@ -216,12 +228,15 @@ pub fn resolve_repo_live2d_root() -> PathBuf {
     project_root().join(REPO_DATA_LIVE2D)
 }
 
-/// 解析仓库内 Cubism 解包目录：`HANDAILY_MODEL_UNPACKED` → `data/model/unpacked`
+/// 解析仓库内舰娘资源目录：`HANDAILY_SKIN_PATH` / `HANDAILY_LIVE2D_PATH` → `data/skin`
+/// （游戏 AB 路径 ``live2d`` 解包后也落到此处；子目录为裸 slug）
 pub fn resolve_repo_model_unpacked_root() -> PathBuf {
-    if let Ok(p) = std::env::var("HANDAILY_MODEL_UNPACKED") {
-        let path = PathBuf::from(p.trim());
-        if path.is_dir() {
-            return path;
+    for key in ["HANDAILY_SKIN_PATH", "HANDAILY_LIVE2D_PATH", "HANDAILY_MODEL_UNPACKED"] {
+        if let Ok(p) = std::env::var(key) {
+            let path = PathBuf::from(p.trim());
+            if path.is_dir() {
+                return path;
+            }
         }
     }
     let mut bases = Vec::new();
@@ -233,9 +248,11 @@ pub fn resolve_repo_model_unpacked_root() -> PathBuf {
     bases.push(project_root());
     bases.push(app_root());
     for base in bases {
-        let candidate = base.join(REPO_DATA_MODEL_UNPACKED);
-        if candidate.is_dir() {
-            return candidate;
+        for rel in [REPO_DATA_MODEL_UNPACKED, "data/skin", "data/live2d", "data/model/unpacked"] {
+            let candidate = base.join(rel);
+            if candidate.is_dir() {
+                return candidate;
+            }
         }
     }
     project_root().join(REPO_DATA_MODEL_UNPACKED)

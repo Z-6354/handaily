@@ -1698,3 +1698,57 @@ pub async fn roster_pack_import(
     .await
     .map_err(|e| e.to_string())?
 }
+
+// ── 服务器皮肤分发包（handaily-skin-slot）──
+
+#[tauri::command]
+pub async fn slot_pack_pick_zip(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主窗口未就绪".to_string())?;
+
+    if let Some(pet) = app.get_webview_window(crate::pet::PET_LABEL) {
+        let _ = pet.set_always_on_top(false);
+    }
+    let _ = window.set_focus();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .run_on_main_thread({
+            let window = window.clone();
+            move || {
+                let picked = rfd::FileDialog::new()
+                    .set_title("选择皮肤分发包（.zip / .slot.zip）")
+                    .add_filter("皮肤分发包", &["zip"])
+                    .set_parent(&window)
+                    .pick_file()
+                    .map(|p| p.to_string_lossy().to_string());
+                let _ = tx.send(picked);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    let picked = rx.await.map_err(|_| "文件选择已中断".to_string())?;
+
+    crate::pet::sync_pet_topmost(&app);
+    Ok(picked)
+}
+
+#[tauri::command]
+pub async fn slot_pack_import(
+    app: tauri::AppHandle,
+    st: State<'_, Arc<AppState>>,
+    zip_path: String,
+) -> Result<crate::slot_pack::SlotPackImportResult, String> {
+    let data_dir = st.data_dir().to_path_buf();
+    let path = std::path::PathBuf::from(zip_path.trim());
+    if !path.is_file() {
+        return Err("文件不存在".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = crate::slot_pack::import_from_zip(&data_dir, &path, Some(&app))?;
+        let _ = app.emit_to(crate::pet::PET_LABEL, "pet-reload", ());
+        Ok(result)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

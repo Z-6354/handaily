@@ -43,6 +43,27 @@ export interface RosterPackImportResult {
   personasCopied: number;
 }
 
+export interface SlotPackImportProgress {
+  phase: string;
+  index: number;
+  total: number;
+  message: string;
+  slotsImported: number;
+  charactersAdded: number;
+  charactersUpdated: number;
+  modelsCopied: number;
+}
+
+export interface SlotPackImportResult {
+  packLabel: string;
+  slotsImported: number;
+  slotsFailed: number;
+  charactersAdded: number;
+  charactersUpdated: number;
+  modelsCopied: number;
+  errors: string[];
+}
+
 export interface PetRemarkLine {
   text: string;
   animation?: string | null;
@@ -506,6 +527,9 @@ export const xiaohan = {
   rosterPackPickZip: () => invoke<string | null>("roster_pack_pick_zip"),
   rosterPackImport: (zipPath: string) =>
     invoke<RosterPackImportResult>("roster_pack_import", { zipPath }),
+  slotPackPickZip: () => invoke<string | null>("slot_pack_pick_zip"),
+  slotPackImport: (zipPath: string) =>
+    invoke<SlotPackImportResult>("slot_pack_import", { zipPath }),
 
   // ── 舰娘 Cubism ──
   kanmusuList: () => invoke<KanmusuCharacterBrief[]>("kanmusu_list"),
