@@ -20,9 +20,10 @@
 
 **Files:**
 - Create: `hanpet/src/lib/skinKindFilter.ts`
-- Create: `hanpet/src/lib/skinKindFilter.test.ts` (if vitest present) or skip
+- Create: `hanpet/scripts/skin-kind-filter-check.mjs` (+ `npm run test:skin-kind`)
 
 - [x] Export `SkinKind = "spine" | "kanmusu"`, `skinMatchesKind`, `filterSkinsByKind`
+- [x] Smoke check script passes
 
 ### Task 2: CharacterSkinPicker kind tabs
 
@@ -40,14 +41,21 @@
 - Modify: `hanpet/src/pages/SettingsPanel.tsx`
 - Modify: `hanpet/src/pages/PersonaPanel.tsx`
 - Modify: `hanpet/src/lib/helpContent.ts`
+- Delete: `hanpet/src/components/KanmusuSkinSettings.tsx`
 
 - [x] Drop 舰娘皮肤 tab + sync/preview/desktop
-- [x] Hide settings 舰娘皮肤 section
+- [x] Hide settings 舰娘皮肤 section + delete unused component
 - [x] `switchSkin` default `"spine"`
 - [x] Help copy update
 
-### Task 4: Verify + commit
+### Task 4: Align pet menu + verify
 
-- [x] Lint touched files
-- [ ] Manual acceptance per spec §7 (user)
+**Files:**
+- Modify: `hanpet/src/pet/menu.ts`
+
+- [x] Menu dual lists use `filterSkinsByKind`; Phase 1 both prefer Spine
+- [x] `npm run test:skin-kind -w hanpet` — pass
+- [x] `npm run build:fe -w hanpet` — pass
 - [x] Commit
+
+**Status:** Phase 1 plan complete (2026-07-19). P2+ remains in design spec roadmap only.

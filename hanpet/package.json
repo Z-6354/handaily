@@ -21,6 +21,7 @@
     "check:rust:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 check -p xiaohan-daily",
     "check:css": "python scripts/check-css-classes.py && python scripts/check-pet-css.py",
     "test:pet-layout": "node scripts/pet-layout-check.mjs",
+    "test:skin-kind": "node scripts/skin-kind-filter-check.mjs",
     "test:pet-api": "node scripts/pet-test-api.mjs",
     "test:rust": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 test -p xiaohan-daily --lib",
     "test:rust:all": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/cargo-dev.ps1 test -p xiaohan-daily",

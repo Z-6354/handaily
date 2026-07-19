@@ -2,17 +2,8 @@ import "./menu.css";
 import { tauriInvoke as invoke, waitForTauriInternals } from "../lib/tauriInvoke";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-
-interface CharacterSkinInfo {
-  id: string;
-  name: string;
-  model_id: string;
-  model_name: string;
-  active: boolean;
-  model_ready: boolean;
-  kanmusu_dir?: string | null;
-  kanmusu_ready?: boolean;
-}
+import { filterSkinsByKind } from "../lib/skinKindFilter";
+import type { CharacterSkinInfo } from "../lib/xiaohan";
 
 interface CharacterBrief {
   id: string;
@@ -338,26 +329,23 @@ function renderMenuSublist(
 }
 
 function renderDualSkinLists(skins: CharacterSkinInfo[]) {
-  const spineItems = skins
-    .filter((s) => s.model_ready)
-    .map((s) => ({
-      id: s.id,
-      label: s.model_name || s.name,
-      active: companionEngine === "spine" && s.active,
-      disabled: !s.model_ready,
-      modelId: s.model_id,
-      preferEngine: "spine" as const,
-    }));
-  const kanmusuItems = skins
-    .filter((s) => Boolean(s.kanmusu_ready))
-    .map((s) => ({
-      id: s.id,
-      label: s.name || s.model_name,
-      active: companionEngine === "kanmusu" && s.active,
-      disabled: !s.kanmusu_ready,
-      modelId: s.model_id,
-      preferEngine: "kanmusu" as const,
-    }));
+  // Phase 1: peer lists share skinKindFilter; both switches force Spine (P2 → kanmusu Cubism).
+  const spineItems = filterSkinsByKind(skins, "spine").map((s) => ({
+    id: s.id,
+    label: s.model_name && s.model_name !== s.model_id ? s.model_name : s.name,
+    active: companionEngine === "spine" && s.active,
+    disabled: !s.model_ready,
+    modelId: s.model_id,
+    preferEngine: "spine" as const,
+  }));
+  const kanmusuItems = filterSkinsByKind(skins, "kanmusu").map((s) => ({
+    id: s.id,
+    label: s.name || s.model_name,
+    active: companionEngine === "spine" && s.active,
+    disabled: !s.model_ready,
+    modelId: s.model_id,
+    preferEngine: "spine" as const,
+  }));
   renderMenuSublist(menuSkinsSpineEl, spineItems, "skin", "无可切换桌宠模型");
   renderMenuSublist(menuSkinsKanmusuEl, kanmusuItems, "skin", "无可切换舰娘皮肤");
 }
