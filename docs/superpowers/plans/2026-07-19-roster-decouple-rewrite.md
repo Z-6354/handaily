@@ -103,5 +103,9 @@
 
 ## Progress
 
-- C0 archive + design: done (`821717c`)
-- C1+: this plan
+- [x] C0 archive + design (`821717c`)
+- [x] C1 shear modules (`61c26a8`)
+- [x] C2 folder_rules + aliases (`090f4b3`)
+- [x] C3 bind_pipeline AB import (`62f2d97`)
+- [x] C4 ownership verified (cmd_* only in owning modules)
+- [x] C5 docs + `pytest hanimport/tests` 128 passed
