@@ -1,7 +1,7 @@
 # roster 解包 / 导入 / 绑皮 — 全量解耦重写（方案 C）
 
 **日期**: 2026-07-19  
-**状态**: 待用户审阅  
+**状态**: 已批准；C1 进行中  
 **前置**: 已存档 `hanimport/scripts/roster/_archive/20260719-pre-decouple-rewrite/`  
 **范围**: 重写 `roster/db.py` monolith 及相关解包→绑皮链路，使规则可独立修改  
 **非目标**: 不改 hanpet 运行时；不重跑全量解包；不删 `data/pet`/`data/skin` 资源；不强制迁移用户 sqlite  schema（除非缺列）
