@@ -1,7 +1,7 @@
 //! Import `handaily-skin-slot` zips (single slot or outer multi-slot download pack).
 
 use std::fs::{self, File};
-use std::io::{copy, Read};
+use std::io::copy;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

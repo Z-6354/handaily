@@ -557,6 +557,7 @@ export const xiaohan = {
       name: payload.name ?? null,
       lines: payload.lines ?? null,
     }),
+  /** 扫描解包目录拷贝到 kanmusu-models，并更新人物皮肤 kanmusu_dir 绑定 */
   kanmusuSyncFromUnpacked: () =>
     invoke<KanmusuSyncResult>("kanmusu_sync_from_unpacked"),
   kanmusuPlayerOpen: () => invoke<void>("kanmusu_player_open"),

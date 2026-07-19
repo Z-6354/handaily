@@ -3484,26 +3484,48 @@ fn build_kanmusu_remark_from_lines(
 ) -> Option<PetRemarkPayload> {
     let character_id = get_kanmusu_active_character_id(db)?;
     let skin_id = get_kanmusu_active_skin_id(db)?;
-    let manifest = crate::kanmusu::load_manifest(st.data_dir()).ok()?;
-    let skin = manifest
-        .characters
-        .iter()
-        .find(|c| c.id == character_id)?
-        .skins
-        .iter()
-        .find(|s| s.id == skin_id)?;
-    if skin.lines.is_empty() {
+    let data_dir = st.data_dir();
+    // Phase 4: prefer character skin lines (same slot as UI).
+    let lines: Vec<models::PetRemarkLine> = {
+        let chars = crate::character::load_manifest(data_dir);
+        if let Some(skin) = chars.characters.iter().find(|c| c.id == character_id).and_then(
+            |c| {
+                c.skins.iter().find(|s| {
+                    s.id == skin_id
+                        || s.kanmusu_dir
+                            .as_ref()
+                            .map(|d| d.trim() == skin_id)
+                            .unwrap_or(false)
+                })
+            },
+        ) {
+            skin.lines
+                .iter()
+                .map(|l| models::PetRemarkLine {
+                    text: l.text.clone(),
+                    animation: l.animation.clone(),
+                })
+                .collect()
+        } else if let Ok(detail) =
+            crate::kanmusu::lookup_skin_detail_public(data_dir, &character_id, &skin_id)
+        {
+            detail
+                .lines
+                .iter()
+                .map(|l| models::PetRemarkLine {
+                    text: l.text.clone(),
+                    animation: l.animation.clone(),
+                })
+                .collect()
+        } else {
+            return None;
+        }
+    };
+    if lines.is_empty() {
         return None;
     }
     let meta = models::PetAnimationMeta {
-        lines: skin
-            .lines
-            .iter()
-            .map(|l| models::PetRemarkLine {
-                text: l.text.clone(),
-                animation: l.animation.clone(),
-            })
-            .collect(),
+        lines,
         ..Default::default()
     };
     let line = models::pick_remark_line(&meta, None)?;

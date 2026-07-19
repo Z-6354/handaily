@@ -204,20 +204,72 @@ pub fn save_manifest(data_dir: &Path, manifest: &KanmusuManifest) -> Result<(), 
 }
 
 pub fn list_brief(data_dir: &Path) -> Result<Vec<KanmusuCharacterBrief>, String> {
-    let manifest = load_manifest(data_dir)?;
-    Ok(manifest
-        .characters
-        .iter()
-        .map(|c| KanmusuCharacterBrief {
+    // Phase 4: derive from character skin slots with kanmusu_dir (authority).
+    let chars = crate::character::load_manifest(data_dir);
+    let mut out = Vec::new();
+    for c in &chars.characters {
+        let skin_count = c
+            .skins
+            .iter()
+            .filter(|s| {
+                s.kanmusu_dir
+                    .as_ref()
+                    .map(|d| !d.trim().is_empty())
+                    .unwrap_or(false)
+            })
+            .count();
+        if skin_count == 0 {
+            continue;
+        }
+        out.push(KanmusuCharacterBrief {
             id: c.id.clone(),
             name: c.name.clone(),
             description: c.description.clone(),
-            skin_count: c.skins.len(),
-        })
-        .collect())
+            skin_count,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
 }
 
 pub fn get_detail(data_dir: &Path, character_id: &str) -> Result<KanmusuCharacterDetail, String> {
+    // Phase 4: character manifest first.
+    let chars = crate::character::load_manifest(data_dir);
+    if let Some(character) = chars.characters.iter().find(|c| c.id == character_id) {
+        let skins: Vec<KanmusuSkinDetail> = character
+            .skins
+            .iter()
+            .filter_map(|s| {
+                let dir = s.kanmusu_dir.as_ref()?.trim();
+                if dir.is_empty() {
+                    return None;
+                }
+                let km = KanmusuSkin {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    model_dir: dir.to_string(),
+                    lines: s
+                        .lines
+                        .iter()
+                        .map(|l| KanmusuLine {
+                            text: l.text.clone(),
+                            animation: l.animation.clone(),
+                        })
+                        .collect(),
+                };
+                Some(skin_to_detail(data_dir, &km))
+            })
+            .collect();
+        if !skins.is_empty() {
+            return Ok(KanmusuCharacterDetail {
+                id: character.id.clone(),
+                name: character.name.clone(),
+                description: character.description.clone(),
+                skins,
+            });
+        }
+    }
+    // Legacy fallback: kanmusu/manifest.json
     if let Ok(manifest) = load_manifest(data_dir) {
         if let Some(character) = manifest.characters.iter().find(|c| c.id == character_id) {
             return Ok(KanmusuCharacterDetail {
@@ -232,46 +284,7 @@ pub fn get_detail(data_dir: &Path, character_id: &str) -> Result<KanmusuCharacte
             });
         }
     }
-    // Fallback: 统一人物皮肤 manifest（Wiki enrich）
-    let chars = crate::character::load_manifest(data_dir);
-    let character = chars
-        .characters
-        .iter()
-        .find(|c| c.id == character_id)
-        .ok_or_else(|| format!("未找到舰娘角色: {character_id}"))?;
-    let skins: Vec<KanmusuSkinDetail> = character
-        .skins
-        .iter()
-        .filter_map(|s| {
-            let dir = s.kanmusu_dir.as_ref()?.trim();
-            if dir.is_empty() {
-                return None;
-            }
-            let km = KanmusuSkin {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                model_dir: dir.to_string(),
-                lines: s
-                    .lines
-                    .iter()
-                    .map(|l| KanmusuLine {
-                        text: l.text.clone(),
-                        animation: l.animation.clone(),
-                    })
-                    .collect(),
-            };
-            Some(skin_to_detail(data_dir, &km))
-        })
-        .collect();
-    if skins.is_empty() {
-        return Err(format!("未找到舰娘角色: {character_id}"));
-    }
-    Ok(KanmusuCharacterDetail {
-        id: character.id.clone(),
-        name: character.name.clone(),
-        description: character.description.clone(),
-        skins,
-    })
+    Err(format!("未找到舰娘角色: {character_id}"))
 }
 
 fn skin_to_detail(data_dir: &Path, skin: &KanmusuSkin) -> KanmusuSkinDetail {
@@ -385,24 +398,34 @@ pub fn update_skin(
 }
 
 pub fn ensure_seeded(data_dir: &Path) -> Result<(), String> {
-    let manifest = load_manifest(data_dir)?;
-    if manifest.characters.is_empty() {
+    // Phase 4: seed disk from unpacked when no models; bind onto character skins.
+    if !has_any_kanmusu_model_on_disk(data_dir) {
         let _ = sync_from_unpacked(data_dir)?;
     }
+    let _ = crate::character::attach_kanmusu_after_sync(data_dir);
     Ok(())
 }
 
+fn has_any_kanmusu_model_on_disk(data_dir: &Path) -> bool {
+    let root = kanmusu_models_dir(data_dir);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let p = e.path();
+        p.is_dir() && has_moc3(&p)
+    })
+}
+
 pub fn sync_from_unpacked(data_dir: &Path) -> Result<KanmusuSyncResult, String> {
-    manifest_lock::with_lock(|| sync_from_unpacked_inner(data_dir))
+    // Copy only — character bindings updated by attach_kanmusu_after_sync (caller / ensure_seeded).
+    sync_from_unpacked_inner(data_dir)
 }
 
 fn sync_from_unpacked_inner(data_dir: &Path) -> Result<KanmusuSyncResult, String> {
     ensure_dirs(data_dir)?;
     let repo_root = resolve_repo_model_unpacked_root();
-    let mut manifest = load_manifest(data_dir)?;
     let mut synced_slugs = Vec::new();
-    let mut added_characters = 0usize;
-    let mut added_skins = 0usize;
 
     let entries = fs::read_dir(&repo_root).map_err(|e| format!("读取解包目录失败: {e}"))?;
     for entry in entries.flatten() {
@@ -410,52 +433,21 @@ fn sync_from_unpacked_inner(data_dir: &Path) -> Result<KanmusuSyncResult, String
         if !path.is_dir() {
             continue;
         }
-        let slug = entry
-            .file_name()
-            .to_string_lossy()
-            .trim()
-            .to_string();
+        let slug = entry.file_name().to_string_lossy().trim().to_string();
         if slug.is_empty() || !has_moc3(&path) {
             continue;
         }
         copy_model_dir(&path, &kanmusu_model_dir(data_dir, &slug))?;
-        synced_slugs.push(slug.clone());
-        let (char_id, skin_name) = split_slug(&slug);
-        let character = if let Some(idx) = manifest.characters.iter().position(|c| c.id == char_id) {
-            &mut manifest.characters[idx]
-        } else {
-            manifest.characters.push(KanmusuCharacter {
-                id: char_id.clone(),
-                name: char_id.clone(),
-                description: String::new(),
-                skins: Vec::new(),
-            });
-            added_characters += 1;
-            manifest.characters.last_mut().unwrap()
-        };
-        if !character.skins.iter().any(|s| s.id == slug) {
-            character.skins.push(KanmusuSkin {
-                id: slug.clone(),
-                name: skin_name,
-                model_dir: slug,
-                lines: Vec::new(),
-            });
-            added_skins += 1;
-        }
+        synced_slugs.push(slug);
     }
 
-    manifest.characters.sort_by(|a, b| a.id.cmp(&b.id));
-    for c in &mut manifest.characters {
-        c.skins.sort_by(|a, b| a.id.cmp(&b.id));
-    }
-    save_manifest(data_dir, &manifest)?;
-
+    synced_slugs.sort();
     let count = synced_slugs.len();
     Ok(KanmusuSyncResult {
         synced_slugs,
-        added_characters,
-        added_skins,
-        message: format!("已同步 {count} 个 Cubism 模型"),
+        added_characters: 0,
+        added_skins: count,
+        message: format!("已同步 {count} 个 Cubism 模型到磁盘（人物皮肤绑定由后续 attach 完成）"),
     })
 }
 
@@ -579,6 +571,8 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Split `aidang_2` → (`aidang`, `皮肤 2`); used by unit tests and attach heuristics.
+#[cfg_attr(not(test), allow(dead_code))]
 fn split_slug(slug: &str) -> (String, String) {
     let lower = slug.to_lowercase();
     if let Some((base, suffix)) = lower.rsplit_once('_') {
@@ -618,6 +612,40 @@ fn lookup_skin_detail(
     character_id: &str,
     skin_id: &str,
 ) -> Result<KanmusuSkinDetail, String> {
+    // Phase 4: character slot first (skin id or kanmusu_dir match).
+    let chars = crate::character::load_manifest(data_dir);
+    if let Some(character) = chars.characters.iter().find(|c| c.id == character_id) {
+        if let Some(skin) = character.skins.iter().find(|s| {
+            s.id == skin_id
+                || s.kanmusu_dir
+                    .as_ref()
+                    .map(|d| d.trim() == skin_id)
+                    .unwrap_or(false)
+        }) {
+            if let Some(dir) = skin
+                .kanmusu_dir
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                let km = KanmusuSkin {
+                    id: skin.id.clone(),
+                    name: skin.name.clone(),
+                    model_dir: dir.to_string(),
+                    lines: skin
+                        .lines
+                        .iter()
+                        .map(|l| KanmusuLine {
+                            text: l.text.clone(),
+                            animation: l.animation.clone(),
+                        })
+                        .collect(),
+                };
+                return Ok(skin_to_detail(data_dir, &km));
+            }
+        }
+    }
+    // Legacy kanmusu/manifest.json
     if let Ok(manifest) = load_manifest(data_dir) {
         if let Some(character) = manifest.characters.iter().find(|c| c.id == character_id) {
             if let Some(skin) = character.skins.iter().find(|s| s.id == skin_id) {
@@ -625,37 +653,7 @@ fn lookup_skin_detail(
             }
         }
     }
-    let chars = crate::character::load_manifest(data_dir);
-    let character = chars
-        .characters
-        .iter()
-        .find(|c| c.id == character_id)
-        .ok_or_else(|| format!("未找到舰娘角色: {character_id}"))?;
-    let skin = character
-        .skins
-        .iter()
-        .find(|s| s.id == skin_id)
-        .ok_or_else(|| format!("未找到皮肤: {skin_id}"))?;
-    let dir = skin
-        .kanmusu_dir
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| format!("皮肤 {skin_id} 无舰娘目录"))?;
-    let km = KanmusuSkin {
-        id: skin.id.clone(),
-        name: skin.name.clone(),
-        model_dir: dir.to_string(),
-        lines: skin
-            .lines
-            .iter()
-            .map(|l| KanmusuLine {
-                text: l.text.clone(),
-                animation: l.animation.clone(),
-            })
-            .collect(),
-    };
-    Ok(skin_to_detail(data_dir, &km))
+    Err(format!("未找到皮肤: {skin_id}"))
 }
 
 pub fn build_player_load_payload(

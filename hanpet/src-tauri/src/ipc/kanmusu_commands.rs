@@ -104,9 +104,13 @@ pub async fn kanmusu_sync_from_unpacked(
 
 ) -> Result<KanmusuSyncResult, String> {
 
-    let result = kanmusu::sync_from_unpacked(st.data_dir())?;
+    let mut result = kanmusu::sync_from_unpacked(st.data_dir())?;
     // 锁外挂到人物皮肤，避免与 kanmusu sync 嵌套死锁
     let _ = crate::character::attach_kanmusu_after_sync(st.data_dir());
+    result.message = format!(
+        "{}；已更新人物皮肤舰娘绑定",
+        result.message.trim_end_matches('。')
+    );
     Ok(result)
 
 }
