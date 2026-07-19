@@ -4,7 +4,6 @@ import { SettingsSection } from "../components/SettingsSection";
 import { SettingsToggle } from "../components/SettingsToggle";
 import { PetDisplaySettings } from "../components/PetDisplaySettings";
 import { WikiBulkImportSettings } from "../components/WikiBulkImportSettings";
-import { KanmusuSkinSettings } from "../components/KanmusuSkinSettings";
 import { useWikiBulkImportContext } from "../contexts/WikiBulkImportContext";
 import { parseApiError, successFeedback, type SettingsFeedback } from "../lib/apiErrorMessage";
 import { xiaohan } from "../lib/xiaohan";
@@ -128,14 +127,9 @@ export function SettingsPanel() {
           <PetDisplaySettings setFeedback={setSaveError} />
         </SettingsSection>
 
-        <div className="pref-row">
-          <SettingsSection flush title="台词导入" accent>
-            <WikiBulkImportSettings bulk={bulk} setFeedback={setSaveError} />
-          </SettingsSection>
-          <SettingsSection flush title="舰娘皮肤" accent>
-            <KanmusuSkinSettings setFeedback={setSaveError} />
-          </SettingsSection>
-        </div>
+        <SettingsSection flush title="台词导入" accent>
+          <WikiBulkImportSettings bulk={bulk} setFeedback={setSaveError} />
+        </SettingsSection>
 
         <div className="pref-row">
           <SettingsSection flush title="桌宠行为">

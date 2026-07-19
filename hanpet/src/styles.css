@@ -1938,13 +1938,18 @@ body {
 }
 
 .pet-model-grid-loading,
-.pet-model-grid-error {
+.pet-model-grid-error,
+.pet-model-grid-empty {
   grid-column: 1 / -1;
   margin: 0;
   font-size: 12px;
   color: var(--text-muted);
   text-align: center;
   padding: 12px 0;
+}
+
+.pet-model-section .pet-tab-bar--nested {
+  margin-bottom: 10px;
 }
 
 .pet-model-grid-error {

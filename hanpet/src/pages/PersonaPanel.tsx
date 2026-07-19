@@ -241,7 +241,7 @@ export function PersonaPanel({ active = true }: { active?: boolean }) {
   const switchSkin = async (
     characterId: string,
     skinId: string,
-    companion: "auto" | "spine" | "kanmusu" = "auto",
+    companion: "auto" | "spine" | "kanmusu" = "spine",
   ) => {
     if (switchingSkinId) return;
     setSwitchingSkinId(skinId);
@@ -371,7 +371,7 @@ export function PersonaPanel({ active = true }: { active?: boolean }) {
           onSkinSelect={
             characterDetail
               ? (skinId, companion) =>
-                  void switchSkin(characterDetail.id, skinId, companion ?? "auto")
+                  void switchSkin(characterDetail.id, skinId, companion ?? "spine")
               : undefined
           }
           onDeleteSkin={

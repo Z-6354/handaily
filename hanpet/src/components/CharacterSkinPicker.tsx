@@ -1,12 +1,19 @@
-import { useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { SkinImportModal } from "./SkinImportModal";
 import { SkinDeleteModal } from "./SkinDeleteModal";
 import { Pagination } from "./Pagination";
-import { useCharacterSkins } from "../hooks/useCharacterSkins";
+import { SKIN_PAGE_SIZE } from "../hooks/useCharacterSkins";
 import type { SettingsFeedback } from "../lib/apiErrorMessage";
-import { type CharacterSkinInfo } from "../lib/xiaohan";
+import {
+  filterSkinsByKind,
+  readStoredSkinKind,
+  writeStoredSkinKind,
+  type SkinKind,
+} from "../lib/skinKindFilter";
+import { xiaohan, type CharacterSkinInfo } from "../lib/xiaohan";
 
 const BUILTIN_MODEL_IDS = new Set(["chaijun", "edu", "wushiling", "qiye", "tashigan"]);
+const FETCH_LIMIT = 200;
 
 interface Props {
   characterId: string;
@@ -33,6 +40,7 @@ interface Props {
 
 function SkinCard({
   skin,
+  kind,
   isCurrentSkin,
   switching,
   disabled,
@@ -41,6 +49,7 @@ function SkinCard({
   onRequestDelete,
 }: {
   skin: CharacterSkinInfo;
+  kind: SkinKind;
   isCurrentSkin: boolean;
   switching: boolean;
   disabled?: boolean;
@@ -58,18 +67,14 @@ function SkinCard({
       >
         <span className="pet-model-card-name">{skin.name}</span>
         <span className="pet-model-card-badge pet-model-card-badge--incomplete">
-          小人未就绪
+          {kind === "kanmusu" ? "桌宠未就绪" : "小人未就绪"}
         </span>
-        {skin.kanmusu_dir ? (
-          <span className="pet-model-card-badge pet-model-card-badge--muted">有舰娘资源</span>
-        ) : null}
       </div>
     );
   }
 
   const highlight = switching;
   const equipped = isCurrentSkin && !switching;
-  const hasKanmusu = Boolean(skin.kanmusu_ready);
 
   return (
     <div
@@ -89,13 +94,12 @@ function SkinCard({
             <span className="pet-model-card-en"> · {skin.english_name}</span>
           ) : null}
         </span>
-        <span className="pet-model-card-badge">
-          {skin.model_name && skin.model_name !== skin.model_id
-            ? skin.model_name
-            : "小人"}
-        </span>
-        {hasKanmusu ? (
-          <span className="pet-model-card-badge pet-model-card-badge--muted">舰娘</span>
+        {kind === "spine" ? (
+          <span className="pet-model-card-badge">
+            {skin.model_name && skin.model_name !== skin.model_id
+              ? skin.model_name
+              : "小人"}
+          </span>
         ) : null}
         {switching && <span className="pet-model-card-spinner" aria-hidden />}
       </button>
@@ -166,22 +170,52 @@ export function CharacterSkinPicker({
   } | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [page, setPage] = useState(1);
-  const { skins, total, totalPages, loading, error, refresh } = useCharacterSkins(
-    characterId,
-    page
-  );
-  const active = skins.find((s) => s.active) ?? skins.find((s) => s.id === activeId);
-  const activeDisplayName =
-    active?.name ?? activeSkinName ?? (activeId ? "当前皮肤" : "未选择");
-  const allowDelete = canDeleteSkin && total > 1 && Boolean(onDeleteSkin);
+  const [kind, setKind] = useState<SkinKind>(() => readStoredSkinKind());
+  const [allSkins, setAllSkins] = useState<CharacterSkinInfo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadSkins = useCallback(async () => {
+    if (!characterId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await xiaohan.charactersSkinsPage(characterId, 0, FETCH_LIMIT);
+      setAllSkins(result.items);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setAllSkins([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [characterId]);
 
   useEffect(() => {
     setPage(1);
-  }, [characterId, refreshKey]);
+    void loadSkins();
+  }, [characterId, refreshKey, loadSkins]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [kind]);
+
+  const filtered = useMemo(() => filterSkinsByKind(allSkins, kind), [allSkins, kind]);
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / SKIN_PAGE_SIZE));
+  const skins = useMemo(() => {
+    const start = (Math.max(1, page) - 1) * SKIN_PAGE_SIZE;
+    return filtered.slice(start, start + SKIN_PAGE_SIZE);
+  }, [filtered, page]);
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
   }, [page, totalPages]);
+
+  const active =
+    allSkins.find((s) => s.active) ?? allSkins.find((s) => s.id === activeId);
+  const activeDisplayName =
+    active?.name ?? activeSkinName ?? (activeId ? "当前皮肤" : "未选择");
+  const allowDelete = canDeleteSkin && allSkins.length > 1 && Boolean(onDeleteSkin);
 
   useEffect(() => {
     if (!open) return;
@@ -199,8 +233,13 @@ export function CharacterSkinPicker({
     };
   }, [open]);
 
+  const selectKind = (next: SkinKind) => {
+    setKind(next);
+    writeStoredSkinKind(next);
+  };
+
   const pick = (id: string) => {
-    const target = skins.find((s) => s.id === id);
+    const target = allSkins.find((s) => s.id === id);
     if (!target?.model_ready) return;
     if (switchingId || disabled) return;
     if (characterActive && id === activeId) return;
@@ -210,6 +249,28 @@ export function CharacterSkinPicker({
 
   const importDisabled = disabled || Boolean(switchingId);
 
+  const kindTabs = layout === "grid" && (
+    <div className="pet-tab-bar pet-tab-bar--nested" role="tablist" aria-label="皮肤类型">
+      {(
+        [
+          { id: "spine" as const, label: "桌宠" },
+          { id: "kanmusu" as const, label: "舰娘" },
+        ] as const
+      ).map((tab) => (
+        <button
+          key={tab.id}
+          type="button"
+          role="tab"
+          aria-selected={kind === tab.id}
+          className={`pet-tab${kind === tab.id ? " is-active" : ""}`}
+          onClick={() => selectKind(tab.id)}
+        >
+          <span className="pet-tab-label">{tab.label}</span>
+        </button>
+      ))}
+    </div>
+  );
+
   const cards = (
     <>
       <div className="pet-model-grid" role="listbox" id={listId} aria-label="人物皮肤">
@@ -217,10 +278,18 @@ export function CharacterSkinPicker({
           <p className="pet-model-grid-loading">加载皮肤列表…</p>
         )}
         {error && skins.length === 0 && <p className="pet-model-grid-error">{error}</p>}
+        {!loading && !error && total === 0 && (
+          <p className="pet-model-grid-empty">
+            {kind === "kanmusu"
+              ? "当前角色暂无舰娘皮肤资源"
+              : "当前角色暂无桌宠皮肤"}
+          </p>
+        )}
         {skins.map((s) => (
           <SkinCard
             key={s.id}
             skin={s}
+            kind={kind}
             isCurrentSkin={s.id === activeId}
             switching={s.id === switchingId}
             disabled={disabled || Boolean(switchingId)}
@@ -238,7 +307,7 @@ export function CharacterSkinPicker({
             }
           />
         ))}
-        {canImport && layout === "grid" && (
+        {canImport && layout === "grid" && kind === "spine" && (
           <SkinAddCard disabled={importDisabled} onClick={() => setImportOpen(true)} />
         )}
       </div>
@@ -260,7 +329,7 @@ export function CharacterSkinPicker({
       modelName={activeModelName}
       onClose={() => setImportOpen(false)}
       onImported={async () => {
-        await refresh();
+        await loadSkins();
         await onImportComplete?.();
       }}
       setFeedback={setFeedback}
@@ -282,6 +351,7 @@ export function CharacterSkinPicker({
         try {
           await onDeleteSkin(deleteTarget.id);
           setDeleteTarget(null);
+          await loadSkins();
         } finally {
           setDeleting(false);
         }
@@ -334,6 +404,7 @@ export function CharacterSkinPicker({
           <span className="pet-model-section-hint">正在切换模型…</span>
         )}
       </div>
+      {kindTabs}
       {cards}
       {importModal}
       {deleteModal}
