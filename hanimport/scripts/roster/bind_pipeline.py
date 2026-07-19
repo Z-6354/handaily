@@ -25,6 +25,12 @@ def _pull(mod) -> None:
             continue
         g[k] = v
 
+import roster.folder_rules as _folder_rules
+_pull(_folder_rules)
+
+import roster.aliases as _aliases
+_pull(_aliases)
+
 import roster.ids as _ids
 _pull(_ids)
 
